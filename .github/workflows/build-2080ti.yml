@@ -34,6 +34,7 @@ jobs:
             case "$file" in
               src/models/qwen3_5/program/planning/startup.cpp) continue ;;
               src/core/pdl.cuh) continue ;;
+              src/ops/kernel/sampling_device.cuh) continue ;;
             esac
             mkdir -p "backends/ninfer/$(dirname "$file")"
             cp "/tmp/ninfer-turing/$file" "backends/ninfer/$file"
