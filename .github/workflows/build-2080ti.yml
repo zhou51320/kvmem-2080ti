@@ -40,6 +40,9 @@ jobs:
           done
           sed -E -i 's/\^\(80\|86\|89\|120a\)\$/^(75|80|86|89|120a)$/' backends/ninfer/CMakeLists.txt
           sed -i '/^project(ninfer LANGUAGES C CXX CUDA)$/a add_compile_definitions(NINFER_SM75=1)' backends/ninfer/CMakeLists.txt
+          grep -q 'kLog2E' backends/ninfer/src/ops/common/math.h || \
+            sed -i '/namespace ninfer::ops {/a inline constexpr float kLog2E = 1.4426950408889634F;' \
+              backends/ninfer/src/ops/common/math.h
       - name: Configure
         run: |
           cmake -S backends/ninfer -B build/ninfer -G Ninja \
