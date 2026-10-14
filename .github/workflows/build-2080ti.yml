@@ -1,0 +1,66 @@
+name: Build KVMem NInfer for RTX 2080 Ti
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.2.0-devel-ubuntu24.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates python3 python3-pip ninja-build \
+            pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libcurl4-openssl-dev
+          python3 -m pip install --ignore-installed 'cmake>=3.28,<4'
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Trust checkout directory in container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Prepare official KVMem/NInfer baseline
+        run: python3 scripts/prepare-backends.py --backend ninfer
+      - name: Overlay RTX 2080 Ti Turing kernels
+        run: |
+          git clone --filter=blob:none https://github.com/mr-september/ninfer-2080ti-22g.git /tmp/ninfer-turing
+          git -C /tmp/ninfer-turing checkout 8bc916f0
+          git -C /tmp/ninfer-turing diff-tree --no-commit-id --name-only -r 8bc916f0 -- src | while read -r file; do
+            case "$file" in
+              src/models/qwen3_5/program/planning/startup.cpp) continue ;;
+            esac
+            mkdir -p "backends/ninfer/$(dirname "$file")"
+            cp "/tmp/ninfer-turing/$file" "backends/ninfer/$file"
+          done
+          sed -E -i 's/\^\(80\|86\|89\|120a\)\$/^(75|80|86|89|120a)$/' backends/ninfer/CMakeLists.txt
+          sed -i '/^project(ninfer LANGUAGES C CXX CUDA)$/a add_compile_definitions(NINFER_SM75=1)' backends/ninfer/CMakeLists.txt
+      - name: Configure
+        run: |
+          cmake -S backends/ninfer -B build/ninfer -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=75 \
+            -DCMAKE_CUDA_FLAGS=-DNINFER_SM75 \
+            -DCMAKE_CXX_FLAGS=-DNINFER_SM75 \
+            -DNINFER_KVMEM_SOURCE_DIR="$GITHUB_WORKSPACE/kvmem" \
+            -DNINFER_BUILD_APPS=ON \
+            -DNINFER_BUILD_BENCHMARKS=OFF
+      - name: Build ninfer-serve
+        run: cmake --build build/ninfer --parallel 2 --target ninfer-serve
+      - name: Verify and package artifact
+        run: |
+          test -x build/ninfer/apps/serve/ninfer-serve
+          build/ninfer/apps/serve/ninfer-serve --help > build/ninfer/help.txt
+          grep -q -- '--kvmem-action-lrfu' build/ninfer/help.txt || grep -q -- '--kvmem-lrfu' build/ninfer/help.txt
+          cp build/ninfer/apps/serve/ninfer-serve build/ninfer/apps/serve/kvmem-2080ti
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kvmem-2080ti-sm75-cuda13
+          path: |
+            build/ninfer/apps/serve/ninfer-serve
+            build/ninfer/apps/serve/kvmem-2080ti
+            build/ninfer/help.txt
