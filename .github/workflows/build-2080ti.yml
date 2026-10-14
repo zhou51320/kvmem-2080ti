@@ -51,6 +51,7 @@ jobs:
             build/llama/help.txt
 
   build:
+    needs: build-llama
     runs-on: ubuntu-24.04
     container: nvidia/cuda:13.2.0-devel-ubuntu24.04
     env:
