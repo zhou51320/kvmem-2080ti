@@ -17,7 +17,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates python3 python3-pip ninja-build \
-            pkg-config libcurl4-openssl-dev
+            pkg-config libcurl4-openssl-dev patchelf
           python3 -m pip install --break-system-packages --ignore-installed 'cmake>=3.28,<4'
       - uses: actions/checkout@v4
         with:
@@ -45,11 +45,25 @@ jobs:
           readelf -d build/llama/bin/llama-kvmem-server | grep -E 'libcuda|cudart|cublas|curl' || true
           strings build/llama/bin/llama-kvmem-server | grep -qi kvmem
           printf 'CUDA-linked artifact verified; runtime help check requires NVIDIA driver.\n'
+      - name: Package llama artifact and shared libraries
+        run: |
+          rm -rf dist/llama
+          mkdir -p dist/llama/lib
+          cp build/llama/bin/llama-kvmem-server dist/llama/
+          patchelf --set-rpath '$ORIGIN:$ORIGIN/lib' dist/llama/llama-kvmem-server
+          ldd dist/llama/llama-kvmem-server | awk '/=> \// {print $3} /^\// {print $1}' | sort -u | while read -r lib; do
+            [ -f "$lib" ] || continue
+            case "$(basename "$lib")" in
+              libcuda.so*) continue ;;
+              libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|ld-linux*.so*|libgcc_s.so*|libstdc++.so*) continue ;;
+            esac
+            cp -L "$lib" dist/llama/lib/
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: kvmem-2080ti-llama-sm75-cuda13
           path: |
-            build/llama/bin/llama-kvmem-server
+            dist/llama/**
 
   build:
     needs: build-llama
@@ -62,7 +76,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates python3 python3-pip ninja-build \
-            pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libcurl4-openssl-dev
+            pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libcurl4-openssl-dev patchelf
           python3 -m pip install --break-system-packages --ignore-installed 'cmake>=3.28,<4'
       - uses: actions/checkout@v4
         with:
@@ -104,13 +118,22 @@ jobs:
       - name: Verify and package artifact
         run: |
           test -x build/ninfer/apps/serve/ninfer-serve
-          build/ninfer/apps/serve/ninfer-serve --help > build/ninfer/help.txt
-          grep -q -- '--kvmem-action-lrfu' build/ninfer/help.txt || grep -q -- '--kvmem-lrfu' build/ninfer/help.txt
-          cp build/ninfer/apps/serve/ninfer-serve build/ninfer/apps/serve/kvmem-2080ti
+          readelf -h build/ninfer/apps/serve/ninfer-serve
+          strings build/ninfer/apps/serve/ninfer-serve | grep -qi kvmem
+          rm -rf dist/ninfer
+          mkdir -p dist/ninfer/lib
+          cp build/ninfer/apps/serve/ninfer-serve dist/ninfer/kvmem-2080ti
+          patchelf --set-rpath '$ORIGIN:$ORIGIN/lib' dist/ninfer/kvmem-2080ti
+          ldd dist/ninfer/kvmem-2080ti | awk '/=> \// {print $3} /^\// {print $1}' | sort -u | while read -r lib; do
+            [ -f "$lib" ] || continue
+            case "$(basename "$lib")" in
+              libcuda.so*) continue ;;
+              libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|ld-linux*.so*|libgcc_s.so*|libstdc++.so*) continue ;;
+            esac
+            cp -L "$lib" dist/ninfer/lib/
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: kvmem-2080ti-sm75-cuda13
           path: |
-            build/ninfer/apps/serve/ninfer-serve
-            build/ninfer/apps/serve/kvmem-2080ti
-            build/ninfer/help.txt
+            dist/ninfer/**
