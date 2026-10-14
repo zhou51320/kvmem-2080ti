@@ -18,7 +18,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates python3 python3-pip ninja-build \
             pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libcurl4-openssl-dev
-          python3 -m pip install --ignore-installed 'cmake>=3.28,<4'
+          python3 -m pip install --break-system-packages --ignore-installed 'cmake>=3.28,<4'
       - uses: actions/checkout@v4
         with:
           submodules: false
