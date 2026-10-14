@@ -33,6 +33,7 @@ jobs:
           git -C /tmp/ninfer-turing diff-tree --no-commit-id --name-only -r 8bc916f0 -- src | while read -r file; do
             case "$file" in
               src/models/qwen3_5/program/planning/startup.cpp) continue ;;
+              src/core/pdl.cuh) continue ;;
             esac
             mkdir -p "backends/ninfer/$(dirname "$file")"
             cp "/tmp/ninfer-turing/$file" "backends/ninfer/$file"
