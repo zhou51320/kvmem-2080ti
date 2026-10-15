@@ -31,6 +31,9 @@ jobs:
           cmake -S . -B build/llama -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_ARCHITECTURES=75 \
+            -DCMAKE_C_FLAGS='-march=x86-64 -mtune=generic' \
+            -DCMAKE_CXX_FLAGS='-march=x86-64 -mtune=generic' \
+            -DCMAKE_CUDA_FLAGS='-Xcompiler=-march=x86-64 -Xcompiler=-mtune=generic' \
             -DGGML_CUDA=ON \
             -DGGML_CUDA_FA_QUANTS=all \
             -DBUILD_SHARED_LIBS=OFF \
