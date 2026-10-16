@@ -1,8 +1,6 @@
 name: Build KVMem NInfer for RTX 2080 Ti
 
 on:
-  push:
-    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -88,43 +86,16 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Prepare official KVMem/NInfer baseline
         run: python3 scripts/prepare-backends.py --backend ninfer
-      - name: Overlay RTX 2080 Ti Turing kernels
+      - name: Confirm official RTX 20 support
         run: |
-          git clone --filter=blob:none https://github.com/mr-september/ninfer-2080ti-22g.git /tmp/ninfer-turing
-          git -C /tmp/ninfer-turing checkout 8bc916f0
-          git -C /tmp/ninfer-turing diff-tree --no-commit-id --name-only -r 8bc916f0 -- src | while read -r file; do
-            case "$file" in
-              src/models/qwen3_5/program/planning/startup.cpp) continue ;;
-              src/core/pdl.cuh) continue ;;
-              src/ops/kernel/sampling_device.cuh) continue ;;
-            esac
-            mkdir -p "backends/ninfer/$(dirname "$file")"
-            cp "/tmp/ninfer-turing/$file" "backends/ninfer/$file"
-          done
-          sed -E -i 's/\^\(80\|86\|89\|120a\)\$/^(75|80|86|89|120a)$/' backends/ninfer/CMakeLists.txt
-          sed -i '/^project(ninfer LANGUAGES C CXX CUDA)$/a add_compile_definitions(NINFER_SM75=1)' backends/ninfer/CMakeLists.txt
-          # CUDA redux instructions are unavailable on sm_75. Keep the official
-          # sampling implementation/API, but replace only its max reduction with
-          # the Turing shuffle implementation.
-          if grep -q '__reduce_max_sync' backends/ninfer/src/ops/kernel/sampling_device.cuh; then
-            cp /tmp/ninfer-turing/src/ops/common/warp.cuh backends/ninfer/src/ops/common/warp.cuh
-            sed -i '1a #include "ops/common/warp.cuh"' backends/ninfer/src/ops/kernel/sampling_device.cuh
-            sed -i \
-              -e 's/__reduce_max_sync(kMergeMask, high)/warp_reduce_max_u32<kSamplingTileWarps>(kMergeMask, high)/g' \
-              -e 's/__reduce_max_sync(kMergeMask, low)/warp_reduce_max_u32<kSamplingTileWarps>(kMergeMask, low)/g' \
-              -e 's/__reduce_max_sync(kMergeMask, key)/warp_reduce_max_u32<kSamplingTileWarps>(kMergeMask, key)/g' \
-              backends/ninfer/src/ops/kernel/sampling_device.cuh
-          fi
-          grep -q 'kLog2E' backends/ninfer/src/ops/common/math.h || \
-            sed -i '/namespace ninfer::ops {/a inline constexpr float kLog2E = 1.4426950408889634F;' \
-              backends/ninfer/src/ops/common/math.h
+          grep -q '70|75|80|86|89' backends/ninfer/CMakeLists.txt
       - name: Configure
         run: |
           cmake -S backends/ninfer -B build/ninfer -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CUDA_ARCHITECTURES=75 \
-            -DCMAKE_CUDA_FLAGS=-DNINFER_SM75 \
-            -DCMAKE_CXX_FLAGS=-DNINFER_SM75 \
+            -DCMAKE_CUDA_FLAGS='-Xcompiler=-march=x86-64 -Xcompiler=-mtune=generic' \
+            -DCMAKE_CXX_FLAGS='-march=x86-64 -mtune=generic' \
             -DNINFER_KVMEM_SOURCE_DIR="$GITHUB_WORKSPACE/kvmem" \
             -DNINFER_BUILD_APPS=ON \
             -DNINFER_BUILD_BENCHMARKS=OFF
