@@ -86,6 +86,10 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Prepare official KVMem/NInfer baseline
         run: python3 scripts/prepare-backends.py --backend ninfer
+      - name: Enable official sm75 compatibility tier
+        run: |
+          sed -E -i 's/\^\(80\|86\|89\|120a\)\$/^(70|75|80|86|89|120a)$/' backends/ninfer/CMakeLists.txt
+          sed -i '/^project(ninfer LANGUAGES C CXX CUDA)$/a add_compile_definitions(NINFER_SM75=1)' backends/ninfer/CMakeLists.txt
       - name: Confirm official RTX 20 support
         run: |
           grep -Eq '70|75|80|86|89' backends/ninfer/CMakeLists.txt
