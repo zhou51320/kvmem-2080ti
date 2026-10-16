@@ -88,13 +88,7 @@ jobs:
         run: python3 scripts/prepare-backends.py --backend ninfer
       - name: Enable official sm75 compatibility tier
         run: |
-          sed -E -i 's/\^\(80\|86\|89\|120a\)\$/^(70|75|80|86|89|120a)$/' backends/ninfer/CMakeLists.txt
-          sed -i '/^project(ninfer LANGUAGES C CXX CUDA)$/a add_compile_definitions(NINFER_SM75=1)' backends/ninfer/CMakeLists.txt
-          sed -i '1a #include "ops/common/pre_sm80.cuh"' backends/ninfer/src/ops/kernel/sampling_device.cuh
-          sed -i 's/__reduce_max_sync(mask, value)/ops::pre_sm80::reduce_max<Width>(mask, value)/g' \
-            backends/ninfer/src/ops/kernel/sampling_device.cuh
-          sed -i 's/__reduce_max_sync(kMergeMask, /ops::pre_sm80::reduce_max<kSamplingTileWarps>(kMergeMask, /g' \
-            backends/ninfer/src/ops/kernel/sampling_device.cuh
+          python3 scripts/patch-sm75-ninfer.py
       - name: Confirm official RTX 20 support
         run: |
           grep -Eq '70|75|80|86|89' backends/ninfer/CMakeLists.txt
@@ -109,7 +103,7 @@ jobs:
             -DNINFER_BUILD_APPS=ON \
             -DNINFER_BUILD_BENCHMARKS=OFF
       - name: Build ninfer-serve
-        run: cmake --build build/ninfer --parallel 2 --target ninfer-serve
+        run: cmake --build build/ninfer --parallel 2 --target ninfer-serve -- -k 0
       - name: Verify and package artifact
         run: |
           test -x build/ninfer/apps/serve/ninfer-serve
