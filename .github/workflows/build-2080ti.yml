@@ -88,7 +88,7 @@ jobs:
         run: python3 scripts/prepare-backends.py --backend ninfer
       - name: Confirm official RTX 20 support
         run: |
-          grep -q '70|75|80|86|89' backends/ninfer/CMakeLists.txt
+          grep -Eq '70|75|80|86|89' backends/ninfer/CMakeLists.txt
       - name: Configure
         run: |
           cmake -S backends/ninfer -B build/ninfer -G Ninja \
