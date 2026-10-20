@@ -1,5 +1,8 @@
 # ninfer 视觉并发上限调整（2026-10-06）
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 KVMem 的 Engine、服务端参数检查及 Windows 统一启动入口现已允许 1–8 条活动文本或 resident/CPU 图片请求，可混合图文。并发默认值仍为 1；`-Concurrency 8` 或 `--max-concurrency 8` 选择八路。启动脚本默认每图视觉上限由 256 改为 1024 merged tokens。
 
 本报告的多路验收关闭 ngram；统一启动入口的 `-NgramDrafts` 默认是 0。其后的 ngram、九种 KV、快速 prefill 和多卡见 [多后端运行](multi-backend.md)。本报告自身不放行冷磁盘、视频、overlay、并发 prefill 或快速图片 prefill。CPU 图片编码沿用原生串行编码器。当时的 ngram 和五种 KV 图片记录见 [ngram并发补测](ngram-concurrency-validation-20261006.md) 和 [全部KV图片ngram补测](vision-ngram-all-kv-validation-20261006.md)。
@@ -16,7 +19,7 @@ KVMem 的 Engine、服务端参数检查及 Windows 统一启动入口现已允�
 
 ## 实图验证
 
-用户已授权关闭原服务进行测试。原两实例的参数保存在 `original-services.json`；测试使用 RTX 5060 Ti（`GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`）及既有 Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp 制品。以下均为双 INT8、device profile off、8K 逻辑上下文、prefill128、R128、ngram0 和 FP32 GDN；Host H 是全局预算，B 是每路预算。所有搬运字节检查保持启用。
+用户已授权关闭原服务进行测试。原两实例的参数保存在 `original-services.json`；测试使用 RTX 5060 Ti（`GPU-B`）及既有 Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp 制品。以下均为双 INT8、device profile off、8K 逻辑上下文、prefill128、R128、ngram0 和 FP32 GDN；Host H 是全局预算，B 是每路预算。所有搬运字节检查保持启用。
 
 | 入口与配置 | 每图实际 tokens | 每路 B / 全局 H | 结果 |
 | --- | ---: | --- | --- |

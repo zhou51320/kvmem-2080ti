@@ -1,5 +1,6 @@
+# Device identifiers and private paths anonymized; measurements unchanged.
 # v0.7.0 quality excerpts
-# 0.8B: RTX 5050 (UUID GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29)
+# 0.8B: RTX 5050 (UUID GPU-A)
 # 2026-09-06  CUDA_DEVICE_ORDER=PCI_BUS_ID  --kv-dtype q8_0 (default)
 # GPU stage-in: packed q8 H2D → dequant → orig-pos RoPE → FWHT → q8
 

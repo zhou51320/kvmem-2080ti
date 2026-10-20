@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama.h"
+#include "kvmem/cli_options.h"
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -60,18 +61,14 @@ inline int kvmem_cli_gpu_layers(const char * option, const char * value) {
     return kvmem_cli_int(option, value);
 }
 
-struct kvmem_server_options {
+struct kvmem_server_options : kvmem::CliOptions {
     int parallel = 1;
-    int sink_tokens = 0; // Zero keeps one block; positive values round down to whole blocks.
     // Live host KV stores, time-multiplexed on one GPU working set. One
     // reproduces the single-store server, where a different conversation
     // discards the previous one.
     int conversations = 1;
+    bool legacy_conversations = false;
     uint64_t conversation_bytes = 0; // Accounted host store bytes; zero = count cap only.
-    uint64_t session_disk_bytes = 0;
-    std::string session_cache_dir;
-    uint64_t payload_host_bytes = 0, payload_disk_bytes = 0;
-    std::string payload_disk_dir;
     int verbosity = 3; // Same default and levels as llama-server.
     int trace = -1; // -1 inherits KVMEM_TRACE; CLI overrides only after parsing.
     int threads = -1;
@@ -86,6 +83,7 @@ struct kvmem_server_options {
     int threads_http = -1;
     bool threads_http_set = false;
     bool list_devices = false;
+    bool metrics = false;
     std::string device_names;
     int main_gpu = 0;
     bool main_gpu_set = false;
@@ -162,26 +160,16 @@ struct kvmem_server_options {
 
     template<typename Need>
     bool parse(const std::string & arg, const Need & need) {
-        if (arg == "--kvmem-host-mib" || arg == "--kvmem-disk-mib") {
-            const auto mib = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
-            (arg == "--kvmem-host-mib" ? payload_host_bytes : payload_disk_bytes) = uint64_t(mib) << 20;
-        } else if (arg == "--kvmem-disk-path") {
-            payload_disk_dir = need(arg.c_str());
-            if (payload_disk_dir.empty()) throw std::invalid_argument("KVMem spill directory is empty");
-        } else if (arg == "--kvmem-sink-tokens") {
-            sink_tokens = kvmem_cli_int(arg.c_str(), need(arg.c_str()));
+        if (kvmem::CliOptions::parse(arg, need)) return true;
+        if (arg == "--metrics") {
+            metrics = true;
         } else if (arg == "--kvmem-conversations") {
             conversations = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
+            legacy_conversations = true;
         } else if (arg == "--kvmem-conversations-gb" || arg == "--kvmem-session-ram-gb") {
             const double gb = kvmem_cli_real(arg.c_str(), need(arg.c_str()), 0, 1048576);
             conversation_bytes = gb <= 0.0 ? 0
                 : static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
-        } else if (arg == "--kvmem-session-nvme-gb") {
-            const double gb = kvmem_cli_real(arg.c_str(), need(arg.c_str()), 0, 1048576);
-            session_disk_bytes = static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
-        } else if (arg == "--kvmem-session-cache-dir") {
-            session_cache_dir = need(arg.c_str());
-            if (session_cache_dir.empty()) throw std::invalid_argument("session cache directory is empty");
         } else if (arg == "--kvmem-trace" || arg == "--no-kvmem-trace") {
             trace = arg == "--kvmem-trace" ? 1 : 0;
         } else if (arg == "-lv" || arg == "--verbosity" || arg == "--log-verbosity") {
@@ -231,7 +219,7 @@ struct kvmem_server_options {
         } else if (arg == "--api-key-file") {
             add_key_file(need(arg.c_str()));
         } else if (arg == "-np" || arg == "--parallel") {
-            parallel = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1, 4);
+            parallel = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1, 8);
         } else if (arg == "--mmap" || arg == "--no-mmap") {
             load_mode = arg == "--mmap" ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE;
         } else if (arg == "--mlock") {

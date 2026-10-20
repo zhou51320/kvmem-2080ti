@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-CU13="${CU13:-/home/leye/kvmem_qw3/.cu13-env}"
-if [[ -x "$CU13/bin/nvcc" ]]; then
+CU13="${CU13:-${CUDA_HOME:-${CUDA_PATH:-}}}"
+if [[ -n "$CU13" && -x "$CU13/bin/nvcc" ]]; then
     export PATH="$CU13/bin:${PATH:-}"
     export LD_LIBRARY_PATH="$CU13/lib:${LD_LIBRARY_PATH:-}"
     export CUDA_HOME="$CU13"
@@ -34,5 +34,5 @@ TYPE="${CMAKE_BUILD_TYPE:-Release}"
     -DLLAMA_KVMEM=ON \
     -DLLAMA_KVMEM_ROOT="$ROOT"
 
-"$CMAKE" --build "$BUILD" -j"${NPROC:-$(nproc)}"
+"$CMAKE" --build "$BUILD" --parallel "${NPROC:-8}"
 echo "binaries under $BUILD/bin"

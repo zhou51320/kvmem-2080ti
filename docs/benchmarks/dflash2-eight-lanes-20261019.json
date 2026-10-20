@@ -1,0 +1,279 @@
+{
+  "date": "2026-10-19",
+  "purpose": "configuration bound separated from per-model memory capacity; no throughput benchmark",
+  "base": "bad879ae",
+  "gpu_model": "RTX 5050 Laptop",
+  "gpu_uuid": "GPU-A",
+  "configured_limit": {
+    "llamacpp": 8,
+    "ninfer_dflash2": 8,
+    "physical_target_devices": 1
+  },
+  "llamacpp": {
+    "scope": "0.8B Q8_0 target + untrained DFlash2, semantic secret isolation and state/protocol",
+    "pass": true,
+    "peak_active": 8,
+    "request_records": 25,
+    "checks": [
+      {
+        "name": "all requested slots exposed",
+        "pass": true
+      },
+      {
+        "name": "DFlash2 active",
+        "pass": true
+      },
+      {
+        "name": "common/native drafted_tokens",
+        "pass": true
+      },
+      {
+        "name": "common/native accepted_tokens",
+        "pass": true
+      },
+      {
+        "name": "common/native rounds",
+        "pass": true
+      },
+      {
+        "name": "common/native fallback_steps",
+        "pass": true
+      },
+      {
+        "name": "native DFlash2 label",
+        "pass": true
+      },
+      {
+        "name": "native Prometheus retained",
+        "pass": true
+      },
+      {
+        "name": "isolated secret oracle",
+        "pass": true
+      },
+      {
+        "name": "requested requests really overlap",
+        "pass": true
+      },
+      {
+        "name": "concurrent secret oracle",
+        "pass": true
+      },
+      {
+        "name": "synthetic rejection output equals isolated",
+        "pass": true
+      },
+      {
+        "name": "sustained decode",
+        "pass": true
+      },
+      {
+        "name": "history remains isolated",
+        "pass": true
+      },
+      {
+        "name": "history reuse observed",
+        "pass": true
+      },
+      {
+        "name": "cancel after an output token",
+        "pass": true
+      },
+      {
+        "name": "request after cancellation",
+        "pass": true
+      },
+      {
+        "name": "native verification counters",
+        "pass": true
+      },
+      {
+        "name": "fixture rejection path",
+        "pass": true
+      },
+      {
+        "name": "no native state or CUDA failure",
+        "pass": true
+      }
+    ],
+    "follow_cache_hits": [
+      534,
+      533,
+      534,
+      534,
+      533,
+      533,
+      535,
+      534
+    ],
+    "statistics": {
+      "acceptance_rate": 0.0,
+      "accepted_tokens": 0,
+      "drafted_tokens": 5175,
+      "fallback_steps": 0,
+      "generated_tokens": 1052,
+      "requests": 26,
+      "rounds": 1063,
+      "scope": "completed_requests"
+    }
+  },
+  "llamacpp_draft_ownership": {
+    "weight_owners": 1,
+    "weight_reuses": 7,
+    "distinct_contexts": 8
+  },
+  "ninfer": {
+    "scope": "six-layer/retargeted-head execution fixture; state/protocol only, no natural-language quality claim",
+    "pass": true,
+    "peak_active": 8,
+    "request_records": 25,
+    "checks": [
+      {
+        "name": "all requested slots exposed",
+        "pass": true
+      },
+      {
+        "name": "DFlash2 active",
+        "pass": true
+      },
+      {
+        "name": "common/native drafted_tokens",
+        "pass": true
+      },
+      {
+        "name": "common/native accepted_tokens",
+        "pass": true
+      },
+      {
+        "name": "common/native rounds",
+        "pass": true
+      },
+      {
+        "name": "common/native fallback_steps",
+        "pass": true
+      },
+      {
+        "name": "native DFlash2 label",
+        "pass": true
+      },
+      {
+        "name": "native Prometheus retained",
+        "pass": true
+      },
+      {
+        "name": "isolated output budget",
+        "pass": true
+      },
+      {
+        "name": "requested requests really overlap",
+        "pass": true
+      },
+      {
+        "name": "concurrent output budget",
+        "pass": true
+      },
+      {
+        "name": "sustained decode",
+        "pass": true
+      },
+      {
+        "name": "history output budget",
+        "pass": true
+      },
+      {
+        "name": "history reuse observed",
+        "pass": true
+      },
+      {
+        "name": "cancel after an output token",
+        "pass": true
+      },
+      {
+        "name": "request after cancellation",
+        "pass": true
+      },
+      {
+        "name": "native verification counters",
+        "pass": true
+      },
+      {
+        "name": "no native state or CUDA failure",
+        "pass": true
+      }
+    ],
+    "follow_cache_hits": [
+      63,
+      62,
+      63,
+      63,
+      62,
+      62,
+      64,
+      63
+    ],
+    "statistics": {
+      "acceptance_rate": 0.00032310177705977385,
+      "accepted_tokens": 5,
+      "drafted_tokens": 15475,
+      "fallback_steps": 25,
+      "generated_tokens": 3200,
+      "requests": 25,
+      "rounds": 3145,
+      "scope": "completed_requests"
+    }
+  },
+  "ninfer_fixture": {
+    "text_layers": 6,
+    "retargeted_taps": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "weight_bytes_preserved": true,
+    "trained_pair": false,
+    "bytes": 4129588992
+  },
+  "unresolved_ninfer_identity_check": {
+    "pass": false,
+    "exact_matches": 7,
+    "total": 8,
+    "ordinary_control_exact_matches": 8,
+    "different_request_index": 2,
+    "isolated_output": "space, period, 126 spaces",
+    "concurrent_output": "128 spaces",
+    "isolated_matches_ordinary": true,
+    "cause": "unconfirmed; no numerical or state-corruption attribution",
+    "disposition": "retained as an observation from an execution-only fixture; user chose output-reasonableness review rather than exact textual identity; not a semantic-quality pass"
+  },
+  "host_checks": [
+    "37 console tests",
+    "7 child-argv tests",
+    "PowerShell backend launcher suite",
+    "browser launcher suite",
+    "native llama options and eight-lane FIFO/lease test",
+    "NInfer serving options/schema/metrics",
+    "both backend patch/tree checks"
+  ],
+  "native_math_changed": false,
+  "unqualified": [
+    "full trained 27B C8 semantic quality and performance",
+    "physical multi-GPU DFlash2",
+    "C8 vision/ngram combination matrix"
+  ],
+  "prior_capacity_failure": "27B all-GPU C4 on tested 16 GB card remains a failure; greater configured concurrency does not increase device capacity",
+  "environment_corrections": [
+    "repository GGUF package and existing browser explicitly selected",
+    "static-library response list rebuilt from known object inventory",
+    "unneeded native device calibration disabled",
+    "0.8B NInfer fixture rejected by existing projection geometry",
+    "first six-layer copy omitted proposal dependency; corrected copy preserves it",
+    "nonzero logit_bias unsupported and not used"
+  ],
+  "_sanitization": {
+    "version": 1,
+    "original_sha256": "7811bf5ecb4048c6b31e6e29f267c5e2da5695a34fd083e87ffe9b08230cf790",
+    "scope": "Device identities/private paths anonymized, credential fields redacted; measurements unchanged."
+  }
+}

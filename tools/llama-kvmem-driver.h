@@ -11,6 +11,7 @@
 #include "kvmem-session-transfer.h"
 #include "kvmem-execution-scope.h"
 #include "kvmem/request_control.hpp"
+#include "kvmem/prefix_checkpoint.hpp"
 #include "chat.h"
 #include <atomic>
 #include <map>
@@ -43,8 +44,11 @@ struct MultimodalCheckpointData {
 
 struct MultimodalCheckpoint {
     int row = 0;
-    bool media_boundary = false;
+    kvmem::CheckpointPurpose purposes = kvmem::CheckpointPurpose::Endpoint;
     std::shared_ptr<const MultimodalCheckpointData> data;
+    kvmem::CheckpointInfo checkpoint_info() const {
+        return {uint64_t(row), purposes, data.get(), data ? data->bytes() : 0};
+    }
 };
 
 struct MultimodalQuery {
@@ -75,7 +79,7 @@ struct kvmem_conversation {
     std::shared_ptr<kvmem_prompt> cached_prompt;
     std::shared_ptr<kvmem_prompt> history_input_prompt;
     std::vector<kvmem::LrfuPoint> history_points;
-    std::vector<MultimodalCheckpoint> mm_checkpoints;
+    kvmem::CheckpointCatalog<MultimodalCheckpoint> mm_checkpoints;
     int mm_live_row = 0;
     std::shared_ptr<const MultimodalCheckpointData> mm_live_checkpoint;
     std::shared_ptr<const MultimodalQuery> mm_query;
@@ -153,7 +157,9 @@ struct LlamaEngineState {
     ggml_type cache_type_k = GGML_TYPE_Q8_0;
     ggml_type cache_type_v = GGML_TYPE_Q8_0;
     ggml_type spec_cache_type = GGML_TYPE_F16;
-    bool spec_mtp = false;
+    bool spec_enabled = false;
+    kvmem::SpeculativeAlgorithm spec_algorithm = kvmem::SpeculativeAlgorithm::None;
+    std::string spec_draft_model;
     int spec_n_max = 3;
     float spec_p_min = 0.0f;
     std::vector<llama_token> cached_tokens;
@@ -164,7 +170,7 @@ struct LlamaEngineState {
     std::vector<kvmem::LrfuPoint> history_points;
     kvmem::LrfuState rollback_history;
     uint32_t history_input_end = 0;
-    std::vector<MultimodalCheckpoint> mm_checkpoints;
+    kvmem::CheckpointCatalog<MultimodalCheckpoint> mm_checkpoints;
     std::shared_ptr<MultimodalCheckpoint> mm_rollback;
     std::shared_ptr<kvmem_prompt> mm_rollback_prompt;
     int mm_live_row = 0;
@@ -179,6 +185,7 @@ struct LlamaEngineState {
     uint32_t mm_replayed = 0;
     uint32_t mm_tail_replayed = 0;
     int mm_lcp = 0;
+    int mm_observed_lcp = 0; // Request-local capture hint, never restore permission.
     std::string mm_error;
     int mm_error_status = 500;
     bool mm_reset_requested = false;

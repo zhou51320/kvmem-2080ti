@@ -1,20 +1,21 @@
+# Device identifiers and private paths anonymized; measurements unchanged.
 
 ========== identity-0.6B ==========
-+ /home/leye/kvmem_llamacpp/scripts/identity_canary.py -m /home/leye/kvmem_llamacpp/models/unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
++ $REPO/scripts/identity_canary.py -m $REPO/models/unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
 off [34166, 13, 358, 1079, 264, 5458, 304, 279, 220, 16, 15, 339, 11972, 13, 358, 1079, 8014, 304, 20956, 304, 279, 3853, 13, 358, 1366, 311, 1414, 1246, 311, 10549, 369, 279]
 on  [34166, 13, 358, 1079, 264, 5458, 304, 279, 220, 16, 15, 339, 11972, 13, 358, 1079, 8014, 304, 20956, 304, 279, 3853, 13, 358, 1366, 311, 1414, 1246, 311, 10549, 369, 279]
 PASS: identity (KVMem-on greedy tokens == KVMem-off)
 [identity-0.6B] rc=0 wall=2s
 
 ========== identity-1.7B ==========
-+ /home/leye/kvmem_llamacpp/scripts/identity_canary.py -m /home/leye/kvmem_llamacpp/models/unsloth/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q4_K_M.gguf
++ $REPO/scripts/identity_canary.py -m $REPO/models/unsloth/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q4_K_M.gguf
 off [444, 2210, 11, 358, 1079, 220, 16, 20, 1635, 2310, 11, 358, 1079, 264, 5458, 304, 264, 1550, 2906, 11, 358, 1079, 504, 264, 2613, 6290, 304, 279, 9806, 315, 5616, 11]
 on  [444, 2210, 11, 358, 1079, 220, 16, 20, 1635, 2310, 11, 358, 1079, 264, 5458, 304, 264, 1550, 2906, 11, 358, 1079, 504, 264, 2613, 6290, 304, 279, 9806, 315, 5616, 11]
 PASS: identity (KVMem-on greedy tokens == KVMem-off)
 [identity-1.7B] rc=0 wall=3s
 
 ========== needle-recency-0.6B ==========
-+ /home/leye/kvmem_llamacpp/scripts/needle_recall.py -m /home/leye/kvmem_llamacpp/models/unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --method recency --budget 256 --block-tokens 32
++ $REPO/scripts/needle_recall.py -m $REPO/models/unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --method recency --budget 256 --block-tokens 32
      Device 0: NVIDIA GeForce RTX 5050 Laptop GPU, compute capability 12.0, VMM: yes, VRAM: 8150 MiB
    KVMEM_TRACE n_prompt=837
    KVMEM_KV_BYTES bytes=44040192 cells=384 slots=12 budget=256 pool=384 ratio=0.50 high=0.95 low=0.85 cap_blocks=1164 gpu_total=8546549760 block_bytes=3670016
@@ -35,7 +36,7 @@ PASS: recency budget=256 bt=32 did not recall the middle needle
 [needle-recency-0.6B] rc=0 wall=2s
 
 ========== needle-retr-0.6B ==========
-+ /home/leye/kvmem_llamacpp/scripts/needle_recall.py -m /home/leye/kvmem_llamacpp/models/unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --method retrieval --budget 256 --block-tokens 32
++ $REPO/scripts/needle_recall.py -m $REPO/models/unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --method retrieval --budget 256 --block-tokens 32
      Device 0: NVIDIA GeForce RTX 5050 Laptop GPU, compute capability 12.0, VMM: yes, VRAM: 8150 MiB
    KVMEM_TRACE n_prompt=837
    KVMEM_KV_BYTES bytes=44040192 cells=384 slots=12 budget=256 pool=384 ratio=0.50 high=0.95 low=0.85 cap_blocks=1164 gpu_total=8546549760 block_bytes=3670016
@@ -120,7 +121,7 @@ PASS: retrieval budget=256 bt=32 revived the middle needle
 [needle-retr-0.6B] rc=0 wall=5s
 
 ========== needle-recency-1.7B ==========
-+ /home/leye/kvmem_llamacpp/scripts/needle_recall.py -m /home/leye/kvmem_llamacpp/models/unsloth/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q4_K_M.gguf --method recency --budget 256 --block-tokens 32
++ $REPO/scripts/needle_recall.py -m $REPO/models/unsloth/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q4_K_M.gguf --method recency --budget 256 --block-tokens 32
      Device 0: NVIDIA GeForce RTX 5050 Laptop GPU, compute capability 12.0, VMM: yes, VRAM: 8150 MiB
    KVMEM_TRACE n_prompt=837
    KVMEM_KV_BYTES bytes=44040192 cells=384 slots=12 budget=256 pool=384 ratio=0.50 high=0.95 low=0.85 cap_blocks=1164 gpu_total=8546549760 block_bytes=3670016
@@ -138,7 +139,7 @@ PASS: recency budget=256 bt=32 did not recall the middle needle
 [needle-recency-1.7B] rc=0 wall=3s
 
 ========== needle-retr-1.7B ==========
-+ /home/leye/kvmem_llamacpp/scripts/needle_recall.py -m /home/leye/kvmem_llamacpp/models/unsloth/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q4_K_M.gguf --method retrieval --budget 256 --block-tokens 32
++ $REPO/scripts/needle_recall.py -m $REPO/models/unsloth/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q4_K_M.gguf --method retrieval --budget 256 --block-tokens 32
      Device 0: NVIDIA GeForce RTX 5050 Laptop GPU, compute capability 12.0, VMM: yes, VRAM: 8150 MiB
    KVMEM_TRACE n_prompt=837
    KVMEM_KV_BYTES bytes=44040192 cells=384 slots=12 budget=256 pool=384 ratio=0.50 high=0.95 low=0.85 cap_blocks=1164 gpu_total=8546549760 block_bytes=3670016
@@ -221,7 +222,7 @@ PASS: retrieval budget=256 bt=32 revived the middle needle
 [needle-retr-1.7B] rc=0 wall=6s
 
 ========== speed-0.6B ==========
-+ /home/leye/kvmem_llamacpp/scripts/prefill_speed.py --lengths 1024,4096,8192,16384,32768 -n 64 --warmup 1 --runs 2 --modes off,recency,retr -m /home/leye/kvmem_llamacpp/models/unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
++ $REPO/scripts/prefill_speed.py --lengths 1024,4096,8192,16384,32768 -n 64 --warmup 1 --runs 2 --modes off,recency,retr -m $REPO/models/unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
 model=Qwen3-0.6B-Q8_0.gguf warmup=1 runs=2 n_predict=64 device=RTX 5050
 modes: off | recency (no capture) | cap (retrieval capture, no replay) | retr (capture + score/writeback + query-last 64)
 
@@ -253,7 +254,7 @@ retr tot_tok/s includes query-replay tokens in llama prompt eval.
 [speed-0.6B] rc=0 wall=478s
 
 ========== speed-1.7B ==========
-+ /home/leye/kvmem_llamacpp/scripts/prefill_speed.py --lengths 1024,4096,8192,16384,32768 -n 64 --warmup 1 --runs 2 --modes off,recency,retr -m /home/leye/kvmem_llamacpp/models/unsloth/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q4_K_M.gguf
++ $REPO/scripts/prefill_speed.py --lengths 1024,4096,8192,16384,32768 -n 64 --warmup 1 --runs 2 --modes off,recency,retr -m $REPO/models/unsloth/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q4_K_M.gguf
 model=Qwen3-1.7B-Q4_K_M.gguf warmup=1 runs=2 n_predict=64 device=RTX 5050
 modes: off | recency (no capture) | cap (retrieval capture, no replay) | retr (capture + score/writeback + query-last 64)
 

@@ -3,21 +3,21 @@
   "llamacpp": {
     "path": "backends/llamacpp",
     "upstream": "https://github.com/ggml-org/llama.cpp.git",
-    "base_commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+    "base_commit": "620d2225cc436ab0b001e3200e590e3b286ef9ab",
     "license_file": "backends/llamacpp/LICENSE",
     "local_changes": "KVMem integration is maintained in the versioned patch; the submodule remains pinned to base_commit",
     "patch": "backends/patches/llamacpp-kvmem.patch",
-    "patch_sha256": "6004bd7d148f1a4eb10ed816be81228fdff5d9686bac90374f55c2f4bc2494b5",
-    "patched_tree": "b190e67570206f5f1aa8c2adbc1cb05c914d9354"
+    "patch_sha256": "5211ba2874eb8b45dd2931114349cd83add265d958cd1a7a0632dfc263bf7655",
+    "patched_tree": "88bbd0c6a06aa64404d3127c364267306d7f1329"
   },
   "ninfer": {
     "path": "backends/ninfer",
     "upstream": "https://github.com/iamwavecut/ninfer-all.git",
-    "base_commit": "8319e8f512477d0cfdef89e16c17c1ba9f9bc7b3",
+    "base_commit": "08fd7019925f43b4b42539400afd461b70f7144a",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "KVMem integration is maintained in the versioned patch; the submodule remains pinned to base_commit",
     "patch": "backends/patches/ninfer-kvmem.patch",
-    "patch_sha256": "566851617f6785eaeeb48e4892aaf047c7d7f36873d6f451bbe2e2ca39691079",
-    "patched_tree": "7d7e1499a9a675ff8d23594d38a62521b6d602c3"
+    "patch_sha256": "5219fe91032dc740968b91f4d2a324cd176b7749532d009d844edefde5277506",
+    "patched_tree": "ce0c62f02b23095754262b4c86876693755479e6"
   }
 }

@@ -19,5 +19,5 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib:$CUDA_HOME/targets/x86_64-linux/lib${LD_L
 "$CMAKE" --build "$BUILD_DIR" --target \
   llama-kvmem-server llama-kvmem-cli llama-quantize \
   kvmem-chat-id-test kvmem-reasoning-budget-test kvmem-chat-template-test \
-  kvmem_store_test pinned_kv_tier_test nvme_kv_tier_test kvmem_runtime_test raw_kv_store_test \
+  kvmem_store_test pinned_kv_tier_test kvmem_runtime_test raw_kv_store_test \
   -j "${JOBS:-4}"

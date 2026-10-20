@@ -1,5 +1,8 @@
 # ninfer KVMem 参数定向补测（2026-10-04）
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 本报告记录 2026-10-04 的定向范围。当时的快速 prefill、并发和图片 ngram 限制已被后续补测放宽。当前源码边界见 [多后端运行](multi-backend.md)。
 
 ## 结论与范围
@@ -21,7 +24,7 @@ BF16/INT8/NVFP4/K8V4/RK8V4 的准入和拒绝条件有 Engine/CLI 参数检查�
 
 ## 环境和配置
 
-- RTX 5060 Ti：`GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`；本轮全部 GPU 实验使用此 UUID，每次启动前检查占用。
+- RTX 5060 Ti：`GPU-B`；本轮全部 GPU 实验使用此 UUID，每次启动前检查占用。
 - 模型：`Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`，已有 IQ3S＋Vision＋MTP 制品。
 - 已有 Release、CUDA 13.2、sm_120a、VS 2022 构建树，8 并行编译，无重新配置。
 - history：B384/R128/H2GiB、prefill128、C1、逻辑上限16K。

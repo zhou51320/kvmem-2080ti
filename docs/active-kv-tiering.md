@@ -16,7 +16,7 @@
 
 统一 Windows 启动器对应 `-HostMiB H -DiskPath PATH -DiskMiB D`。
 不配置磁盘时使用公共 RAM 存储。目录和正数磁盘预算必须同时存在；启动器只指定
-DiskPath 时采用其默认 D。llama 的旧在线 NVMe/旧会话磁盘参数与公共 SSD 不能混用。
+DiskPath 时采用其默认 D。旧在线 NVMe、raw-K NVMe、旧会话磁盘接口已[退役](legacy-ssd-retirement-20261019.md)。llama 公共 SSD 需要 Flash Attention，不能与旧 CPU arena 混用。独立 `llama-kvmem-cli` 同样支持这三个参数。
 
 H 限制本 worker 所有活跃和非活跃历史的原生 KV 驻留字节及预留。
 D 限制仍被持有的文件区间，包括原生 KV、闲置状态附件和未发布写入目的。

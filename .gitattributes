@@ -1,4 +1,13 @@
 scripts/*.sh text eol=lf
+START-HERE-CN.bat text eol=crlf
+START-HERE-EN.bat text eol=crlf
 scripts/rocm/*.sh text eol=lf
 patches/cuda-graph-reactivation.patch text eol=lf
 backends/patches/*.patch -text -whitespace
+# Preserve bundled upstream licenses verbatim.
+ui/monitor/Outfit-OFL.txt -text -whitespace
+ui/monitor/Strata-LICENSE.txt -text -whitespace
+
+# Preserve the existing evidence files byte layout while anonymizing fields.
+docs/benchmarks/dflash2-task1-20261018.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+docs/benchmarks/dflash2-task2-256k-20261018.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

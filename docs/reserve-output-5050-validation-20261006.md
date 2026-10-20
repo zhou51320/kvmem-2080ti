@@ -1,5 +1,8 @@
 # ninfer 超过生成预留的输出验证
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 2026 年 10 月 6 日，RTX 5050 Laptop 上的 ninfer KVMem 功能验证通过：R=128 时，两个 HTTP 请求分别生成了 512 和 1024 个输出 tokens，均以 `finish_reason=length` 结束。Main KV 页池固定为 B+R=384 tokens；生成途中通过重选和搬运继续追加，没有把输出上限截到 R。
 
 ## 设备和配置
@@ -7,7 +10,7 @@
 | 项目 | 本次设置 |
 |---|---|
 | 设备 | NVIDIA GeForce RTX 5050 Laptop GPU，8151 MiB |
-| GPU UUID | `GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`；通过 CUDA_VISIBLE_DEVICES 绑定 |
+| GPU UUID | `GPU-A`；通过 CUDA_VISIBLE_DEVICES 绑定 |
 | 模型 | `Ternary-Bonsai-2-27B-T2-MTP-r3-Q8.ninfer`；本次只加载主模型，权重 6.70 GiB |
 | worker | 本地 `build-backends/ninfer/apps/ninfer-serve-qualified.exe`，CUDA 13.2 / SM120a 构建 |
 | KV 和 GDN | 双 NVFP4 KV，FP16 GDN |

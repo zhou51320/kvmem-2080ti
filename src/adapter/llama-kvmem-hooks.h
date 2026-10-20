@@ -35,10 +35,7 @@ struct llama_kvmem_params {
     float    gpu_high_watermark;   // 0 → 0.95; trigger prefill offload
     float    gpu_low_watermark;    // 0 → 0.85; documented target after offload
     uint64_t cpu_bytes;            // CPU spill arena; 0 = disabled
-    uint64_t nvme_bytes;           // NVMe spill file; 0 = disabled
-    const char * nvme_dir;         // directory for the ephemeral NVMe file
-    bool     raw_k_nvme;           // put raw-K/V authority on NVMe (qw3-style)
-    bool     harvest_v;            // prefill D2H V with K (default off; not implied by raw_k_nvme)
+    bool     harvest_v;            // prefill D2H V with K (default off)
     uint64_t payload_host_bytes;   // shared native K/V RAM quota; 0 = unlimited RAM
     uint64_t payload_disk_bytes;   // shared active/idle SSD quota; 0 = disabled
     const char * payload_disk_dir; // process-local spill directory, UTF-8
@@ -113,6 +110,8 @@ LLAMA_API void llama_kvmem_keep_selected(void);
 LLAMA_API void llama_kvmem_pin_working_set(void);
 LLAMA_API uint32_t llama_kvmem_free_slots(void);
 LLAMA_API void llama_kvmem_truncate_cached(uint32_t n_past);
+// Restore a cold partial tail before append, then validate the resumed view.
+LLAMA_API bool llama_kvmem_restore_checkpoint_tail();
 // Row-based removal, with native recurrent positions preserved.
 LLAMA_API bool llama_kvmem_remove_logical(struct llama_context * ctx, llama_pos begin, llama_pos end);
 LLAMA_API llama_pos llama_kvmem_model_pos(uint32_t logical_pos);
@@ -130,8 +129,7 @@ LLAMA_API uint32_t llama_kvmem_store_n_tokens(void);
 // maps.
 //
 // False when a swap can never be safe in this configuration: without flash
-// attention V is not mirrored to host, and --kvmem-raw-k-nvme sizes and names
-// one arena per process.
+// attention V is not mirrored to host.
 LLAMA_API bool     llama_kvmem_store_swap_supported(void);
 // New empty host store, or -1 when unavailable. Allocates only the bundle.
 LLAMA_API int32_t  llama_kvmem_store_create(void);

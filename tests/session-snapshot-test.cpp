@@ -3,6 +3,8 @@
 #include "kvmem-session-files.h"
 #include <cstring>
 #include <iostream>
+#include <fstream>
+#include <random>
 
 static void check(bool ok) { if (!ok) throw std::runtime_error("snapshot test failed"); }
 template<class F> static void rejects(F f) {
@@ -18,14 +20,14 @@ static void large_file() {
         ("kvmem-large-snapshot-test-" + std::to_string(std::random_device{}()));
     std::vector<uint8_t> chunk(kvmem::snapshot_chunk, 0xa7);
     {
-        kvmem_session_files files(root, size+8);
+        kvmem_session_files files(root, std::make_shared<kvmem::SpillFile>(root, size+8));
         files.save(1, size, [&](kvmem::SnapshotWriter & out) {
             for (uint64_t left = size; left;) {
                 const auto n = std::min<uint64_t>(left, chunk.size());
                 out.write(chunk.data(), n); left -= n;
             }
         });
-        check(files.bytes() == size+8 && std::filesystem::file_size(files.path(1)) == size+8);
+        check(files.bytes() == size+8 && files.extent(1).size() == size+8);
         files.load(1, [&](kvmem::SnapshotReader & in) {
             while (in.remaining()) {
                 const auto n = std::min<uint64_t>(in.remaining(), chunk.size());
@@ -34,7 +36,6 @@ static void large_file() {
             }
         });
     }
-    std::filesystem::remove(root / kvmem_session_cache_dir::root_lock_name());
     std::filesystem::remove(root);
     std::cout << ">4 GiB streaming file roundtrip and quota passed\n";
 }
@@ -104,23 +105,23 @@ int main(int argc, char ** argv) {
         ("kvmem-snapshot-test-" + std::to_string(std::random_device{}()));
     std::filesystem::create_directory(root);
     const auto sentinel = root / "user-file"; std::ofstream(sentinel) << "keep";
-    std::filesystem::path run;
     {
         const uint64_t file_bytes = size.bytes()+8;
-        kvmem_session_files files(root, file_bytes); run = files.directory();
-        kvmem_session_files other(root, file_bytes);
-        check(run != other.directory());
+        kvmem_session_files files(root, std::make_shared<kvmem::SpillFile>(root, file_bytes));
+        kvmem_session_files other(root, std::make_shared<kvmem::SpillFile>(root, file_bytes));
+        other.save(9, sizeof(uint32_t), [](kvmem::SnapshotWriter & out) { out.scalar(uint32_t(42)); });
+        other.load(9, [](kvmem::SnapshotReader & in) { check(in.scalar<uint32_t>() == 42); });
         files.save(1, size.bytes(), [&](kvmem::SnapshotWriter & writer) {
             check(files.bytes() == file_bytes); write(writer);
         });
-        check(files.bytes() == file_bytes && std::filesystem::file_size(files.path(1)) == file_bytes);
+        check(files.bytes() == file_bytes && files.extent(1).size() == file_bytes);
         rejects([&] { files.save(2, size.bytes(), write); });
         check(!files.contains(2));
         files.load(1, [&](kvmem::SnapshotReader & in) { restored.snapshot_read(in, (tokens+63)/64); });
         {
-            std::fstream file(files.path(1), std::ios::binary|std::ios::in|std::ios::out);
-            file.seekg(-1, std::ios::end); char byte; file.read(&byte, 1); byte ^= 1;
-            file.seekp(-1, std::ios::end); file.write(&byte, 1);
+            const auto & extent = files.extent(1);
+            uint8_t byte; extent.read(extent.size()-1, &byte, 1); byte ^= 1;
+            extent.write(extent.size()-1, &byte, 1);
         }
         rejects([&] { files.load(1, [&](kvmem::SnapshotReader & in) { restored.snapshot_read(in, (tokens+63)/64); }); });
         check(files.erase(1) && files.bytes() == 0);
@@ -129,14 +130,13 @@ int main(int argc, char ** argv) {
         }); });
         check(files.bytes() == 0 && !files.contains(2));
         files.save(3, size.bytes(), write);
-        std::filesystem::resize_file(files.path(3), 23);
+        const uint32_t invalid_header = 0; files.extent(3).write(0, &invalid_header, sizeof(invalid_header));
         rejects([&] { files.load(3, [&](kvmem::SnapshotReader & in) { restored.snapshot_read(in, (tokens+63)/64); }); });
         // Destruction removes only this run's tracked files.
         check(std::filesystem::exists(sentinel));
     }
-    check(!std::filesystem::exists(run) && std::filesystem::exists(sentinel));
+    check(std::filesystem::exists(sentinel) && std::distance(std::filesystem::directory_iterator(root), std::filesystem::directory_iterator{}) == 1);
     std::filesystem::remove(sentinel);
-    std::filesystem::remove(root / kvmem_session_cache_dir::root_lock_name());
     std::filesystem::remove(root);
     std::cout << "snapshot roundtrip, bounds, checksum, quota, short write and cleanup passed\n";
 }

@@ -30,15 +30,18 @@ jobs:
       - name: Test CI change detection
         if: steps.classify.outputs.run_ci == 'true'
         run: python3 tests/test_ci_changes.py
+      - name: Check portable validation and public evidence
+        run: |
+          python3 scripts/public_evidence.py --check
+          python3 tests/test_validation_portability.py
+          python3 tests/test_public_evidence.py
+          python3 tests/test_multi_needle.py
+          python3 -m unittest discover -s scripts -p test_native_stats.py
   host-linux:
     needs: changes
     if: needs.changes.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        nvme: ['OFF', 'ON']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,17 +50,20 @@ jobs:
       - run: python3 tests/test_launcher_key_file.py
       - run: python3 scripts/test_start_server.py
       - run: python3 scripts/test_build_rocm.py
+      - name: Test local console and monitor packaging
+        run: |
+          python3 tests/test_local_console.py
+          python3 tests/test_one_click.py
+          python3 tests/test_webui_builder.py
       - name: Prepare pinned llama.cpp integration
         run: |
           python3 scripts/prepare-backends.py --backend llamacpp
           python3 scripts/prepare-backends.py --backend llamacpp --check
       - name: Configure host and model-free server tests
-        env:
-          NVME: ${{ matrix.nvme }}
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           -DKVMEM_BUILD_LLAMA=OFF -DKVMEM_BUILD_SERVER_TESTS=ON
-          -DKVMEM_ENABLE_NVME="$NVME" -DGGML_NATIVE=OFF
+          -DGGML_NATIVE=OFF
           -DGGML_CUDA=OFF -DGGML_HIP=OFF
       - run: cmake --build build --parallel 2
       - run: ctest --test-dir build --output-on-failure --no-tests=error
@@ -73,6 +79,16 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/test_build_rocm.py
+      - name: Test portable validation and evidence export
+        run: |
+          python tests/test_validation_portability.py
+          python tests/test_public_evidence.py
+      - name: Test local console and monitor packaging
+        run: |
+          python tests/test_local_console.py
+          python tests/test_windows_worker_args.py
+          python tests/test_one_click.py
+          python tests/test_webui_builder.py
       - name: Prepare pinned llama.cpp integration
         run: |
           python scripts/prepare-backends.py --backend llamacpp
@@ -81,7 +97,7 @@ jobs:
         run: >-
           cmake -S . -B build -A x64
           -DKVMEM_BUILD_LLAMA=OFF -DKVMEM_BUILD_SERVER_TESTS=ON
-          -DKVMEM_ENABLE_NVME=OFF -DGGML_NATIVE=OFF
+          -DGGML_NATIVE=OFF
           -DGGML_CUDA=OFF -DGGML_HIP=OFF
       - run: cmake --build build --config Release --parallel 2
       - run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
@@ -147,7 +163,7 @@ jobs:
         run: >-
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DBUILD_SHARED_LIBS=ON -DKVMEM_BUILD_LLAMA=ON
-          -DKVMEM_ENABLE_NVME=ON -DGGML_CUDA=ON -DGGML_NATIVE=OFF
+          -DGGML_CUDA=ON -DGGML_NATIVE=OFF
           -DGGML_CCACHE=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
           -DCMAKE_CUDA_ARCHITECTURES=120a-real

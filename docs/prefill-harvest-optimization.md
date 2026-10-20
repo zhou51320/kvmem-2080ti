@@ -1,13 +1,16 @@
 # Staged Prefill Optimization: llama.cpp + Out-of-Tree KVMem Harvest
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 | Field | Value |
 |---|---|
 | **Title** | Next staged optimization plan for KVMem prefill on llama.cpp |
 | **Author** | KVMem llama.cpp adapter |
 | **Date** | 2026-09-05 |
 | **Status** | Landed / historical (rev 4: roadmap moved to `docs/retrieval-stagein-optimization.md`) |
-| **Repo** | `/home/leye/kvmem_llamacpp` (v0.5.0). llama.cpp pin `b81c99b479d4c24e5eeca10de99032ebd343ef8f` |
-| **Reference (read-only)** | `/home/leye/kvmem_qw3` |
+| **Repo** | `$REPO` (v0.5.0). llama.cpp pin `b81c99b479d4c24e5eeca10de99032ebd343ef8f` |
+| **Reference (read-only)** | `$REFERENCE` |
 | **Audience** | Engineers implementing Stage 0/1 without re-deriving the diagnosis |
 | **Superseded as roadmap** | 2026-09-06: harvest thread + RAM mean-K landed; 128k `retr_ms` still ~229 s. **Next work is `docs/retrieval-stagein-optimization.md`.** Do not implement further harvest PRs from this file. |
 
@@ -37,9 +40,9 @@ KVMem is an out-of-tree `kvmem/` library plus a thin adapter in `src/adapter/`. 
 
 Hardware and build (must keep):
 
-- RTX 5050, UUID `GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`, models **< 27B**.
-- RTX 5090, UUID `GPU-58a7c28b-e698-307f-c149-24d4ecd88bf4`, **27B only**.
-- `source scripts/gpu.sh small|27b`. CUDA: `/home/leye/kvmem_qw3/.cu13-env/bin/nvcc`, `CMAKE_CUDA_ARCHITECTURES=120a-real`, `scripts/build-cuda.sh`.
+- RTX 5050, UUID `GPU-A`, models **< 27B**.
+- RTX 5090, UUID `GPU-C`, **27B only**.
+- `source scripts/gpu.sh small|27b`. CUDA: `$CUDA_ROOT/bin/nvcc`, `CMAKE_CUDA_ARCHITECTURES=120a-real`, `scripts/build-cuda.sh`.
 - Product default `--kvmem` = retrieval + query-last 64. `--no-think` on Qwen thinking models for needle tests.
 - Daily Unsloth GGUFs from ModelScope; ISTA IQ3_S is a user-named exception.
 - **ISTA IQ3_S: MTP stays off.** Do not pass `--spec-type draft-mtp` on IQ3
@@ -378,7 +381,7 @@ source scripts/gpu.sh 27b
 export KVMEM_PERF=1
 # UUID-filtered util in another terminal:
 # nvidia-smi --query-gpu=uuid,utilization.gpu,utilization.memory,memory.used --format=csv -l 1 \
-#   | grep GPU-58a7c28b-e698-307f-c149-24d4ecd88bf4 > /tmp/kvmem_t5_util.csv
+#   | grep GPU-C > /tmp/kvmem_t5_util.csv
 build/bin/llama-kvmem-cli \
   -m models/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf \
   -c 16384 -b 512 -ub 512 -n 16 -ngl 99 --temp 0 --no-prompt \

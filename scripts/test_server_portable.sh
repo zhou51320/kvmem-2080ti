@@ -6,7 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 out=${1:-build/portable}
 mkdir -p "$out"
-includes=(-Itools -Ikvmem/include -Isrc/adapter -Ibackends/llamacpp/include -Ibackends/llamacpp/ggml/include
+# Match the server CMake target: monitor model metadata needs llama's private headers.
+includes=(-Itools -Ikvmem/include -Isrc/adapter -Ibackends/llamacpp/src -Ibackends/llamacpp/include -Ibackends/llamacpp/ggml/include
           -Ibackends/llamacpp/common -Ibackends/llamacpp/vendor -Ibackends/llamacpp/vendor/cpp-httplib
           -Ibackends/llamacpp/tools/server -Ibackends/llamacpp/tools/mtmd)
 for test in server-options-test server-progress-test output-limit-test lane-pool-test; do
@@ -14,6 +15,6 @@ for test in server-options-test server-progress-test output-limit-test lane-pool
   "$out/$test"
 done
 for source in llama-kvmem-server kvmem-spec; do
-  "${CXX:-g++}" -std=c++17 -O1 -pthread -DKVMEM_ENABLE_NVME=0 -DLLAMA_SUBPROCESS \
+  "${CXX:-g++}" -std=c++17 -O1 -pthread -DLLAMA_SUBPROCESS \
     "${includes[@]}" -c "tools/$source.cpp" -o "$out/$source.o"
 done

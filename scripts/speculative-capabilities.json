@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "llamacpp": {
+    "none": {"max_draft_tokens": 0},
+    "mtp": {"max_draft_tokens": 5, "adaptive": false, "ngram": false, "max_concurrency": 8, "max_devices": 8, "draft_asset": "optional_gguf"},
+    "dflash2": {"max_draft_tokens": 5, "adaptive": false, "ngram": false, "max_concurrency": 8, "max_devices": 1, "draft_asset": "required_gguf"}
+  },
+  "ninfer": {
+    "none": {"max_draft_tokens": 0},
+    "mtp": {"max_draft_tokens": 15, "adaptive": true, "ngram": true, "max_concurrency": 8, "max_devices": 8, "draft_asset": "embedded"},
+    "dflash2": {"max_draft_tokens": 15, "adaptive": false, "ngram": true, "max_concurrency": 8, "max_devices": 1, "draft_asset": "embedded"}
+  }
+}

@@ -73,7 +73,7 @@ if (!$HostOnly) {
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',
     "-DCMAKE_BUILD_TYPE=$BuildType", '-DCMAKE_CXX_COMPILER=cl',
     "-DCMAKE_USER_MAKE_RULES_OVERRIDE=$rulesOverride",
-    '-DBUILD_SHARED_LIBS=OFF', '-DKVMEM_ENABLE_NVME=OFF')
+    '-DBUILD_SHARED_LIBS=OFF')
 if (!$HostOnly) {
     $options += @('-DCMAKE_C_COMPILER=cl', '-DGGML_BACKEND_DL=OFF',
     '-DGGML_NATIVE=OFF', '-DGGML_AVX=ON', '-DGGML_AVX2=ON', '-DGGML_FMA=ON',

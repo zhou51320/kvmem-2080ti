@@ -4,7 +4,7 @@ KVMem is a block-sparse KV working-set manager. llama.cpp will own inference;
 this library owns selection, tiering, and (later) window assembly.
 
 ```
-kvmem/          host policy + CPU/NVMe  (this repo, no llama.cpp headers)
+kvmem/          host policy + shared RAM/SSD  (this repo, no llama.cpp headers)
 src/adapter/    llama_memory_i wrapper  (P1+)
 backends/llamacpp/      submodule + thin patches (P1+)
 ```
@@ -24,7 +24,7 @@ stage-in is `copy_k_gpu` / `copy_v_gpu` + slab H2D. `llama-kvmem-server`
 reuses the GPU prefix across requests (token LCP); the retrieval query
 is the last `role=user` span. Chat tools reuse llama.cpp `common/chat`
 + `common_sampler`; the server does not execute tools. Packed transfers use a **32 MiB**
-GPU slab. GPU-format CPU/NVMe scratch is allocated only when those tiers
+GPU slab. GPU-format CPU scratch is allocated only when that tier
 are on. Each logical block occupies one slot of `block_tokens` cells.
 Reselect is a `KvMemPlan` diff: resident selected blocks stay in their
 slot; only `stage_out` cells are `seq_rm`'d. Flash Attention is not
@@ -62,7 +62,7 @@ Stateful tokenization/encoding is serialized before lane admission; immutable
 prepared embeddings are decoded independently. The embedding cache and in-flight
 references share a 128 MiB bound. Text and image requests support optional MTP on
 one CUDA target GPU with at least `2 * P` HTTP workers. Video/audio, multiple target
-GPUs and NVMe/session disk are outside multi-lane support. Throughput depends on the
+GPUs remain outside multi-lane support. Public RAM/SSD tiering supports concurrent lanes; H must cover their native working sets. Throughput depends on the
 workload and device. See [the complete design](multi-lane-conversations.md).
 
 Hardware split on this machine: RTX 5050 (GPU 0) for models < 27B;
@@ -93,8 +93,7 @@ reserve partition is full. Unpinning or recency-evicting selected
 blocks would drop the query’s retrieved facts. Growing `budget +
 gen_reserve` on 16 GiB is also out: recipes already sit near 15.5 GiB.
 Streaming the whole generation through VRAM would bring back the
-adaptive-KV-streaming cost curve. The optional NVMe session cache stores idle
-sessions, while generation spill remains in host RAM.
+adaptive-KV-streaming cost curve. Public RAM/SSD tiering stores native KV from active and idle histories under one H/D account; it does not remove the generation-reserve boundary.
 
 ### Follow-up: ring buffer **inside** `gen_reserve`
 

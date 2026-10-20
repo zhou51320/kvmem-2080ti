@@ -1,5 +1,8 @@
 # NVMe-disabled regression: IQ3 K8/V4
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 The session disk cache is disabled when `--kvmem-session-nvme-gb` is absent.
 This check covers both the default single-session behavior (no conversation
 flags) and RAM-only multi-session behavior (`--kvmem-conversations 3`, no disk
@@ -10,7 +13,7 @@ the [three-session NVMe stress test](three-session-5g-k8v4-stability.md).
 python scripts/test_server_conversations.py `
   --server .\build-session\bin\llama-kvmem-server.exe `
   --model models\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf `
-  --gpu GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c `
+  --gpu GPU-B `
   --kv-key-dtype q8_0 --kv-value-dtype q4_0 `
   --kvmem-budget 2048 --kvmem-gen-reserve 512 `
   --mtp --bytes-case --output artifacts\nvme-off-k8v4-5060ti\short-3ram
@@ -18,7 +21,7 @@ python scripts/test_server_conversations.py `
 python scripts/test_server_nvme_off_long.py `
   --server .\build-session\bin\llama-kvmem-server.exe `
   --model models\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf `
-  --gpu GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c `
+  --gpu GPU-B `
   --messages artifacts\three-session-5g-k8v4-5060ti-rerun\cold-messages-A.json `
   --expected-tokens 143522 `
   --output artifacts\nvme-off-k8v4-5060ti\long

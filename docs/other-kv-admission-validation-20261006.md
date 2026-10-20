@@ -1,5 +1,8 @@
 # 新增 KV 格式准入补测（2026-10-06）
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 本报告记录九种 KV 的准入补测。写本报告时，快速 prefill 仍只允许 INT8/RK8V4 文本。该限制已由 [快速 prefill 准入补测](fast-prefill-admission-validation-20261006.md) 放宽。当前边界见 [多后端运行](multi-backend.md)。
 
 用户要求先测试能否简单放行，复杂修改另行确认。本轮补入 `fp8`、`rk4v4`、
@@ -18,9 +21,9 @@ ordinary 或固定/自适应 MTP1–15。ngram 非零要求 MTP；C2–8 将有�
 - 原生固定基线：`6e9189c1089f6968e29fe2e1c51b4596e2346eed`，既有 Release
   构建目录、CUDA 13.2、sm_120a、MSVC 14.44.35207；编译使用 8 个并行任务。
 - 参数、页搬运和数值检查使用空闲的 RTX 5050 Laptop，UUID
-  `GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`。
+  `GPU-A`。
 - 真实模型检查使用能容纳模型的 RTX 5060 Ti，UUID
-  `GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`。
+  `GPU-B`。
 - 模型：`converted-models/Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`，
   位于本实验目录；图片为 `p9-inputs/red.png` 和 `blue.png`，512×512、实际
   每图 256 merged tokens，配置上限 1024。模型测试的 device profile 为 off。

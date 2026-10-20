@@ -1,5 +1,8 @@
 # 快速 prefill 准入补测（2026-10-06）
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 用户要求先测试能否简单放行，复杂修改另行确认。本轮只扩展 KVMem Engine、
 服务参数和 Windows 启动器的快速 prefill 准入清单，复用已有原生 prompt
 Attention 内核，没有修改生产量化算法、Attention 算法或调度架构。
@@ -23,9 +26,9 @@ KVMem 下不准入这个快速内核开关；它们各自的普通路径不受�
 - 固定基线 `6e9189c1089f6968e29fe2e1c51b4596e2346eed`，既有 Release 构建目录，
   CUDA 13.2、sm_120a、MSVC 14.44.35207；编译采用 8 个并行任务。
 - 数值和参数检查使用空闲的 RTX 5050 Laptop，UUID
-  `GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`。
+  `GPU-A`。
 - 真实模型检查使用能容纳模型的 RTX 5060 Ti，UUID
-  `GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`，device profile 为 off。
+  `GPU-B`，device profile 为 off。
 - 模型 `converted-models/Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`；图片为
   `p9-inputs/red.png` 和 `blue.png`，512×512、每图实际 256 merged tokens，
   配置上限 1024。

@@ -10,6 +10,54 @@ try {
         [IO.File]::WriteAllText((Join-Path $testDir $name), 'dry-run fixture')
     }
     $common = @{ Worker = (Join-Path $testDir 'worker.exe'); Gpu = 'GPU-test'; DryRun = $true; WarningAction = 'SilentlyContinue' }
+    $template = Join-Path $testDir 'chat template.jinja'
+    [IO.File]::WriteAllText($template, 'test template')
+    foreach ($backend in 'llamacpp', 'ninfer') {
+        $model = Join-Path $testDir $(if ($backend -eq 'ninfer') { 'model with spaces.ninfer' } else { 'model.gguf' })
+        $plan = & $launcher @common -Backend $backend -Model $model -ApiKey 'test-key-123' `
+            -ModelAlias 'Friendly model' -ChatTemplateFile $template -LogLevel debug -ThinkingMode off -Concurrency 2 | ConvertFrom-Json
+        $aliasFlag = if ($backend -eq 'ninfer') { '--model-id' } else { '--alias' }
+        $templateFlag = if ($backend -eq 'ninfer') { '--chat-template' } else { '--chat-template-file' }
+        $parallelFlag = if ($backend -eq 'ninfer') { '--max-concurrency' } else { '--parallel' }
+        $thinkingFlag = if ($backend -eq 'ninfer') { '--no-thinking' } else { '--no-think' }
+        foreach ($pair in @(@($aliasFlag, 'Friendly model'), @($templateFlag, $template), @($parallelFlag, '2'), @('--api-key', '<redacted>'))) {
+            if ($plan.argv[[array]::IndexOf($plan.argv, $pair[0]) + 1] -ne $pair[1]) { throw 'Common UI field lost its native mapping' }
+        }
+        if ($plan.argv -notcontains $thinkingFlag -or $plan.argv -contains 'test-key-123') { throw 'Thinking mapping or preview redaction failed' }
+        foreach ($level in 'off', 'error', 'warning', 'info', 'trace', 'debug') {
+            $levels = & $launcher @common -Backend $backend -Model $model -LogLevel $level | ConvertFrom-Json
+            $flag = if ($backend -eq 'ninfer') { '--log-level' } else { '--verbosity' }
+            $expected = if ($backend -eq 'ninfer') { $level } else { "$(@{off=0; error=1; warning=2; info=3; trace=4; debug=5}[$level])" }
+            if ($levels.argv[[array]::IndexOf($levels.argv, $flag) + 1] -ne $expected) { throw 'Log level mapping changed native levels' }
+        }
+        $defaults = & $launcher @common -Backend $backend -Model $model -ThinkingMode default | ConvertFrom-Json
+        if (@($defaults.argv | Where-Object { $_ -match '^--(enable-thinking|no-think(ing)?)$' }).Count) { throw 'Default thinking must inherit the native default' }
+        foreach ($case in @(@{Concurrency=9}, @{ApiKey='two,keys'}, @{ChatTemplateFile=(Join-Path $testDir 'missing.jinja')},
+            @{ModelAlias='name'; WorkerArgs=@($aliasFlag, 'duplicate')})) {
+            $rejected = $false
+            try { $null = & $launcher @common -Backend $backend -Model $model @case } catch { $rejected = $true }
+            if (!$rejected) { throw 'Invalid or conflicting new service setting accepted' }
+        }
+    }
+    $thinkingOn = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') -ThinkingMode on -Concurrency 8 | ConvertFrom-Json
+    if ($thinkingOn.argv -notcontains '--enable-thinking') { throw 'llama thinking-on mapping failed' }
+    $splitKv = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') -KvTypeK q8_0 -KvTypeV q4_0 | ConvertFrom-Json
+    if ($splitKv.argv -contains '--kv-dtype' -or
+        $splitKv.argv[[array]::IndexOf($splitKv.argv, '--cache-type-k') + 1] -ne 'q8_0' -or
+        $splitKv.argv[[array]::IndexOf($splitKv.argv, '--cache-type-v') + 1] -ne 'q4_0') {
+        throw 'Independent K/V settings lost their separate native flags'
+    }
+    foreach ($case in @(
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); ThinkingMode='on'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvTypeK='q8_0'},
+        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); KvTypeK='q8_0'; KvTypeV='f16'},
+        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); KvTypeK='q8_0'; WorkerArgs=@('--cache-type-v', 'q5_0')},
+        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); Concurrency=9}
+    )) {
+        $rejected = $false
+        try { $null = & $launcher @common @case } catch { $rejected = $true }
+        if (!$rejected) { throw 'Unsupported thinking or KV combination accepted' }
+    }
     $native = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
         -WorkerArgs @('--chat-template', 'template with spaces.jinja') | ConvertFrom-Json
     if ($native.backend -ne 'ninfer' -or $native.argv[1] -ne (Join-Path $testDir 'model with spaces.ninfer') -or
@@ -85,6 +133,16 @@ try {
             $disk.argv[[array]::IndexOf($disk.argv, '--kvmem-host-mib') + 1] -ne '512' -or
             !$disk.capabilities.active_kv_tiering -or $disk.capabilities.ssd_persistence -ne 'process') {
             throw 'Shared H/D launcher mapping changed ownership or path boundaries'
+        }
+    }
+    foreach ($backend in 'llamacpp', 'ninfer') {
+        foreach ($count in 2, 8) {
+            $model = Join-Path $testDir $(if ($backend -eq 'ninfer') {'model with spaces.ninfer'} else {'model.gguf'})
+            $ssd = & $launcher @common -Backend $backend -Model $model -Concurrency $count `
+                -DiskPath 'cache' -DiskMiB 1024 -HostMiB 512 | ConvertFrom-Json
+            if ($ssd.argv -notcontains '--kvmem-disk-path' -or $ssd.argv -notcontains '--kvmem-disk-mib') {
+                throw 'Concurrent public SSD parameters were lost'
+            }
         }
     }
     $fastDisk = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
@@ -185,7 +243,7 @@ try {
         $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
             -WorkerArgs @('--kvmem-recent-tokens', '128')
     } catch {
-        $windowsRejected = $_.Exception.Message -match 'Use -SinkTokens and -RecentTokens'
+        $windowsRejected = $_.Exception.Message -match 'KVMem common options are owned by the launcher'
     }
     if (!$windowsRejected) { throw 'native sink/recent argument was accepted' }
     $windowsFit = $false
@@ -199,7 +257,23 @@ try {
     $llama = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') `
         -WorkerArgs @('--spec-type', 'draft-mtp') | ConvertFrom-Json
     if ($llama.argv -notcontains 'draft-mtp' -or !$llama.capabilities.speculative_decoding -or
-        !$llama.capabilities.disk_restore -or $llama.argv -contains '--kvmem-host-mib') { throw 'llama native options changed' }
+        !$llama.capabilities.disk_restore -or $llama.argv -notcontains '--kvmem-host-mib') { throw 'llama native options changed' }
+    foreach ($backend in 'ninfer', 'llamacpp') {
+        $model = if ($backend -eq 'ninfer') { 'model with spaces.ninfer' } else { 'model.gguf' }
+        $disabled = & $launcher @common -Backend $backend -Model (Join-Path $testDir $model) `
+            -RetainedSessions 2 -NoLrfu -DiskMiB 0 | ConvertFrom-Json
+        if ($disabled.argv -notcontains '--kvmem' -or $disabled.argv -notcontains '--no-kvmem-lrfu' -or
+            $disabled.argv -contains '--kvmem-lrfu' -or $disabled.argv -contains '--kvmem-disk-path' -or
+            $disabled.argv[[array]::IndexOf($disabled.argv, '--kvmem-sessions') + 1] -ne '2') {
+            throw 'Common KVMem enablement, sessions or off switches were not exported consistently'
+        }
+        foreach ($flag in '--kvmem', '--no-kvmem', '--kvmem-budget', '--kvmem-sessions', '--no-kvmem-lrfu') {
+            $rejected = $false
+            try { $null = & $launcher @common -Backend $backend -Model (Join-Path $testDir $model) -WorkerArgs @($flag) }
+            catch { $rejected = $_.Exception.Message -match 'KVMem common options' }
+            if (!$rejected) { throw 'Duplicate common KVMem argument accepted' }
+        }
+    }
     foreach ($residency in 'resident', 'cpu') {
         foreach ($adaptive in $false, $true) {
             $imageCopy = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `

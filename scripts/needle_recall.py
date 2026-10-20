@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Needle canary: recency should miss a mid-prompt fact; retrieval may revive it.
 
-Default GPU is the 5050 (`--gpu small`). 27B must use `--gpu 27b` (5090).
+Select the validation GPU with --gpu or the inherited environment.
 """
 from __future__ import annotations
 
@@ -20,13 +20,7 @@ NEEDLE = "The secret code is BLUEBIRD-42."
 
 
 def find_cli() -> Path:
-    for p in (
-        ROOT / "build/bin/llama-kvmem-cli",
-        ROOT / "build/llama-kvmem-cli",
-    ):
-        if p.is_file():
-            return p
-    raise SystemExit("llama-kvmem-cli not found; run scripts/build-cuda.sh")
+    return gpu_env.find_binary("llama-kvmem-cli")
 
 
 def make_prompt(no_think: bool = False) -> str:
@@ -53,7 +47,7 @@ def make_prompt(no_think: bool = False) -> str:
 
 
 def run_text(cli: Path, model: Path, extra: list[str], prompt: str, n: int,
-             gpu: str = "small") -> tuple[str, str]:
+             gpu: str | None = None) -> tuple[str, str]:
     env = gpu_env.apply_gpu(os.environ.copy(), gpu)
     env.setdefault("KVMEM_TRACE", "1")
     cmd = [
@@ -64,7 +58,7 @@ def run_text(cli: Path, model: Path, extra: list[str], prompt: str, n: int,
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
         raise SystemExit(f"command failed rc={proc.returncode}")
-    gpu_env.require_device(proc.stderr, env["KVMEM_GPU_NAME"])
+    gpu_env.require_device(proc.stderr, env)
     keys = (
         "KVMEM_TRACE retrieval",
         "stage_in_raw",
@@ -104,11 +98,11 @@ def main() -> int:
     ap.add_argument("--query-last", type=int, default=64)
     ap.add_argument("--force-substr", default="")
     ap.add_argument("-n", "--n-predict", type=int, default=48)
-    ap.add_argument("--gpu", choices=("small", "27b", "5050", "5090"), default="small",
-                    help="small/5050 = RTX 5050; 27b/5090 = RTX 5090 (27B only)")
     ap.add_argument("--no-think", action="store_true",
                     help="Qwen chat wrap with empty <think></think> (disable reasoning)")
+    gpu_env.add_gpu_argument(ap)
     args = ap.parse_args()
+    args.gpu = gpu_env.configure(args.gpu)
 
     extra = [
         "--kvmem",

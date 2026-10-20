@@ -36,3 +36,7 @@ CLAUDE.md
 *.nkm
 /dsh-*/
 /results/
+
+# Private validation preferences and original unsanitized evidence.
+/.kvmem-local.json
+/private-evidence/

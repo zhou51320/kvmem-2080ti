@@ -970,29 +970,26 @@ static int decode_span(llama_context * ctx, const llama_token * toks, int pos0, 
     // Explicit pos: T5 query sits in the middle of the prompt (last user, then
     // assistant tool XML + role=tool). llama_batch_get_one would append at
     // seq_pos_max+1 and miss the hole after seq_rm(q0,q1).
-    llama_batch batch = llama_batch_init(n_batch, 0, 1);
+    common_batch batch(ctx);
     int n_pos = pos0;
     while (n_pos < pos1) {
         if (!kvmem::poll_request(io)) {
             kvmem_diag("KVMEM_TRACE stream_abort phase=prefill pos=%d what=%s\n",
                     n_pos, what ? what : "");
-            llama_batch_free(batch);
             return KVMEM_DECODE_ABORT;
         }
         const int n = std::min(n_batch, pos1 - n_pos);
-        common_batch_clear(batch);
+        batch.clear();
         for (int i = 0; i < n; ++i) {
-            common_batch_add(batch, toks[n_pos + i], n_pos + i, { 0 }, i == n - 1);
+            batch.add(toks[n_pos + i], n_pos + i, 0, i == n - 1);
         }
-        const int rc = llama_decode(ctx, batch);
+        const int rc = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get());
         if (rc != 0) {
             fprintf(stderr, "llama_decode(%s) failed rc=%d at pos=%d n=%d\n", what, rc, n_pos, n);
-            llama_batch_free(batch);
             return rc;
         }
         n_pos += n;
     }
-    llama_batch_free(batch);
     return 0;
 }
 
@@ -1068,18 +1065,7 @@ static MultimodalCheckpoint multimodal_checkpoint(LlamaEngineState & st, int row
 }
 
 static void multimodal_remember(LlamaEngineState & st, MultimodalCheckpoint checkpoint) {
-    auto & entries = st.mm_checkpoints;
-    entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const auto & entry) {
-        return entry.row >= checkpoint.row;
-    }), entries.end());
-    entries.push_back(std::move(checkpoint));
-    if (entries.size() > 4) {
-        const auto media_count = std::count_if(entries.begin(), entries.end(), [](const auto & e) { return e.media_boundary; });
-        auto victim = std::find_if(entries.begin(), entries.end(), [&](const auto & e) {
-            return e.media_boundary == (media_count > 2);
-        });
-        entries.erase(victim == entries.end() ? entries.begin() : victim);
-    }
+    st.mm_checkpoints.remember(std::move(checkpoint));
 }
 
 static void multimodal_restore(LlamaEngineState & st, const MultimodalCheckpoint & checkpoint, bool truncate,
@@ -1114,6 +1100,8 @@ static void multimodal_restore(LlamaEngineState & st, const MultimodalCheckpoint
         llama_kvmem_truncate_cached(checkpoint.row);
         if (!llama_kvmem_set_tail_mean(checkpoint.row, checkpoint.data->tail_mean))
             throw std::runtime_error("mean-K checkpoint restore rejected");
+        if (!llama_kvmem_restore_checkpoint_tail())
+            throw std::runtime_error("checkpoint KV coverage is incomplete");
     }
     st.mm_live_row = checkpoint.row;
     st.mm_live_checkpoint = checkpoint.data;
@@ -1174,7 +1162,7 @@ static int multimodal_decode_span(LlamaEngineState & st, int begin, int end, boo
             st.mm_perf.target_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         }
         const auto draft_start = std::chrono::steady_clock::now();
-        if (rc == 0 && st.spec.ok && !common_speculative_process(st.spec.spec, batch)) rc = -1;
+        if (rc == 0 && st.spec.ok && !kvmem_spec_process(st.spec.spec, st.ctx, batch)) rc = -1;
         if (diagnostic && st.spec.ok) {
             llama_synchronize(st.spec.ctx_dft);
             st.mm_perf.draft_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - draft_start).count();
@@ -1208,7 +1196,7 @@ static int multimodal_decode_span(LlamaEngineState & st, int begin, int end, boo
             if (next > end) throw std::runtime_error("prefill boundary splits an image");
             if (!replay) {
                 auto checkpoint = multimodal_checkpoint(st, row);
-                checkpoint.media_boundary = true;
+                checkpoint.purposes = kvmem::CheckpointPurpose::MediaBoundary;
                 multimodal_remember(st, std::move(checkpoint));
             }
             const int rc = st.vision->decode(st.ctx, prompt, row, st.n_batch, dispatch);
@@ -1261,21 +1249,19 @@ static bool run_prefill_multimodal(LlamaEngineState & st, kvmem::RequestControl 
         const auto & prompt = *st.active_prompt;
         const int eval_end = (int) prompt.tokens.size() - (st.spec.ok ? 1 : 0);
         const int lcp = st.cached_prompt ? (int) prompt.common_prefix(*st.cached_prompt) : 0;
+        const int observed_lcp = std::max(lcp, std::exchange(st.mm_observed_lcp, 0));
         st.mm_lcp = lcp;
         // Sequence checkpoints do not restore logits. Ordinary decoding must evaluate
         // at least one token; MTP evaluates the pending prompt token in spec_generate.
-        const int keep = std::min({lcp, st.mm_live_row, eval_end - (st.spec.ok ? 0 : 1)});
+        const int keep = int(kvmem::prefix_restore_limit(lcp, st.mm_live_row, eval_end, !st.spec.ok));
         MultimodalCheckpoint base;
         bool found = false;
         {
             kvmem_scoped_ms timer(st.mm_perf.select_checkpoint_ms);
-            for (const auto & checkpoint : st.mm_checkpoints) {
-                if (checkpoint.row <= keep && (!found || checkpoint.row > base.row) && checkpoint.data &&
-                        llama_kvmem_tail_mean_valid(checkpoint.row, checkpoint.data->tail_mean)) {
-                    base = checkpoint;
-                    found = true;
-                }
-            }
+            const auto checkpoint = st.mm_checkpoints.select(keep, [](const auto & candidate) {
+                return llama_kvmem_tail_mean_valid(candidate.row, candidate.data->tail_mean);
+            });
+            if (checkpoint) { base = *checkpoint; found = true; }
         }
         if (!found) {
             // Shared template tokens do not identify a conversation. Like llama-server,
@@ -1291,7 +1277,17 @@ static bool run_prefill_multimodal(LlamaEngineState & st, kvmem::RequestControl 
         st.mm_rollback = std::make_shared<MultimodalCheckpoint>(base);
         st.mm_rollback_prompt = st.cached_prompt ? st.cached_prompt->prefix(base.row) : nullptr;
         st.mm_committed = false;
-        multimodal_restore(st, base, true, true);
+        try {
+            multimodal_restore(st, base, true, true);
+        } catch (const std::exception & error) {
+            kvmem_diag("KVMEM_TRACE checkpoint_restore_fallback row=%d reason=%s\n", base.row, error.what());
+            llama_driver_clear(st);
+            st.mm_lcp = 0;
+            base = multimodal_checkpoint(st, 0);
+            st.mm_rollback = std::make_shared<MultimodalCheckpoint>(base);
+            st.mm_rollback_prompt.reset();
+            multimodal_restore(st, base, true, true);
+        }
         begin_history_round(st);
         llama_kvmem_begin_cached_turn();
         std::vector<uint32_t> starts, ends;
@@ -1380,8 +1376,23 @@ static bool run_prefill_multimodal(LlamaEngineState & st, kvmem::RequestControl 
         }
         if (all_resident) llama_kvmem_keep_selected();
         if (n_cache_hit) *n_cache_hit = base.row;
-        if (multimodal_decode_span(st, base.row, query, false, io) != 0) throw std::runtime_error("multimodal prefill failed or cancelled");
+        std::vector<kvmem::PrefixRange> input_groups;
+        for (const auto & range : ranges) input_groups.push_back({range.first, range.second});
+        const int anchor = int(kvmem::prefix_anchor(base.row, observed_lcp, query, input_groups));
+        if (multimodal_decode_span(st, base.row, anchor, false, io) != 0)
+            throw std::runtime_error("multimodal prefix prefill failed or cancelled");
+        if (anchor > 0) {
+            try {
+                auto checkpoint = multimodal_checkpoint(st, anchor);
+                checkpoint.purposes = kvmem::CheckpointPurpose::ReuseAnchor;
+                multimodal_remember(st, std::move(checkpoint));
+            } catch (const std::exception & error) {
+                kvmem_diag("KVMEM_TRACE reuse_anchor_skipped row=%d reason=%s\n", anchor, error.what());
+            }
+        }
+        if (multimodal_decode_span(st, anchor, query, false, io) != 0) throw std::runtime_error("multimodal prefill failed or cancelled");
         auto query_checkpoint = multimodal_checkpoint(st, query);
+        query_checkpoint.purposes = kvmem::CheckpointPurpose::QueryReplay;
         multimodal_remember(st, query_checkpoint);
         const auto probe_view = llama_kvmem_get_attention_view();
         if (multimodal_decode_span(st, query, eval_end, false, io) != 0) throw std::runtime_error("multimodal query prefill failed or cancelled");
@@ -1891,7 +1902,7 @@ bool llama_driver_prepare(LlamaEngineState & st, const std::vector<llama_token> 
                         llama_memory_seq_pos_min(mem, 0), llama_memory_seq_pos_max(mem, 0),
                         llama_memory_seq_pos_max(mem, 0) + 1);
             }
-            if (st.spec.ctx_dft && !past_query) {
+            if (st.spec.ctx_dft && !st.spec.independent_draft() && !past_query) {
                 llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
                 if (md) {
                     llama_memory_seq_rm(md, 0, q0, q1);
@@ -1905,7 +1916,7 @@ bool llama_driver_prepare(LlamaEngineState & st, const std::vector<llama_token> 
             llama_synchronize(ctx);
             kvmem_diag("KVMEM_TRACE query_replay begin=%d n=%d recr_ckpt=%d\n",
                     q0, q1 - q0, (int) recr_ckpt);
-            if (st.spec.ctx_dft && !past_query) {
+            if (st.spec.ctx_dft && !st.spec.independent_draft() && !past_query) {
                 // First pass of this query: seq_rm left a hole in the draft cache.
                 // M-RoPE cannot fill it while a suffix remains, so drop [q0, inf)
                 // and append in order up to q1. Continuation keeps draft suffix.
@@ -2077,7 +2088,7 @@ bool llama_driver_native_query_span(const LlamaEngineState & st, const std::stri
     prefix_inputs.add_generation_prompt = false;
     std::string prefix;
     try {
-        prefix = common_chat_templates_apply(st.tmpls.get(), prefix_inputs).prompt;
+        prefix = common_chat_templates_apply(st.tmpls.get(), prefix_inputs).prompt.str();
     } catch (const std::exception &) {
         return false; // A template may require the full trailing tool sequence.
     }

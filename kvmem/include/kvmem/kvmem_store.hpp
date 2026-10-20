@@ -323,12 +323,7 @@ struct KvMemStoreConfig {
     uint64_t gpu_resident_block_bytes = 0;
     uint64_t estimated_block_bytes = 0;
     uint64_t cpu_tier_bytes = 0;
-    uint64_t nvme_tier_bytes = 0;
-    std::string nvme_tier_dir;
-    // Reserve the first part of --kvmem-nvme-* for an immutable raw-K
-    // authority. CPU raw-K chunks then become a bounded cache and cold selected
-    // blocks stream directly from SSD into the existing packed staging slabs.
-    bool raw_k_nvme = false;
+
 };
 
 class KvMemStore {

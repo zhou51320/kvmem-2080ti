@@ -36,10 +36,7 @@ SPEC_RE = re.compile(r"accept_pct=([\d.]+)")
 
 
 def find_cli() -> Path:
-    for p in (ROOT / "build/bin/llama-kvmem-cli", ROOT / "build/llama-kvmem-cli"):
-        if p.is_file():
-            return p
-    raise SystemExit("llama-kvmem-cli not found; run scripts/build-cuda.sh")
+    return gpu_env.find_binary("llama-kvmem-cli")
 
 
 def scheme_a_bytes(mtp_bytes: int, mtp_cells: int, n_ctx: int) -> int:
@@ -114,7 +111,6 @@ def run_cli(cli: Path, model: Path, prompt: str, extra: list[str], n_ctx: int,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("-m", "--model", type=Path, default=DEFAULT_MODEL)
-    ap.add_argument("--gpu", choices=("27b", "5090"), default="27b")
     ap.add_argument("--budget", type=int, default=256)
     ap.add_argument("--gen-reserve", type=int, default=256)
     ap.add_argument("--block-tokens", type=int, default=32)
@@ -122,9 +118,9 @@ def main() -> int:
     ap.add_argument("-n", "--n-predict", type=int, default=32)
     ap.add_argument("--lengths", default="8192,16384,32768,65536")
     ap.add_argument("--try-128k", action="store_true")
+    gpu_env.add_gpu_argument(ap)
     args = ap.parse_args()
-    if args.gpu not in ("27b", "5090"):
-        raise SystemExit("P7-3 must run on RTX 5090 (--gpu 27b)")
+    args.gpu = gpu_env.configure(args.gpu)
     if not args.model.is_file():
         raise SystemExit(f"missing {args.model}")
 
@@ -133,7 +129,7 @@ def main() -> int:
         lengths.append(131072)
     pool = args.budget + args.gen_reserve
     cli = find_cli()
-    expect = "RTX 5090"
+    expect = os.environ
     print(
         f"P7-3 VRAM  model={args.model.name} budget={args.budget} "
         f"gen_reserve={args.gen_reserve} pool={pool} n_predict={args.n_predict}",

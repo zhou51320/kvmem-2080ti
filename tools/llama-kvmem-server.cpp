@@ -1,5 +1,6 @@
 #include "llama-kvmem-diag.h"
 #include "llama.h"
+#include "llama-ext.h"
 #include "llama-kvmem-hooks.h"
 #include "llama-kvmem-execution.h"
 #include "kvmem/retrieval_options.hpp"
@@ -11,6 +12,9 @@
 #include "kvmem-server-options.h"
 #include "kvmem-server-auth.h"
 #include "kvmem-server-progress.h"
+#include "kvmem-server-metrics.h"
+#include "kvmem/monitor.hpp"
+#include "kvmem/monitor_hardware.hpp"
 #include "kvmem-lane-pool.h"
 #include "kvmem-execution-scope.h"
 #include <atomic>
@@ -65,7 +69,7 @@ static void print_usage(const char * argv0) {
     fprintf(stderr,
             "usage: %s -m model.gguf [options]\n"
             "\n"
-            "  Independent OpenAI-compatible server with up to two text lanes. Does not patch llama-server.\n"
+            "  Independent OpenAI-compatible server with up to eight inference lanes. Does not patch llama-server.\n"
             "  Endpoints: /v1/chat/completions, /v1/responses (streaming and non-streaming),\n"
             "             /v1/models, /props, /slots, /health, plus the bundled chat UI.\n"
             "\n"
@@ -97,7 +101,7 @@ static void print_usage(const char * argv0) {
             "  -a, --alias NAME           model name exposed by the API\n"
             "  --api-key KEY[,KEY...]     allowed API keys\n"
             "  --api-key-file PATH        one key per line; blank/# lines ignored\n"
-            "  -np, --parallel N          1..4 independent inference lanes (default: 1)\n"
+            "  -np, --parallel N          1..8 independent inference lanes (default: 1)\n"
             "                            context and KV budgets are per lane\n"
             "  -lm, --load-mode MODE      auto | none | mmap | mlock | mmap+mlock | dio\n"
             "  --mmap / --no-mmap         legacy aliases for load-mode mmap / none\n"
@@ -109,6 +113,7 @@ static void print_usage(const char * argv0) {
             "  --main-gpu, -mg N         main device index (default 0)\n"
             "  --split-mode, -sm MODE    none | layer | tensor (multi-GPU requires layer or tensor)\n"
             "  --tensor-split, -ts N,... proportions, one per selected GPU\n"
+            "  --metrics                   enable native Prometheus metrics\n"
             "  Aliases: --usage, --predict, -s, -mm, --no-webui, --path\n"
             "  Environment: supported LLAMA_ARG_* settings apply before CLI; API keys append.\n"
             "  --ui / --webui            enable UI (overrides LLAMA_ARG_UI=0)\n"
@@ -122,14 +127,14 @@ static void print_usage(const char * argv0) {
             "  --repeat-penalty P         repetition penalty > 0 (1); --repetition-penalty alias\n"
             "  --seed N                   uint32 seed (default random)\n"
             "                            request fields override these process defaults\n"
-            "  --kvmem / --no-kvmem       enable KVMem (default on)\n"
-            "  --kvmem-budget N           GPU working-set tokens; 0 = n_ctx\n"
+            "  --kvmem / --no-kvmem       enable/disable KVMem (default off; positive B enables)\n"
+            "  --kvmem-budget N           positive selected-history budget B (default 32768)\n"
             "  --kvmem-block-tokens N     block size (default 128)\n"
             "  --kvmem-sink-tokens N      always-kept prefix; default 0 = one block; rounds down, minimum one block\n"
-            "  --kvmem-gen-reserve N      decode slack (default 256)\n"
-            "  --kvmem-recent-tokens N    always-kept newest suffix in select budget (default 0)\n"
+            "  --kvmem-gen-reserve N      positive append workspace R (default 1024; current output cap <= R)\n"
+            "  --kvmem-recent-tokens N    always-kept newest suffix in B (default 64; rounds down to blocks)\n"
             "  --kvmem-method NAME        recency | retrieval (default retrieval)\n"
-            "  --kvmem-lrfu               rank by decayed retrieval history\n"
+            "  --kvmem-lrfu / --no-kvmem-lrfu enable/disable retrieval history ranking (default off)\n"
             "  --kvmem-lrfu-lambda X      history decay [0,1] (default 0.5)\n"
             "  --kvmem-lrfu-top-frac X    hit fraction (0,1] (default 0.9)\n"
             "  --kvmem-score-agg MODE     mean | max across GQA heads (default mean)\n"
@@ -141,28 +146,25 @@ static void print_usage(const char * argv0) {
             "  --kvmem-mtp-state MODE     snapshots, auto or replay (default replay with MTP)\n"
             "  --kvmem-gpu-ratio R        cap slot pool at this fraction of GPU VRAM (default 0.50)\n"
             "  --kvmem-cpu-gb GB          CPU spill arena in GiB (0 = off)\n"
-            "  --kvmem-host-mib MIB      shared native K/V RAM quota (default unlimited)\n"
-            "  --kvmem-disk-mib MIB      active/idle native K/V SSD quota (default off)\n"
+            "  --kvmem-host-mib MIB      positive shared native K/V RAM quota (default 16384 MiB)\n"
+            "  --kvmem-disk-mib MIB      active/idle native K/V SSD quota; 0 = off (default)\n"
             "  --kvmem-disk-path PATH    process-local native K/V spill directory\n"
-            "  --kvmem-nvme-gb GB         NVMe file in GiB (0 = off)\n"
-            "  --kvmem-nvme-dir PATH      NVMe directory (default /tmp/kvmem_nvme)\n"
-            "  --kvmem-harvest-v          prefill D2H V with raw-K (default off; RAM until NVMe flush)\n"
-            "  --kvmem-raw-k-nvme         store raw-K and V on NVMe (needs --kvmem-nvme-gb)\n"
-            "  --kvmem-conversations N    live host KV stores, time-multiplexed on one GPU\n"
-            "                            working set (default 1 = today's single store)\n"
+            "  --kvmem-harvest-v          optional prefill D2H V capture (default off)\n"
+            "  --kvmem-sessions N         inactive histories to retain (default 4); active requests excluded\n"
+            "  --kvmem-conversations N    LEGACY total host stores, includes active requests\n"
+            "                            incompatible with --kvmem-sessions; no same-value alias\n"
             "  --kvmem-conversations-gb GB soft cap on total active + idle session RAM, moving\n"
             "                            idle KV by LRU (0 = unlimited; active may exceed cap)\n"
             "  --kvmem-session-ram-gb GB  alias for the RAM soft cap\n"
-            "  --kvmem-session-nvme-gb GB disk quota for inactive sessions (default 0 = off)\n"
-            "  --kvmem-session-cache-dir PATH private cache directory on your NVMe/SSD\n"
             "                            LRU RAM -> disk -> discard; active session must fit RAM\n"
             "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | f32 | q8_0 | q5_0 | q4_0 (default q8_0)\n"
             "  -ctk, --cache-type-k TYPE  GPU K cache type (llama.cpp name; default q8_0)\n"
             "  -ctv, --cache-type-v TYPE  GPU V cache type (quantized: independently q8_0 | q5_0 | q4_0)\n"
-            "  --spec-type TYPE           none | draft-mtp (default none)\n"
-            "  --spec-kv-dtype TYPE       MTP K/V type (default f16)\n"
-            "  --spec-draft-n-max N       MTP draft tokens (default 3)\n"
+            "  --spec-type TYPE           none | draft-mtp | draft-dflash (default none)\n"
+            "  --spec-kv-dtype TYPE       draft K/V type (default f16)\n"
+            "  --spec-draft-n-max N       draft tokens (default 3)\n"
             "  --spec-draft-p-min P       min draft probability (default 0)\n"
+            "  --spec-draft-model PATH    DFlash2 draft GGUF; optional sidecar for MTP\n"
             "  --jinja                    native Jinja rendering (always enabled)\n"
             "  --chat-template TEMPLATE   override model chat template (Jinja text)\n"
             "  --chat-template-file PATH  load a Jinja template file\n"
@@ -385,15 +387,13 @@ static common_params_sampling make_chat_sampling(
 
 static common_chat_msg parse_assistant_output(
         const std::string & content,
-        const common_chat_params & chat,
-        bool parse_tools) {
+        const common_chat_params & chat) {
     try {
         common_chat_parser_params pp(chat);
-        pp.parse_tool_calls = parse_tools;
         if (!chat.parser.empty()) {
-            pp.parser.load(chat.parser);
+            pp.parser = chat.parser;
         }
-        common_chat_msg msg = common_chat_parse(content, false, pp);
+        common_chat_msg msg = common_chat_parse(common_chat_input(content), false, pp);
         if (msg.role.empty()) {
             msg.role = "assistant";
         }
@@ -506,12 +506,11 @@ struct ResponsesStreamOut {
 
     common_chat_parser_params pp;
 
-    ResponsesStreamOut(const common_chat_params & chat, bool parse_tools, const std::string & id)
+    ResponsesStreamOut(const common_chat_params & chat, const std::string & id)
         : request_id(id) {
         pp = common_chat_parser_params(chat);
-        pp.parse_tool_calls = parse_tools;
         if (!chat.parser.empty()) {
-            pp.parser.load(chat.parser);
+            pp.parser = chat.parser;
         }
     }
 
@@ -519,7 +518,7 @@ struct ResponsesStreamOut {
         acc = text;
         std::vector<std::string> events;
         try {
-            common_chat_msg msg = common_chat_parse(acc, partial, pp);
+            common_chat_msg msg = common_chat_parse(common_chat_input(acc), partial, pp);
             if (msg.empty() && partial) {
                 return events;
             }
@@ -554,11 +553,10 @@ struct StreamChatOut {
     int n_id = 0;
     int n_tc_delta = 0;
 
-    StreamChatOut(const common_chat_params & chat, bool parse_tools, const std::string & id) : request_id(id) {
+    StreamChatOut(const common_chat_params & chat, const std::string & id) : request_id(id) {
         pp = common_chat_parser_params(chat);
-        pp.parse_tool_calls = parse_tools;
         if (!chat.parser.empty()) {
-            pp.parser.load(chat.parser);
+            pp.parser = chat.parser;
         }
     }
 
@@ -566,7 +564,7 @@ struct StreamChatOut {
         acc = text;
         std::vector<json> chunks;
         try {
-            common_chat_msg msg = common_chat_parse(acc, partial, pp);
+            common_chat_msg msg = common_chat_parse(common_chat_input(acc), partial, pp);
             if (msg.empty() && partial) {
                 return chunks;
             }
@@ -832,7 +830,6 @@ int main(int argc, char ** argv) {
     int image_min_tokens = -1, image_max_tokens = -1;
     float video_fps = 2.0f;
     std::string host = "127.0.0.1";
-    std::string nvme_dir;
     int port = 8080;
     int n_ctx = 2048;
     int ngl = 99;
@@ -844,10 +841,8 @@ int main(int argc, char ** argv) {
     int requested_conversations = 1;
     st.kparams.mtp_state = 2; // ReplaySSM by default when MTP is enabled.
     st.kparams.block_tokens = 128;
-    st.kparams.gen_reserve = 256;
     st.kparams.recent_tokens = 0;
     st.kparams.method = 1;
-    st.kparams.enabled = true;
     st.kparams.query_begin = -1;
     st.kparams.query_end = -1;
     st.kparams.force_pos = -1;
@@ -956,34 +951,11 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "invalid %s: %s\n", arg, e.what());
                 return 1;
             }
-        } else if (eq(arg, "--kvmem")) {
-            st.kparams.enabled = true;
-        } else if (eq(arg, "--no-kvmem")) {
-            st.kparams.enabled = false;
-        } else if (eq(arg, "--kvmem-budget")) {
-            st.kparams.budget = (uint32_t) kvmem_cli_int(arg, need(arg));
         } else if (eq(arg, "--kvmem-block-tokens")) {
-            st.kparams.block_tokens = (uint32_t) kvmem_cli_int(arg, need(arg));
-        } else if (eq(arg, "--kvmem-gen-reserve")) {
-            st.kparams.gen_reserve = (uint32_t) kvmem_cli_int(arg, need(arg));
-        } else if (eq(arg, "--kvmem-recent-tokens")) {
-            const int v = kvmem_cli_int(arg, need(arg));
-            if (v < 0) {
-                fprintf(stderr, "invalid --kvmem-recent-tokens (want >= 0)\n");
-                return 1;
-            }
-            st.kparams.recent_tokens = (uint32_t) v;
+            st.kparams.block_tokens = (uint32_t) kvmem_cli_int(arg, need(arg), 1);
         } else if (eq(arg, "--kvmem-method")) {
             const char * m = need(arg);
             st.kparams.method = (eq(m, "retrieval") || eq(m, "retrieve")) ? 1 : 0;
-        } else if (eq(arg, "--kvmem-lrfu")) {
-            st.kparams.lrfu = true;
-        } else if (eq(arg, "--kvmem-lrfu-lambda")) {
-            st.kparams.lrfu_lambda = kvmem::parse_lrfu_real(need(arg), true);
-        } else if (eq(arg, "--kvmem-lrfu-top-frac")) {
-            st.kparams.lrfu_top_fraction = kvmem::parse_lrfu_real(need(arg), false);
-        } else if (eq(arg, "--kvmem-score-agg")) {
-            st.kparams.score_agg = kvmem::parse_score_aggregation(need(arg));
         } else if (eq(arg, "--kvmem-query-last")) {
             st.query_last_fallback = kvmem_cli_int(arg, need(arg));
         } else if (eq(arg, "--kvmem-query-replay")) {
@@ -1013,16 +985,8 @@ int main(int argc, char ** argv) {
             const double gb = kvmem_cli_real(arg, need(arg), 0, 1048576);
             st.kparams.cpu_bytes = gb <= 0.0 ? 0
                 : static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
-        } else if (eq(arg, "--kvmem-nvme-gb")) {
-            const double gb = kvmem_cli_real(arg, need(arg), 0, 1048576);
-            st.kparams.nvme_bytes = gb <= 0.0 ? 0
-                : static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
-        } else if (eq(arg, "--kvmem-nvme-dir")) {
-            nvme_dir = need(arg);
         } else if (eq(arg, "--kvmem-harvest-v")) {
             st.kparams.harvest_v = true;
-        } else if (eq(arg, "--kvmem-raw-k-nvme")) {
-            st.kparams.raw_k_nvme = true;
         } else if (eq(arg, "--kv-dtype") || eq(arg, "-ctk") || eq(arg, "--cache-type-k")
                    || eq(arg, "-ctv") || eq(arg, "--cache-type-v")) {
             bool ok = false;
@@ -1050,14 +1014,19 @@ int main(int argc, char ** argv) {
             }
         } else if (eq(arg, "--spec-type")) {
             const char * t = need(arg);
-            if (eq(t, "draft-mtp")) {
-                st.spec_mtp = true;
+            if (eq(t, "draft-mtp") || eq(t, "mtp")) {
+                st.spec_algorithm = kvmem::SpeculativeAlgorithm::Mtp;
+            } else if (eq(t, "draft-dflash") || eq(t, "dflash2")) {
+                st.spec_algorithm = kvmem::SpeculativeAlgorithm::DFlash2;
             } else if (eq(t, "none")) {
-                st.spec_mtp = false;
+                st.spec_algorithm = kvmem::SpeculativeAlgorithm::None;
             } else {
-                fprintf(stderr, "unsupported --spec-type %s (P7-0: draft-mtp|none)\n", t);
+                fprintf(stderr, "unsupported --spec-type %s (none|draft-mtp|draft-dflash)\n", t);
                 return 1;
             }
+            st.spec_enabled = st.spec_algorithm != kvmem::SpeculativeAlgorithm::None;
+        } else if (eq(arg, "--spec-draft-model") || eq(arg, "-md")) {
+            st.spec_draft_model = need(arg);
         } else if (eq(arg, "--spec-draft-n-max")) {
             st.spec_n_max = kvmem_cli_int(arg, need(arg));
         } else if (eq(arg, "--spec-draft-p-min")) {
@@ -1111,8 +1080,26 @@ int main(int argc, char ** argv) {
             return 1;
         }
     }
+    options.resolve();
+    st.kparams.enabled = options.enabled;
+    st.kparams.budget = options.budget;
+    st.kparams.gen_reserve = options.gen_reserve;
+    st.kparams.recent_tokens = options.recent_tokens;
+    st.kparams.lrfu = options.lrfu;
+    st.kparams.lrfu_lambda = options.lrfu_lambda;
+    st.kparams.lrfu_top_fraction = options.lrfu_top_fraction;
+    st.kparams.score_agg = options.score_agg;
+    if (options.sessions_set && options.legacy_conversations)
+        throw std::invalid_argument("--kvmem-sessions counts inactive histories; do not combine it with legacy --kvmem-conversations");
+    if (options.legacy_conversations)
+        fprintf(stderr, "KVMEM_CONFIG deprecated --kvmem-conversations counts total stores; migrate explicitly to --kvmem-sessions (inactive histories only)\n");
+    if (options.enabled && !options.legacy_conversations &&
+        options.conversation_bytes)
+        throw std::invalid_argument("legacy session budgets require explicit --kvmem-conversations; use --kvmem-host-mib/--kvmem-disk-mib for the shared payload budget");
+    if (options.enabled && uint64_t(options.budget) + options.gen_reserve > uint64_t(n_ctx))
+        throw std::invalid_argument("KVMem B+R must fit --ctx-size; set explicit --kvmem-budget/--kvmem-gen-reserve or increase context");
     requested_conversations = options.conversations;
-    options.conversations = std::max(options.conversations, options.parallel);
+    if (options.legacy_conversations) options.conversations = std::max(options.conversations, options.parallel);
     st.kparams.sink_tokens = static_cast<uint32_t>(options.sink_tokens);
     st.kparams.payload_host_bytes = options.payload_host_bytes;
     st.kparams.payload_disk_bytes = options.payload_disk_bytes;
@@ -1121,29 +1108,16 @@ int main(int argc, char ** argv) {
         throw std::invalid_argument("--kvmem-disk-path and --kvmem-disk-mib must be provided together");
     if (options.payload_disk_bytes && (!options.payload_host_bytes || !st.kparams.enabled))
         throw std::invalid_argument("KVMem SSD requires --kvmem-host-mib and KVMem enabled");
-    if (options.payload_disk_bytes && (options.session_disk_bytes || st.kparams.cpu_bytes ||
-            st.kparams.nvme_bytes || st.kparams.raw_k_nvme))
-        throw std::invalid_argument("shared KV SSD cannot be combined with legacy spill stores");
-    // Cross-checks on the two new flags, thrown so they reach the
-    // "invalid arguments (source=...)" printer below the way every other
-    // rejection here does. Neither can fire without one of the flags, so the
-    // default path prints nothing new.
+    if (options.payload_disk_bytes && st.kparams.cpu_bytes)
+        throw std::invalid_argument("shared KV SSD cannot be combined with the legacy CPU spill arena");
+    // Legacy total-store and soft-budget compatibility checks. These are not
+    // aliases for the public inactive-history count or payload hard budget.
     if (options.conversations > 1 && !st.kparams.enabled) {
         throw std::invalid_argument("--kvmem-conversations > 1 requires KVMem; drop --no-kvmem");
     }
     if (options.conversation_bytes != 0 && options.conversations <= 1) {
         throw std::invalid_argument("--kvmem-conversations-gb caps the host stores that "
                                     "--kvmem-conversations N creates; pass N > 1 or drop the cap");
-    }
-    if (options.session_disk_bytes) {
-        if (options.conversations <= 1 || options.session_cache_dir.empty())
-            throw std::invalid_argument("session disk cache requires --kvmem-conversations N > 1, "
-                "and --kvmem-session-cache-dir PATH");
-        if (st.kparams.cpu_bytes || st.kparams.nvme_bytes || st.kparams.raw_k_nvme)
-            throw std::invalid_argument("session disk cache requires --kvmem-cpu-gb 0 and --kvmem-nvme-gb 0; "
-                "do not combine it with --kvmem-raw-k-nvme");
-    } else if (!options.session_cache_dir.empty()) {
-        throw std::invalid_argument("--kvmem-session-cache-dir requires --kvmem-session-nvme-gb > 0");
     }
     // Some pinned llama.cpp trace sites test presence rather than the value.
     // Normalize "0"/empty and CLI-off to an absent variable before loading models.
@@ -1164,12 +1138,6 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "invalid arguments (source=%s): %s\n", argument_source.c_str(), e.what());
         return 1;
     }
-#if !KVMEM_ENABLE_NVME
-    if (st.kparams.nvme_bytes || st.kparams.raw_k_nvme) {
-        fprintf(stderr, "NVMe offload is disabled in this build (KVMEM_ENABLE_NVME=OFF)\n");
-        return 1;
-    }
-#endif
     // Validate before backend initialization and loading a potentially large model.
     if (!kvmem_cache_types_ok(st.cache_type_k, st.cache_type_v)) {
         fprintf(stderr, "incompatible KV cache types: K=%s, V=%s; quantized K/V must both use q8_0, q5_0 or q4_0; "
@@ -1208,9 +1176,9 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "KVMEM_STARTUP_ERROR --kvmem-block-tokens must be positive\n");
         return 1;
     }
-    if (st.spec_mtp && st.kparams.enabled && st.kparams.mtp_state == 2 &&
+    if (st.spec_enabled && st.kparams.enabled && st.kparams.mtp_state == 2 &&
             (st.spec_n_max < 1 || st.spec_n_max > 5)) {
-        fprintf(stderr, "KVMEM_STARTUP_ERROR replay MTP requires --spec-draft-n-max in 1..5\n");
+        fprintf(stderr, "KVMEM_STARTUP_ERROR ReplaySSM requires --spec-draft-n-max in 1..5\n");
         return 1;
     }
 
@@ -1231,18 +1199,15 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // No speculative rollback state is needed without MTP.
-    if (!st.spec_mtp) st.kparams.mtp_state = 0;
+    // No speculative rollback state is needed without drafts.
+    if (!st.spec_enabled) st.kparams.mtp_state = 0;
     if (st.kparams.enabled) {
-        if (!nvme_dir.empty()) {
-            st.kparams.nvme_dir = nvme_dir.c_str();
-        }
         llama_kvmem_set_params(&st.kparams);
     }
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = ngl;
-    mparams.load_mtp = st.spec_mtp;
+    mparams.load_mtp = st.spec_algorithm == kvmem::SpeculativeAlgorithm::Mtp;
     mparams.load_mode = options.load_mode;
     try {
         device_config.apply(options, mparams);
@@ -1250,11 +1215,17 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "invalid GPU configuration: %s\n", e.what());
         return 1;
     }
-    if (mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR && st.spec_mtp && st.kparams.enabled && st.kparams.mtp_state != 0) {
+    if (st.spec_algorithm == kvmem::SpeculativeAlgorithm::DFlash2 &&
+            (st.spec_draft_model.empty() || device_config.devices.size() > 2 ||
+             mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR)) {
+        fprintf(stderr, "KVMEM_STARTUP_ERROR DFlash2 requires --spec-draft-model and one GPU\n");
+        return 1;
+    }
+    if (mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR && st.spec_enabled && st.kparams.enabled && st.kparams.mtp_state != 0) {
         fprintf(stderr, "KVMEM_STARTUP_ERROR tensor KVMem currently supports MTP snapshots only; use --kvmem-mtp-state snapshots\n");
         return 1;
     }
-    if (device_config.devices.size() > 2 && st.spec_mtp && mparams.split_mode != LLAMA_SPLIT_MODE_TENSOR &&
+    if (device_config.devices.size() > 2 && st.spec_enabled && mparams.split_mode != LLAMA_SPLIT_MODE_TENSOR &&
             (!st.kparams.enabled || st.kparams.mtp_state == 1 ||
              (st.kparams.mtp_state == 2 && !config_sources.contains("--kvmem-mtp-state")))) {
         fprintf(stderr, "KVMEM_STARTUP_ERROR multi-GPU MTP requires --kvmem and explicit --kvmem-mtp-state snapshots|replay (auto is not supported yet)\n");
@@ -1266,12 +1237,10 @@ int main(int argc, char ** argv) {
     }
     if (options.parallel > 1 && (!st.kparams.enabled ||
             options.device_names == "none" || mparams.n_gpu_layers == 0 ||
-            options.session_disk_bytes ||
-            st.kparams.nvme_bytes || st.kparams.raw_k_nvme ||
             device_config.devices.size() > 2 || mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR ||
             (options.threads_http > 0 && options.threads_http < 2 * options.parallel))) {
         fprintf(stderr, "KVMEM_STARTUP_ERROR --parallel %d requires KVMem, one target GPU, "
-                "no NVMe/session disk cache, and at least %d HTTP workers\n",
+                "and at least %d HTTP workers\n",
                 options.parallel, 2 * options.parallel);
         return 1;
     }
@@ -1282,6 +1251,10 @@ int main(int argc, char ** argv) {
     };
     if (!readable(model_path)) {
         fprintf(stderr, "KVMEM_STARTUP_ERROR failed to load model: --model file is missing or unreadable: %s\n", model_path.c_str());
+        return 1;
+    }
+    if (!st.spec_draft_model.empty() && !readable(st.spec_draft_model)) {
+        fprintf(stderr, "KVMEM_STARTUP_ERROR --spec-draft-model file is missing or unreadable\n");
         return 1;
     }
     if (!mmproj_path.empty() && !readable(mmproj_path)) {
@@ -1303,7 +1276,7 @@ int main(int argc, char ** argv) {
         {"kv", {{"k", ggml_type_name(st.cache_type_k)}, {"v", ggml_type_name(st.cache_type_v)}}},
         {"kvmem", {{"enabled", st.kparams.enabled}, {"budget", st.kparams.budget}, {"gen_reserve", st.kparams.gen_reserve},
                    {"sink_tokens", st.kparams.sink_tokens}, {"block_tokens", st.kparams.block_tokens}}},
-        {"spec_type", st.spec_mtp ? "draft-mtp" : "none"},
+        {"spec_type", kvmem::speculative_name(st.spec_algorithm)},
         {"vision", {{"enabled", !mmproj_path.empty()}, {"projector", mmproj_path}, {"gpu", mmproj_gpu},
                     {"device", mmproj_gpu ? (mmproj_device_name.empty() ? "auto" : mmproj_device_name) : "CPU"},
                     {"video_fps", video_fps}}},
@@ -1317,6 +1290,10 @@ int main(int argc, char ** argv) {
     st.model = shared_model.get();
     if (!st.model) {
         fprintf(stderr, "failed to load model\n");
+        return 1;
+    }
+    if (st.spec_algorithm == kvmem::SpeculativeAlgorithm::DFlash2 && llama_model_n_devices(st.model) > 1) {
+        fprintf(stderr, "KVMEM_STARTUP_ERROR DFlash2 requires a single target GPU; select one device\n");
         return 1;
     }
     st.vocab = llama_model_get_vocab(st.model);
@@ -1338,13 +1315,14 @@ int main(int argc, char ** argv) {
     cparams.n_seq_max = 1;
     cparams.type_k = st.cache_type_k;
     cparams.type_v = st.cache_type_v;
-    if (st.spec_mtp) {
+    if (st.spec_enabled) {
         const uint32_t n_out = (uint32_t) (1 + std::max(0, st.spec_n_max));
         cparams.n_outputs_max = n_out;
         cparams.n_outputs_max_per_seq = n_out;
         cparams.n_rs_seq = (uint32_t) std::max(0, st.spec_n_max);
     }
     std::shared_ptr<kvmem::HostKvStorage> shared_payload_storage;
+    std::shared_ptr<llama_model> shared_draft_model;
     auto initialize_lane = [&](ServerState & st) {
         kvmem_execution_scope scope(st.execution.get());
         llama_kvmem_set_params(&st.kparams);
@@ -1360,8 +1338,10 @@ int main(int argc, char ** argv) {
         kvmem_diag("KVMEM_CONTEXT target threads=%d threads_batch=%d ubatch=%u flash_attn_requested=%s\n",
                 llama_n_threads(st.ctx), llama_n_threads_batch(st.ctx), llama_n_ubatch(st.ctx),
                 llama_flash_attn_type_name(cparams.flash_attn_type));
-        if (st.spec_mtp) {
+        if (st.spec_enabled) {
             kvmem_spec_opts sopts;
+            sopts.algorithm = st.spec_algorithm;
+            sopts.draft_model = st.spec_draft_model;
             sopts.n_max = st.spec_n_max;
             sopts.p_min = st.spec_p_min;
             sopts.n_gpu_layers = ngl;
@@ -1375,8 +1355,11 @@ int main(int argc, char ** argv) {
             sopts.type_k = st.cache_type_k;
             sopts.type_v = st.cache_type_v;
             sopts.draft_type = st.spec_cache_type;
-            if (!kvmem_spec_start(st.spec, st.model, st.ctx, sopts)) {
+            if (!kvmem_spec_start(st.spec, st.model, st.ctx, sopts, shared_draft_model)) {
                 return false;
+            }
+            if (st.spec_algorithm == kvmem::SpeculativeAlgorithm::DFlash2 && !shared_draft_model) {
+                shared_draft_model = st.spec.init->shared_model();
             }
         }
 
@@ -1407,7 +1390,9 @@ int main(int argc, char ** argv) {
         next->cache_type_k = st.cache_type_k;
         next->cache_type_v = st.cache_type_v;
         next->spec_cache_type = st.spec_cache_type;
-        next->spec_mtp = st.spec_mtp;
+        next->spec_enabled = st.spec_enabled;
+        next->spec_algorithm = st.spec_algorithm;
+        next->spec_draft_model = st.spec_draft_model;
         next->spec_n_max = st.spec_n_max;
         next->spec_p_min = st.spec_p_min;
         next->enable_thinking_default = st.enable_thinking_default;
@@ -1439,26 +1424,18 @@ int main(int argc, char ** argv) {
     // Arm the multi-conversation host stores only now: the adapter refuses the
     // swap in configurations it cannot drain back from host RAM, and flash
     // attention is resolved inside llama_init_from_model, not at parse time.
-    if (options.parallel == 1 && options.conversations > 1) {
+    if (options.legacy_conversations && options.parallel == 1 && options.conversations > 1) {
         if (!llama_kvmem_store_swap_supported()) {
-            if (options.session_disk_bytes) {
-                LOG_ERR("srv    KVMEM session disk cache requires supported session switching (flash attention on)\n");
-                return 1;
-            }
             LOG_WRN("srv    KVMEM --kvmem-conversations %d unavailable in this configuration; "
                     "using one host store\n", options.conversations);
         } else {
             st.conv_limits.max_stores = options.conversations;
             st.conv_limits.max_bytes = options.conversation_bytes;
-            if (options.session_disk_bytes || options.payload_disk_bytes) {
+            if (options.payload_disk_bytes) {
                 try {
                     st.session_files = std::make_unique<kvmem_session_files>(
-                        std::filesystem::u8path(options.payload_disk_bytes ? options.payload_disk_dir : options.session_cache_dir),
-                        options.payload_disk_bytes ? options.payload_disk_bytes : options.session_disk_bytes,
-                        [](bool warning, const std::string & message) {
-                            if (warning) { LOG_WRN("srv    KVMEM session cache %s\n", message.c_str()); }
-                            else { LOG_INF("srv    KVMEM session cache %s\n", message.c_str()); }
-                        }, kvmem_execution_spill_file(st.execution.get()));
+                        std::filesystem::u8path(options.payload_disk_dir),
+                        kvmem_execution_spill_file(st.execution.get()));
                 } catch (const std::exception & e) {
                     LOG_ERR("srv    KVMEM session cache initialization failed: %s\n", e.what()); return 1;
                 }
@@ -1471,30 +1448,19 @@ int main(int argc, char ** argv) {
             llama_driver_publish_conversations(st);
             LOG_INF("srv    KVMEM conversations=%d host_bytes_max=%llu\n",
                     options.conversations, (unsigned long long) st.conv_limits.max_bytes);
-            // Every host store builds its own runtime, so the pinned arena
-            // --kvmem-cpu-gb sizes and the tier --kvmem-nvme-gb sizes are
-            // allocated once per store, not once per process. The server owns
-            // the conversation caps and the adapter is never told the store
-            // count, so say what those two numbers now mean rather than
-            // quietly dividing them.
-            if (st.kparams.cpu_bytes || st.kparams.nvme_bytes) {
-                const double gib = 1024.0 * 1024.0 * 1024.0;
-                LOG_WRN("srv    KVMEM --kvmem-cpu-gb and --kvmem-nvme-gb are per host store: "
-                        "%d stores commit up to %.1f GiB pinned (allocated and zero-filled as "
-                        "stores are created) and overcommit %.1f GiB NVMe (sparse, unlinked)\n",
-                        options.conversations,
-                        options.conversations * (double) st.kparams.cpu_bytes / gib,
-                        options.conversations * (double) st.kparams.nvme_bytes / gib);
+            if (st.kparams.cpu_bytes) {
+                LOG_WRN("srv    KVMEM --kvmem-cpu-gb is per host store: %d stores commit up to %.1f GiB pinned\n",
+                        options.conversations, options.conversations * (double)st.kparams.cpu_bytes / (1024.0 * 1024.0 * 1024.0));
             }
         }
     }
 
     std::unique_ptr<kvmem_lane_conversations> lane_conversations;
-    if (options.parallel > 1) {
+    if (options.parallel > 1 || (options.enabled && !options.legacy_conversations)) {
         for (auto * lane : lanes) {
             kvmem_execution_scope execution(lane->execution.get());
             if (!llama_kvmem_store_swap_supported()) {
-                LOG_ERR("srv    KVMEM multiple lanes require supported host KV switching (flash attention on)\n");
+                LOG_ERR("srv    KVMEM retained histories require supported host KV switching (flash attention on)\n");
                 return 1;
             }
             if (!llama_kvmem_store_compatible_with_execution(lanes[0]->execution.get())) {
@@ -1503,12 +1469,15 @@ int main(int argc, char ** argv) {
             }
             lane->vision = st.vision;
         }
-        lane_conversations = std::make_unique<kvmem_lane_conversations>(lanes, options.conversations, options.conversation_bytes);
-        LOG_INF("srv    KVMEM global conversations=%d lanes=%d cpu_budget_per_store=%llu\n",
-                options.conversations, options.parallel, (unsigned long long)st.kparams.cpu_bytes);
+        lane_conversations = std::make_unique<kvmem_lane_conversations>(lanes, options.legacy_conversations ? options.conversations : int(options.sessions), options.conversation_bytes, !options.legacy_conversations);
+        LOG_INF("srv    KVMEM %s=%u lanes=%d cpu_budget_per_store=%llu\n",
+                options.legacy_conversations ? "legacy_total_stores" : "retained_sessions_limit",
+                options.legacy_conversations ? unsigned(options.conversations) : options.sessions, options.parallel, (unsigned long long)st.kparams.cpu_bytes);
     }
     auto preparation_templates = common_chat_templates_init(st.model, chat_template);
     std::mutex preparation_templates_mutex;
+    kvmem_server_metrics native_metrics;
+    const auto metrics_started = std::time(nullptr);
     httplib::Server svr;
     svr.set_read_timeout(options.timeout, 0);
     svr.set_write_timeout(options.timeout, 0);
@@ -1532,6 +1501,16 @@ int main(int argc, char ** argv) {
         res.status = 204;
     });
 
+    kvmem::monitor monitor;
+    kvmem::monitor_hardware hardware;
+    svr.Get("/monitor", [](const httplib::Request &, httplib::Response & res) { res.set_redirect("/monitor/"); });
+    svr.Get("/api/monitor/snapshot", [&](const httplib::Request &, httplib::Response & res) {
+        auto data = monitor.snapshot();
+        data["hardware"] = hardware.snapshot();
+        data["backend"] = "llamacpp";
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(data.dump(), "application/json");
+    });
     std::unordered_set<std::string> ui_paths;
     if (!kvmem_mount_ui(svr, ui_dir, no_ui, argv[0], &ui_paths)) return 1;
     kvmem_install_auth(svr, options.api_keys, std::move(ui_paths));
@@ -1584,7 +1563,7 @@ int main(int argc, char ** argv) {
         {"modalities", {{"vision", st.vision != nullptr}, {"audio", false},
                         {"video", st.vision && options.parallel == 1 && st.vision->supports_video()}}},
         {"media_marker", mtmd_default_marker()},
-        {"endpoint_slots", true}, {"endpoint_props", false}, {"endpoint_metrics", false},
+        {"endpoint_slots", true}, {"endpoint_props", false}, {"endpoint_metrics", options.metrics},
         {"ui", !no_ui},
         {"ui_settings", json::object()},
         {"chat_template", common_chat_templates_source(st.tmpls.get())},
@@ -1602,19 +1581,63 @@ int main(int argc, char ** argv) {
                           {"reasoning_budget_tokens", st.reasoning_budget_default}, {"chat_template_kwargs", kwargs}}},
             {"sampling", {{"thinking", thinking_params}, {"non_thinking", plain_params}}}}}
     };
+    // Publish physical device identities from the loaded model, not from machine
+    // enumeration order. A zero-load inference device remains part of the service.
+    json monitor_devices = json::array();
+    std::set<ggml_backend_dev_t> inference_devices;
+    const auto add_monitor_device = [&](ggml_backend_dev_t device) {
+        if (!device || ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_CPU ||
+            !inference_devices.insert(device).second) return;
+        ggml_backend_dev_props info{};
+        ggml_backend_dev_get_props(device, &info);
+        monitor_devices.push_back({{"name", info.description ? info.description : info.name},
+            {"pci_bus_id", info.device_id ? json(info.device_id) : json(nullptr)}});
+    };
+    if (mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
+        for (int i = 0; i < llama_model_n_devices(st.model); ++i)
+            add_monitor_device(llama_model_get_device(st.model, i));
+    } else {
+        for (int i = 0; i < llama_model_n_layer(st.model); ++i) add_monitor_device(kvmem_model_layer_device(st.model, i));
+        add_monitor_device(kvmem_model_layer_device(st.model, -1));
+    }
+    props["execution"] = {{"monitor_devices", monitor_devices},
+        {"mode", monitor_devices.size() < 2 ? "single" : mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR ? "tensor" : "layer"}};
     props["kvmem"]["vision"] = startup["vision"];
     props["kvmem"]["parallel"] = options.parallel;
-    props["kvmem"]["conversations_requested"] = requested_conversations;
-    if (options.parallel > 1) props["kvmem"]["conversations"] = options.conversations;
+    props["kvmem"]["enabled"] = options.enabled;
+    props["kvmem"]["retained_sessions_limit"] = options.enabled && !options.legacy_conversations ? json(options.sessions) : json(nullptr);
+    if (options.legacy_conversations) {
+        props["kvmem"]["conversations_requested"] = requested_conversations;
+        props["kvmem"]["conversations"] = options.conversations;
+    }
     props["kvmem"]["conversation_cpu_bytes"] = st.kparams.cpu_bytes;
     props["kvmem"]["conversation_bytes_max"] = options.conversation_bytes;
     // The legacy single-lane capability can degrade to one store.
     if (st.conv_limits.max_stores > 1) {
         props["kvmem"]["conversations"] = st.conv_limits.max_stores;
     }
-    svr.Get("/props", [props](const httplib::Request &, httplib::Response & res) {
+    svr.Get("/props", [props, &lane_conversations, &st, &lanes](const httplib::Request &, httplib::Response & res) {
+        auto current = props;
+        kvmem::SpeculativeStatistics total;
+        for (const auto * lane : lanes) total.add(lane->spec.telemetry->snapshot());
+        current["speculative"] = kvmem::speculative_json<json>(st.spec.config,
+            {{kvmem::SpeculativeAlgorithm::Mtp, 5, false, false, 8, 8, "optional_gguf"},
+             {kvmem::SpeculativeAlgorithm::DFlash2, 5, false, false, 8, 1, "required_gguf"}}, total);
+        if (lane_conversations) current["kvmem"]["usage"] = lane_conversations->status();
         res.set_header("Cache-Control", "no-store");
-        res.set_content(props.dump(), "application/json");
+        res.set_content(current.dump(), "application/json");
+    });
+    svr.Get("/metrics", [&](const httplib::Request &, httplib::Response & res) {
+        if (!options.metrics) {
+            res.status = 501;
+            res.set_content(json{{"error", {{"code", 501}, {"type", "not_supported_error"},
+                {"message", "This server does not support metrics endpoint. Start it with `--metrics`"}}}}.dump(), "application/json");
+            return;
+        }
+        res.set_header("Process-Start-Time-Unix", std::to_string(metrics_started));
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(native_metrics.render(true),
+                "text/plain; version=0.0.4; charset=utf-8");
     });
     svr.Get("/health", [](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\"}", "application/json");
@@ -1733,6 +1756,20 @@ int main(int argc, char ** argv) {
     };
 
     auto handle_chat = [&](const httplib::Request & req, httplib::Response & res) {
+        auto request_metrics = std::make_shared<kvmem_metrics_lease>(native_metrics);
+        const auto monitor_id = monitor.begin(req.path);
+        // The synchronous scope covers validation and non-streaming completion. Streaming
+        // transfers finalization to httplib's resource releaser, including failed writes.
+        bool monitor_stream = false;
+        struct monitor_scope {
+            kvmem::monitor & state; std::string id; const httplib::Request & req;
+            httplib::Response & res; bool & streaming;
+            ~monitor_scope() {
+                if (!streaming) state.finish(id,
+                    req.is_connection_closed && req.is_connection_closed() ? "disconnected" :
+                    res.status >= 400 || std::uncaught_exceptions() ? "error" : "completed");
+            }
+        } monitoring{monitor, monitor_id, req, res, monitor_stream};
         const std::time_t created = std::time(nullptr);
         // /v1/responses reuses this handler: convert the Responses request to
         // Chat Completions first, then select the Responses output shape below.
@@ -1788,6 +1825,8 @@ int main(int argc, char ** argv) {
         }
 
         const auto cancelled = [&req] { return req.is_connection_closed && req.is_connection_closed(); };
+        request_metrics->queue();
+        monitor.update(monitor_id, {{"status", "queued"}, {"limit", cr.max_tokens}});
         auto ticket = lane_pool.enqueue(cr.conversation_id);
         auto cache_reference = lane_conversations ? lane_conversations->pin(cr.conversation_id) : nullptr;
         if (!lane_pool.wait_turn(ticket, cancelled)) return;
@@ -1821,7 +1860,7 @@ int main(int argc, char ** argv) {
             res.set_content(json{{"error", std::string("chat template: ") + e.what()}}.dump(), "application/json");
             return;
         }
-        const std::string & prompt = formatted.prompt;
+        const std::string prompt = formatted.prompt.str();
         std::shared_ptr<kvmem_prompt> parsed_prompt;
         try {
             parsed_prompt = media_files.empty()
@@ -1909,6 +1948,7 @@ int main(int argc, char ** argv) {
             res.set_content(json{{"error", e.what()}}.dump(), "application/json"); return;
         }
         if (!lease) return;
+        request_metrics->admit();
         ServerState & st = *lanes[lease->index];
         std::shared_ptr<kvmem_server_slot_guard> slot;
         try {
@@ -2029,45 +2069,41 @@ int main(int argc, char ** argv) {
                 sparams.reasoning_budget_start.size(),
                 sparams.reasoning_budget_end.size(),
                 sparams.reasoning_budget_forced.size());
-        const bool parse_tools = !cr.tools.empty() &&
-                cr.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
-
         json request_params = default_params;
         request_params["n_predict"] = cr.max_tokens;
         request_params["max_tokens"] = cr.max_tokens;
         request_params["temperature"] = sparams.temp;
+        monitor.update(monitor_id, {{"status", "reading"}, {"prompt_tokens", toks.size()}, {"generated_tokens", 0}});
         st.progress.prompt((int) toks.size(), cr.max_tokens, std::move(request_params));
         st.log.start();
         LOG_INF("slot   processing task, n_prompt = %d, n_predict = %d\n", (int) toks.size(), cr.max_tokens);
         auto timings = std::make_shared<json>(json::object());
         // 1:1 upstream timings block (server-context.cpp): prompt/predicted counts, ms, per-token and per-second rates.
         // 中文：对齐上游的 timings 统计块——prompt/predicted 的计数、耗时、每 token 与每秒速率，供 /v1 响应回传
-        auto make_emit_gen_wall = [timings, &st, n_prompt = (int) toks.size()](
+        auto make_emit_gen_wall = [timings, request_metrics, &st, &monitor, monitor_id, n_prompt = (int) toks.size()](
                 std::chrono::steady_clock::time_point t_turn0,
                 std::chrono::steady_clock::time_point t_pf1,
                 double prefill_ms, int n_cache_hit) {
             const int cache_n = std::clamp(n_cache_hit, 0, n_prompt);
+            const int64_t prefilled_us = ggml_time_us();
+            request_metrics->stats.start(prefilled_us - (int64_t)(prefill_ms * 1000.0));
+            request_metrics->stats.prefilled(n_prompt, cache_n, prefilled_us);
             const int prompt_n = n_prompt - cache_n;
             st.progress.prefilled(cache_n);
+            monitor.update(monitor_id, {{"status", "generating"}, {"cached_tokens", cache_n},
+                {"prefill_tps", prefill_ms > 0 ? json(1000.0 * prompt_n / prefill_ms) : json(nullptr)}});
             st.log.start_generation();
-            return [timings, &st, t_turn0, t_pf1, prefill_ms, n_prompt, prompt_n, cache_n](int n_gen, bool verbose = true) {
+            return [timings, request_metrics, &st, &monitor, monitor_id, t_turn0, t_pf1, prefill_ms, n_prompt, prompt_n, cache_n](int n_gen, bool verbose = true, int64_t sampled_us = 0) {
+                if ((uint64_t)n_gen > request_metrics->stats.native.n_gen)
+                    request_metrics->stats.token(n_gen, sampled_us ? sampled_us : ggml_time_us());
                 st.progress.generated(n_gen);
                 st.log.generated(n_gen);
                 const auto now = std::chrono::steady_clock::now();
                 const double gen_ms = std::chrono::duration<double, std::milli>(now - t_pf1).count();
                 const double prompt_per_second = prefill_ms > 0.0 ? 1000.0 * (double) prompt_n / prefill_ms : 0.0;
                 const double predicted_per_second = gen_ms > 0.0 ? 1000.0 * (double) n_gen / gen_ms : 0.0;
-                *timings = {
-                    {"prompt_n", prompt_n},
-                    {"prompt_ms", prefill_ms},
-                    {"prompt_per_token_ms", prompt_n > 0 ? prefill_ms / (double) prompt_n : 0.0},
-                    {"prompt_per_second", prompt_per_second},
-                    {"predicted_n", n_gen},
-                    {"predicted_ms", gen_ms},
-                    {"predicted_per_token_ms", n_gen > 0 ? gen_ms / (double) n_gen : 0.0},
-                    {"predicted_per_second", predicted_per_second},
-                    {"cache_n", cache_n}
-                };
+                *timings = request_metrics->stats.timings();
+                monitor.update(monitor_id, {{"generated_tokens", n_gen}, {"decode_tps", (*timings)["predicted_per_second"]}});
                 if (!verbose) {
                     return;
                 }
@@ -2085,9 +2121,18 @@ int main(int argc, char ** argv) {
             };
         };
 
+        auto set_spec_metrics = [request_metrics, timings](const kvmem_spec_gen_stats & gst) {
+            auto & stats = request_metrics->stats;
+            stats.native.n_draft_tokens = gst.draft_tokens;
+            stats.native.n_draft_accepted = gst.accepted_tokens;
+            stats.native.n_draft_verif_steps = gst.verification_steps;
+            stats.accepted_per_position = gst.accepted_per_position;
+            stats.speculative = gst.metrics();
+            *timings = stats.timings();
+        };
         int n_cache_hit = 0;
         auto emit_json = [&](const std::string & content, int n_gen, bool hit_limit) {
-            common_chat_msg msg = parse_assistant_output(content, formatted, parse_tools);
+            common_chat_msg msg = parse_assistant_output(content, formatted);
             std::vector<std::string> tc_ids;
             int n_id = 0;
             msg.set_tool_call_ids(tc_ids, [&n_id, &request_id]() {
@@ -2120,6 +2165,8 @@ int main(int argc, char ** argv) {
                     }},
                 };
                 out["timings"] = *timings;
+                if (!request_metrics->stats.speculative.is_null())
+                    out["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
                 res.set_content(out.dump(), "application/json");
                 return;
             }
@@ -2146,23 +2193,43 @@ int main(int argc, char ** argv) {
                 {"usage", usage_json((int) toks.size(), n_gen, n_cache_hit)},
             };
             out["timings"] = *timings;
+            if (!request_metrics->stats.speculative.is_null())
+                out["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
             res.set_content(out.dump(), "application/json");
         };
 
+        if (cr.stream && ((body.contains("timings_per_token") && !body["timings_per_token"].is_boolean()) ||
+                (body.contains("stream_options") && (!body["stream_options"].is_object() ||
+                    (body["stream_options"].contains("include_usage") && !body["stream_options"]["include_usage"].is_boolean()))))) {
+            res.status = 400;
+            res.set_content(json{{"error", "timings_per_token and stream_options.include_usage must be booleans"}}.dump(), "application/json");
+            return;
+        }
         if (cr.stream) {
+            const bool timings_per_token = body.value("timings_per_token", false);
+            const auto stream_options = body.value("stream_options", json::object());
+            const bool include_usage = stream_options.value("include_usage", false);
             const int max_tokens = cr.max_tokens;
             const bool spec_stream = use_spec;
             res.set_header("Cache-Control", "no-cache");
             res.set_header("X-Accel-Buffering", "no");
+            auto monitor_error = std::make_shared<std::atomic<bool>>(false);
             res.set_chunked_content_provider("text/event-stream",
-                [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, parse_tools, formatted, stops,
-                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, is_responses](size_t, httplib::DataSink & sink) mutable {
+                [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, formatted, stops,
+                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, request_metrics, set_spec_metrics, timings_per_token, include_usage, is_responses, monitor_error](size_t, httplib::DataSink & sink) mutable {
                     kvmem_execution_scope execution(st.execution.get());
                     StreamIo io;
-                    io.on_prefill = [&st](int rows, int remaining) { st.log.prefilled(rows, remaining); };
+                    io.on_prefill = [&st, request_metrics](int rows, int remaining) {
+                        st.log.prefilled(rows, remaining);
+                        auto & partial = request_metrics->stats.native;
+                        partial.n_prompt_processed += rows;
+                        partial.t_prompt_last = ggml_time_us();
+                    };
+                    request_metrics->stats.start(ggml_time_us());
                     io.sink = &sink;
                     io.req = &req;
                     auto send = [&](const std::string & payload) -> bool {
+                        if (payload.compare(0, 9, "{\"error\":") == 0) monitor_error->store(true);
                         const std::string line = "data: " + payload + "\n\n";
                         if (!sink.write(line.data(), line.size())) {
                             io.aborted = true;
@@ -2173,7 +2240,17 @@ int main(int argc, char ** argv) {
                     // Responses events arrive pre-framed ("event: ..\ndata: ..\n\n");
                     // Chat Completions keeps the bare "data: <json>" framing.
                     auto send_raw = [&](const std::string & framed) -> bool {
-                        if (!sink.write(framed.data(), framed.size())) {
+                        std::string wire = framed;
+                        if (framed.rfind("event: response.completed\n", 0) == 0 ||
+                                framed.rfind("event: response.incomplete\n", 0) == 0) {
+                            const auto data = framed.find("data: ") + 6;
+                            auto event = json::parse(framed.substr(data));
+                            event["timings"] = *timings;
+                            if (!request_metrics->stats.speculative.is_null())
+                                event["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                            wire = framed.substr(0, data) + event.dump() + "\n\n";
+                        }
+                        if (!sink.write(wire.data(), wire.size())) {
                             io.aborted = true;
                             return false;
                         }
@@ -2181,7 +2258,7 @@ int main(int argc, char ** argv) {
                     };
                     std::optional<ResponsesStreamOut> responses;
                     if (is_responses) {
-                        responses.emplace(formatted, parse_tools, request_id);
+                        responses.emplace(formatted, request_id);
                     }
                     const bool stream_open = is_responses
                         ? [&] {
@@ -2225,7 +2302,7 @@ int main(int argc, char ** argv) {
 
                     std::vector<llama_token> gen;
                     std::string content;
-                    StreamChatOut sco(formatted, parse_tools, request_id);
+                    StreamChatOut sco(formatted, request_id);
                     bool aborted = false;
                     if (spec_stream) {
                         const auto gst = kvmem_spec_generate(st.ctx, st.model, st.spec, toks, max_tokens, sparams,
@@ -2242,13 +2319,14 @@ int main(int argc, char ** argv) {
                                 } else {
                                     auto deltas = sco.set_text(content, true);
                                     for (size_t i = 0; i < deltas.size(); ++i) {
-                                        const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
+                                        const json * ts = timings_per_token && i + 1 == deltas.size() ? &*timings : nullptr;
                                         send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
                                     }
                                 }
                             },
                             [&]() { return !stream_heartbeat(&io); },
                             st.active_prompt->model_pos(toks.size()) - (llama_pos) toks.size());
+                        set_spec_metrics(gst);
                         aborted = io.aborted || gst.failed;
                         st.mm_live_row = gst.n_past;
                         if (gst.failed) send(json{{"error", "speculative decode failed"}}.dump());
@@ -2282,6 +2360,7 @@ int main(int argc, char ** argv) {
                                 break;
                             }
                             llama_token id = common_sampler_sample(smpl, ctx, -1);
+                            const int64_t sampled_us = ggml_time_us();
                             common_sampler_accept(smpl, id, true);
                             if (llama_vocab_is_eog(vocab, id)) {
                                 stopped = true;
@@ -2297,7 +2376,8 @@ int main(int argc, char ** argv) {
                             content += piece;
                             gen.push_back(id);
                             hit_stop = strip_stop(content, stops);
-                            emit_gen_wall((int) gen.size(), false);
+                            ++request_metrics->stats.decode_calls;
+                            emit_gen_wall((int) gen.size(), false, sampled_us);
                             if (is_responses) {
                                 for (const std::string & ev : responses->set_text(content, !hit_stop)) {
                                     if (!send_raw(ev)) {
@@ -2307,7 +2387,7 @@ int main(int argc, char ** argv) {
                             } else {
                                 auto deltas = sco.set_text(content, !hit_stop);
                                 for (size_t i = 0; i < deltas.size(); ++i) {
-                                    const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
+                                    const json * ts = timings_per_token && i + 1 == deltas.size() ? &*timings : nullptr;
                                     send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
                                 }
                             }
@@ -2348,7 +2428,7 @@ int main(int argc, char ** argv) {
                         const bool hit_limit = (int) gen.size() >= max_tokens;
                         auto flush_deltas = sco.set_text(content, false);
                         for (size_t i = 0; i < flush_deltas.size(); ++i) {
-                            const json * ts = (i + 1 == flush_deltas.size()) ? &*timings : nullptr;
+                            const json * ts = timings_per_token && i + 1 == flush_deltas.size() ? &*timings : nullptr;
                             send(stream_choice_chunk(cid, st.model_name, created, flush_deltas[i], nullptr, ts).dump());
                         }
                         const char * finish = sco.finish_reason(hit_limit);
@@ -2359,10 +2439,15 @@ int main(int argc, char ** argv) {
                         llama_kvmem_decode_mean_flush();
                         emit_gen_wall((int) gen.size());
                         llama_driver_commit(st, toks, gen);
-                        send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
+                        auto final_chunk = stream_choice_chunk(cid, st.model_name, created, json::object(), finish, include_usage ? nullptr : &*timings);
+                        if (!include_usage && !request_metrics->stats.speculative.is_null())
+                            final_chunk["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                        send(final_chunk.dump());
                         auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
                         usage["timings"] = *timings;
-                        send(usage.dump());
+                        if (!request_metrics->stats.speculative.is_null())
+                            usage["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                        if (include_usage) send(usage.dump());
                         sink.write("data: [DONE]\n\n", 14);
                         llama_driver_finish(st);
                         slot->unlock();
@@ -2401,7 +2486,7 @@ int main(int argc, char ** argv) {
                     const bool hit_limit = (int) gen.size() >= max_tokens;
                     auto flush_deltas = sco.set_text(content, false);
                     for (size_t i = 0; i < flush_deltas.size(); ++i) {
-                        const json * ts = (i + 1 == flush_deltas.size()) ? &*timings : nullptr;
+                        const json * ts = timings_per_token && i + 1 == flush_deltas.size() ? &*timings : nullptr;
                         send(stream_choice_chunk(cid, st.model_name, created, flush_deltas[i], nullptr, ts).dump());
                     }
                     const char * finish = sco.finish_reason(hit_limit);
@@ -2411,16 +2496,25 @@ int main(int argc, char ** argv) {
                             sco.prev.content.size(), sco.prev.reasoning_content.size());
                     emit_gen_wall((int) gen.size());
                     llama_driver_commit(st, toks, gen);
-                    send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
+                    auto final_chunk = stream_choice_chunk(cid, st.model_name, created, json::object(), finish, include_usage ? nullptr : &*timings);
+                    if (!include_usage && !request_metrics->stats.speculative.is_null())
+                        final_chunk["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                    send(final_chunk.dump());
                     auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
                     usage["timings"] = *timings;
-                    send(usage.dump());
+                    if (!request_metrics->stats.speculative.is_null())
+                        usage["kvmem"] = {{"speculative", request_metrics->stats.speculative}};
+                    if (include_usage) send(usage.dump());
                     sink.write("data: [DONE]\n\n", 14);
                     llama_driver_finish(st);
                     slot->unlock();
                     sink.done();
                     return true;
+                }, [&, monitor_id, monitor_error, request_metrics](bool success) {
+                    request_metrics->finish();
+                    monitor.finish(monitor_id, monitor_error->load() ? "error" : success ? "completed" : "disconnected");
                 });
+            monitor_stream = true;
             return;
         }
 
@@ -2429,7 +2523,13 @@ int main(int argc, char ** argv) {
             ~request_guard() { llama_driver_finish(st); }
         } guard {st};
         StreamIo io;
-        io.on_prefill = [&st](int rows, int remaining) { st.log.prefilled(rows, remaining); };
+        io.on_prefill = [&st, request_metrics](int rows, int remaining) {
+            st.log.prefilled(rows, remaining);
+            auto & partial = request_metrics->stats.native;
+            partial.n_prompt_processed += rows;
+            partial.t_prompt_last = ggml_time_us();
+        };
+        request_metrics->stats.start(ggml_time_us());
         io.req = &req;
         const auto t_turn0 = std::chrono::steady_clock::now();
         if (!llama_driver_prepare(st, toks, &io, &n_cache_hit)) {
@@ -2459,10 +2559,10 @@ int main(int argc, char ** argv) {
                     [&](llama_token id, const std::string & piece, bool) {
                         gen.push_back(id);
                         content += piece;
-                        st.progress.generated((int) gen.size());
-                        st.log.generated((int) gen.size());
+                        emit_gen_wall((int) gen.size(), false);
                     }, [&]() { return !stream_heartbeat(&io); },
                     st.active_prompt->model_pos(toks.size()) - (llama_pos) toks.size());
+            set_spec_metrics(gst);
             if (gst.failed) {
                 res.status = 500;
                 res.set_content("{\"error\":\"speculative decode failed\"}", "application/json");
@@ -2493,8 +2593,9 @@ int main(int argc, char ** argv) {
         }
 
         int next_row = (int) toks.size();
-        auto gen_one = [ctx, smpl, vocab, &st, &next_row](std::string & piece, bool & stopped, llama_token & id_out) -> bool {
+        auto gen_one = [ctx, smpl, vocab, &st, &next_row](std::string & piece, bool & stopped, llama_token & id_out, int64_t & sampled_us) -> bool {
             llama_token id = common_sampler_sample(smpl, ctx, -1);
+            sampled_us = ggml_time_us();
             common_sampler_accept(smpl, id, true);
             if (llama_vocab_is_eog(vocab, id)) {
                 stopped = true;
@@ -2519,7 +2620,8 @@ int main(int argc, char ** argv) {
             }
             std::string piece;
             llama_token id = 0;
-            if (!gen_one(piece, stopped, id)) {
+            int64_t sampled_us = 0;
+            if (!gen_one(piece, stopped, id, sampled_us)) {
                 common_sampler_free(smpl);
                 res.status = 500;
                 res.set_content("{\"error\":\"decode failed\"}", "application/json");
@@ -2530,8 +2632,8 @@ int main(int argc, char ** argv) {
             }
             content += piece;
             gen.push_back(id);
-            st.progress.generated((int) gen.size());
-            st.log.generated((int) gen.size());
+            ++request_metrics->stats.decode_calls;
+            emit_gen_wall((int) gen.size(), false, sampled_us);
             if (strip_stop(content, stops)) {
                 break;
             }
@@ -2556,7 +2658,7 @@ int main(int argc, char ** argv) {
     LOG_INF("srv    llama-kvmem-server listening on http://%s:%d  model=%s kvmem=%d method=%s n_ctx=%d spec=%s n_max=%d think=%d rbudget=%d qmax=%d\n",
             host.c_str(), port, st.model_name.c_str(), (int) st.kparams.enabled,
             st.kparams.method == 1 ? "retrieval" : "recency", n_ctx,
-            st.spec.ok ? "draft-mtp" : "off", st.spec_n_max, (int) st.enable_thinking_default,
+            kvmem::speculative_name(st.spec.config.algorithm), st.spec_n_max, (int) st.enable_thinking_default,
             st.reasoning_budget_default, st.query_max_tokens);
     if (!svr.listen_after_bind()) {
         fprintf(stderr, "listen failed\n");

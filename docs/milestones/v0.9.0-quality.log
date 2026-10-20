@@ -1,6 +1,7 @@
+# Device identifiers and private paths anonymized; measurements unchanged.
 # v0.9.0 quality excerpts
-# 0.8B: RTX 5050 (UUID GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29)
-# 27B:  RTX 5090 (UUID GPU-58a7c28b-e698-307f-c149-24d4ecd88bf4)
+# 0.8B: RTX 5050 (UUID GPU-A)
+# 27B:  RTX 5090 (UUID GPU-C)
 # 2026-09-07  CUDA_DEVICE_ORDER=PCI_BUS_ID  --kv-dtype q8_0 (default)
 
 ========== identity_canary.py Qwen3.5-0.8B-Q8_0 ==========

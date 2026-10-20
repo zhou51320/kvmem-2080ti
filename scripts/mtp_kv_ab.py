@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Compare MTP F16/Q8/Q5 on the default IQ4 server; restore it after the experiment.
+"""Compare MTP F16/Q8/Q5 using isolated, caller-configured workers.
 
-Requires the default server on port 18200 and exclusive use of the RTX 5060 Ti.
-Each trial starts a fresh server on port 18201 and sends the same cold request.
+Each trial owns a fresh worker and sends the same caller-provided cold request.
 """
 import argparse
 import csv
@@ -14,7 +13,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import signal
 import socket
 import statistics
 import subprocess
@@ -22,9 +20,9 @@ import threading
 import time
 import urllib.request
 
+import gpu_env
+
 ROOT = Path(__file__).resolve().parents[1]
-GPU = 'GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c'
-URL = 'http://127.0.0.1:18201'
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -105,7 +103,7 @@ def stop_server(proc):
             proc.wait(timeout=10)
 
 
-def trial(folder, dtype, argv, request_bytes, env, nvml, device):
+def trial(folder, dtype, argv, request_bytes, env, nvml, device, url, expected_prompt=None):
     folder.mkdir()
     result = {'mtp_kv_type': dtype, 'argv': argv, 'request_sha256': hashlib.sha256(request_bytes).hexdigest()}
     sampler = Sampler(nvml, device, folder)
@@ -120,7 +118,7 @@ def trial(folder, dtype, argv, request_bytes, env, nvml, device):
         while time.monotonic() < deadline:
             assert proc.poll() is None, 'server exited during startup'
             try:
-                with OPENER.open(URL + '/health', timeout=1) as response:
+                with OPENER.open(url + '/health', timeout=1) as response:
                     if response.status == 200:
                         break
             except OSError:
@@ -129,16 +127,15 @@ def trial(folder, dtype, argv, request_bytes, env, nvml, device):
             raise RuntimeError('server health timeout')
         startup = (folder / 'server.stderr.log').read_text()
         pool = next(s for s in startup.splitlines() if 'KVMEM_TRACE mtp_pool' in s)
-        assert f'type_k={dtype} type_v={dtype}' in pool and 'cells=43904' in pool, pool
+        assert f'type_k={dtype} type_v={dtype}' in pool, pool
         target = next(s for s in startup.splitlines() if 'slot-pool cells=' in s)
-        assert 'type_k=q5_0 type_v=q5_0' in target and 'budget=32000 gen_reserve=11904' in target, target
         result['mtp_pool_log'] = pool
         result['target_pool_log'] = target
         sampler.phase = 'idle_ready'
         time.sleep(1)
         sampler.phase = 'prefill'
         print('START', folder.name, 'pid', proc.pid, flush=True)
-        request = urllib.request.Request(URL + '/v1/chat/completions', data=request_bytes,
+        request = urllib.request.Request(url + '/v1/chat/completions', data=request_bytes,
                                          headers={'Content-Type': 'application/json'})
         start = time.monotonic()
         first = None
@@ -186,92 +183,96 @@ def trial(folder, dtype, argv, request_bytes, env, nvml, device):
                       drafted=int(sp[1]), accepted=int(sp[2]), accept_pct=float(sp[4]))
         result['mtp_follow'] = [s for s in log.splitlines() if 'KVMEM_TRACE mtp_follow' in s]
         assert done and usage and usage.get('prompt_cache_hit_tokens') == 0, 'incomplete response or cache hit'
-        assert int(pf[1]) == 61159, 'input token count changed'
+        if expected_prompt is not None:
+            assert int(pf[1]) == expected_prompt, 'input token count changed'
         assert all('n_no_raw=0' in s for s in result['mtp_follow']), 'MTP cold-block restore missed data'
     except Exception as exc:
         result['error'] = repr(exc)
         raise
     finally:
-        result.update(sampler.finish())
-        (folder / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
-        if proc is not None:
-            stop_server(proc)
+        try:
+            result.update(sampler.finish())
+        finally:
+            if proc is not None:
+                stop_server(proc)
+            (folder / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print('RESULT', folder.name, json.dumps({k: result[k] for k in (
         'prefill_tps', 'decode_tps', 'generated_tokens', 'accept_pct', 'peak_vram_mib')}), flush=True)
     return result
 
 
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+def worker_command(args, dtype, port):
+    extra = json.loads(args.server_args)
+    if not isinstance(extra, list) or not all(isinstance(v, str) for v in extra):
+        raise ValueError('--server-args must be a JSON array of strings')
+    controlled = {'-m', '--model', '--host', '--port', '--spec-kv-dtype'}
+    if any(v.split('=', 1)[0] in controlled for v in extra):
+        raise ValueError('--server-args overrides a controlled worker argument')
+    return [str(args.server), '-m', str(args.model), '--host', '127.0.0.1', '--port', str(port),
+            '-c', str(args.context), '-b', str(args.batch), '-ngl', '99', '--kv-dtype', args.kv_dtype,
+            '--spec-type', 'draft-mtp', '--spec-draft-n-max', str(args.drafts),
+            '--spec-kv-dtype', dtype, '--kvmem', '--kvmem-budget', str(args.budget),
+            '--kvmem-gen-reserve', str(args.reserve), '--verbosity', '4', *extra]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--rounds', type=int, default=2)
-    ap.add_argument('--request', type=Path, default=ROOT / 'logs/iq4_mtp_q5_32k12k_code_20260913_191415/request.json')
+    ap.add_argument('--request', type=Path, required=True)
+    ap.add_argument('--server', type=Path, required=True)
+    ap.add_argument('--model', type=Path, required=True)
+    ap.add_argument('--output', type=Path, required=True)
+    ap.add_argument('--context', type=int, default=262144)
+    ap.add_argument('--batch', type=int, default=512)
+    ap.add_argument('--budget', type=int, default=32000)
+    ap.add_argument('--reserve', type=int, default=12000)
+    ap.add_argument('--drafts', type=int, default=2)
+    ap.add_argument('--kv-dtype', default='q5_0')
+    ap.add_argument('--expected-prompt-tokens', type=int)
+    ap.add_argument('--server-args', default='[]', help='Additional worker arguments as a JSON array')
+    gpu_env.add_gpu_argument(ap)
     args = ap.parse_args()
     if args.rounds < 1:
         ap.error('--rounds must be positive')
-    with socket.socket() as sock:
-        sock.bind(('127.0.0.1', 18201))
-    old_pid = int((ROOT / 'logs/iq4_18200.pid').read_text())
-    old_argv = Path(f'/proc/{old_pid}/cmdline').read_bytes().decode().strip('\0').split('\0')
-    assert old_argv[0] == str(ROOT / 'build/bin/llama-kvmem-server'), 'unexpected default server process'
-    expected = {'--port': '18200', '--kv-dtype': 'q5_0', '--kvmem-budget': '32000',
-                '--kvmem-gen-reserve': '12000', '--spec-draft-n-max': '2', '-b': '512', '-c': '262144'}
-    for flag, value in expected.items():
-        assert old_argv[old_argv.index(flag) + 1] == value, f'default server differs: {flag}'
+    for name in ('server', 'model', 'request'):
+        path = getattr(args, name).resolve()
+        if not path.is_file():
+            ap.error(f'missing {name}: {path}')
+        setattr(args, name, path)
+    worker_command(args, 'f16', 1)  # Validate arguments before discovery or starting workers.
+    env = gpu_env.apply_gpu(os.environ.copy(), args.gpu)
+    env['KVMEM_TRACE'] = '1'
+    env.pop('KVMEM_PERF', None)
     request_bytes = args.request.read_bytes()
-    root = ROOT / 'logs' / ('mtp_kv_ab_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
-    root.mkdir()
-    (root / 'request.json').write_bytes(request_bytes)
-    shutil.copy2(__file__, root / 'benchmark.py')
-    print('ARTIFACTS', root, flush=True)
-    env = os.environ.copy()
-    env.update(CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=GPU,
-               PATH='/usr/bin:/bin:/usr/lib/wsl/lib:/home/leye/kvmem_qw3/.cu13-env/bin',
-               LD_LIBRARY_PATH=str(ROOT / 'build/bin') + ':/home/leye/kvmem_qw3/.cu13-env/lib')
-    for key in ('KVMEM_TRACE', 'KVMEM_PERF'):
-        env.pop(key, None)
-    env['KVMEM_TRACE'] = '1'  # Pool/follow records are required by this benchmark.
-    nvml = ctypes.CDLL('libnvidia-ml.so.1')
-    assert nvml.nvmlInit_v2() == 0
-    device = ctypes.c_void_p()
-    assert nvml.nvmlDeviceGetHandleByUUID(GPU.encode(), ctypes.byref(device)) == 0
-    summary = {'default_argv': old_argv, 'gpu_uuid': GPU, 'rounds': args.rounds,
-               'server_sha256': hashlib.sha256(Path(old_argv[0]).read_bytes()).hexdigest(), 'trials': []}
-    stopped = False
+    args.output.mkdir(parents=True, exist_ok=False)
+    nvml = ctypes.CDLL('nvml.dll' if os.name == 'nt' else 'libnvidia-ml.so.1')
+    if nvml.nvmlInit_v2() != 0:
+        raise RuntimeError('NVML initialization failed')
+    summary = {'gpu_uuid': env['KVMEM_GPU_UUID'], 'gpu_name': env['KVMEM_GPU_NAME'],
+               'rounds': args.rounds, 'server_sha256': hashlib.sha256(args.server.read_bytes()).hexdigest(),
+               'trials': []}
     try:
-        os.kill(old_pid, signal.SIGTERM)
-        stopped = True
+        device = ctypes.c_void_p()
+        if nvml.nvmlDeviceGetHandleByUUID(env['KVMEM_GPU_UUID'].encode(), ctypes.byref(device)) != 0:
+            raise RuntimeError('Selected GPU is unavailable to NVML')
         order = [t for r in range(args.rounds) for t in
                  (('f16', 'q8_0', 'q5_0') if r % 2 == 0 else ('q5_0', 'q8_0', 'f16'))]
         for index, dtype in enumerate(order, 1):
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                m = Memory()
-                m.version = ctypes.sizeof(Memory) | (2 << 24)
-                assert nvml.nvmlDeviceGetMemoryInfo_v2(device, ctypes.byref(m)) == 0
-                if m.used < 128 * 2**20:
-                    break
-                time.sleep(0.5)
-            else:
-                raise RuntimeError('GPU still occupied before trial')
-            time.sleep(3)
-            argv = old_argv.copy()
-            argv[argv.index('--port') + 1] = '18201'
-            while '--spec-kv-dtype' in argv:
-                override = argv.index('--spec-kv-dtype')
-                del argv[override:override + 2]
-            argv += ['--spec-kv-dtype', dtype, '--verbosity', '4']
-            row = trial(root / f'{index:02d}_{dtype}', dtype, argv, request_bytes, env, nvml, device)
+            port = free_port()
+            argv = worker_command(args, dtype, port)
+            row = trial(args.output / f'{index:02d}_{dtype}', dtype, argv, request_bytes,
+                        env, nvml, device, f'http://127.0.0.1:{port}', args.expected_prompt_tokens)
             summary['trials'].append(row)
-            (root / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+            (args.output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
     finally:
         nvml.nvmlShutdown()
-        if stopped:
-            restore = subprocess.run(['bash', str(ROOT / 'scripts/start-iq4.sh')],
-                                     cwd=ROOT, env=env, capture_output=True, text=True, timeout=90)
-            (root / 'restore.log').write_text(restore.stdout + restore.stderr)
-            summary['restore_rc'] = restore.returncode
-            print('RESTORE', restore.returncode, restore.stdout.strip(), flush=True)
-        (root / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+        (args.output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':

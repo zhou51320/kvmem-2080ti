@@ -25,9 +25,8 @@ import gpu_env  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = ROOT / "models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf"
-PROG_SRC = Path("/tmp/kvmem_prog_60k.txt")
 NEEDLE = "The secret code is BLUEBIRD-42."
-GPU_UUID = gpu_env.UUID_5090
+
 
 TOOLS = [{
     "type": "function",
@@ -44,16 +43,13 @@ TOOLS = [{
 
 
 def find_server() -> Path:
-    for p in (ROOT / "build/bin/llama-kvmem-server", ROOT / "build/llama-kvmem-server"):
-        if p.is_file():
-            return p
-    raise SystemExit("llama-kvmem-server not found; run scripts/build-cuda.sh")
+    return gpu_env.find_binary("llama-kvmem-server")
 
 
-def load_notes() -> str:
-    if not PROG_SRC.is_file():
-        raise SystemExit(f"missing {PROG_SRC}")
-    body = PROG_SRC.read_text()
+def load_notes(source: Path) -> str:
+    if not source.is_file():
+        raise SystemExit(f"missing {source}")
+    body = source.read_text(encoding="utf-8")
     if "<|im_start|>user" in body:
         body = body.split("<|im_start|>user\n", 1)[1]
         body = body.split("<|im_end|>", 1)[0]
@@ -108,7 +104,7 @@ def snapshot_mem(pid: int) -> dict:
         )
         for ln in out.splitlines():
             parts = [p.strip() for p in ln.split(",")]
-            if len(parts) >= 3 and GPU_UUID in parts[0]:
+            if len(parts) >= 3 and os.environ["KVMEM_GPU_UUID"] == parts[0]:
                 gpu_mib = int(float(parts[1]))
                 gpu_util = int(float(parts[2]))
     except Exception:
@@ -216,14 +212,18 @@ def main() -> int:
     ap.add_argument("--spec-type", default="none", choices=("none", "draft-mtp"))
     ap.add_argument("--spec-draft-n-max", type=int, default=2)
     ap.add_argument("--log-tag", default="", help="suffix for log files, e.g. mtp")
+    gpu_env.add_gpu_argument(ap)
+    ap.add_argument("--notes", type=Path, required=True, help="Source text for the tool workload")
     args = ap.parse_args()
+    args.gpu = gpu_env.configure(args.gpu)
     if not args.model.is_file():
         raise SystemExit(f"missing model {args.model}")
 
-    notes = load_notes()
+    (ROOT / "logs").mkdir(parents=True, exist_ok=True)
+    notes = load_notes(args.notes)
     (ROOT / "logs" / "kvmem_prog_60k_notes.txt").write_text(notes)
 
-    env = gpu_env.apply_gpu(os.environ.copy(), "27b")
+    env = gpu_env.apply_gpu(os.environ.copy())
     env["KVMEM_TRACE"] = "1"
     log_tag = args.log_tag or ("mtp" if args.spec_type == "draft-mtp" else "")
     stem = "tools_60k_27b" + (f"_{log_tag}" if log_tag else "")
@@ -261,7 +261,7 @@ def main() -> int:
             time.sleep(0.5)
         else:
             raise SystemExit("server did not print listening line:\n" + log_path.read_text()[-4000:])
-        gpu_env.require_device(log_path.read_text(), "RTX 5090")
+        gpu_env.require_device(log_path.read_text(), env)
         print(f"server up in {time.time() - t0:.1f}s  idle_mem={snapshot_mem(proc.pid)}", flush=True)
 
         t1_user = (

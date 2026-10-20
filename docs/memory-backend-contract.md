@@ -79,6 +79,41 @@ Linux 目前只有公共层 WSL/GCC 证据，没有原生 Linux CUDA 推理验�
 
 `MemorySession::prepare_reselect` 只调用既有 `pick_topk_blocks`，核对 policy/native catalog 的粒度、块身份和有效长度后，生成 `WorkingSetPlan`，不调用会修改旧 remap 元数据的 `set_selection`。选块算法没有复制。原生兼容桥尚在使用的旧执行元数据暂时保留。
 
+## LCP 与前缀 checkpoint
+
+尾部用户消息改写导致反复全量 prefill 的问题定位、LCP 边界留点方案和最初的三轮回归
+由 [Iscream132](https://github.com/Iscream132) 在 [#101](https://github.com/kvmem/kvmem/issues/101)
+与 [#102](https://github.com/kvmem/kvmem/pull/102) 中贡献。当前共享实现通过
+[#137](https://github.com/kvmem/kvmem/pull/137) 合入主线；原始贡献及证据更正见
+[贡献记录](prefix-reuse-checkpoint-validation-2026-10-03.md)。
+
+主线的公共前缀恢复核心来自 `9d88c5c`，接入 llama.cpp 和 NInfer。
+`prefix_checkpoint.hpp` 统一恢复边界、留点规划与 `CheckpointCatalog`，不解释原生状态字节。
+适配器仍须证明 token、媒体、位置、KV/统计及执行状态在同一已提交边界有效。
+
+当旧 checkpoint 晚于本轮最长公共前缀（LCP）时，不能直接恢复它；公共层仍保留已观察到的
+LCP，作为重新计算时捕获复用锚点的提示。`prefix_anchor` 将提示限制在恢复点与 query 之间，
+避开不可拆分的媒体组。捕获完成后才能发布，捕获失败允许后续请求重新计算。
+
+`ReuseAnchor` 服务下一轮尾部改写，`QueryReplay` 服务本轮 query 重放；相同边界可共享状态。
+新锚点替代旧锚点的保留优先级，后续 endpoint 不应将它挤出目录。回退撤销更晚的目录项，
+活跃请求持有的状态引用继续存活。目录默认保留 llama 四项、NInfer 五个用途槽；共享状态按
+所有者地址只计一次。checkpoint 及统计附件仍独立于 KV payload 的 H 预算计量。
+
+候选选择取适配器校验通过的最大合法 frontier；NInfer 在相同 frontier 保留 Endpoint 优先规则。
+会话归属、分支规则、原生 KV 格式和 MTP 接受边界继续由后端负责。llama 多会话的 continuation
+判定仍可能让请求走 fresh。会话选择在持锁的实际 admission 中重新计算候选的 token/media LCP，
+并将它作为本次冷算的捕获提示传给 driver；已绑定的 conversation id 仍限制候选，显式 reset
+清除提示。该提示不随会话状态交换、不参与恢复授权，也不承诺任意历史编辑首次就能复用。
+本功能沿现有 KVMem 路径自动工作，没有新增启动参数或 UI 开关。
+
+验证入口：公共层 `prefix_checkpoint_test`；llama 的 `kvmem-prefix-reuse-regression` 在没有
+`KVMEM_TEST_MODEL`/`KVMEM_TEST_GPU` 时以 77 跳过，有模型时运行六轮尾部改写 HTTP 回归；
+`kvmem-prefix-reuse-mtp-regression` 使用 `KVMEM_TEST_MTP_MODEL`（含 MTP 的模型）与同一 GPU UUID，
+运行单会话、MTP3 的十二轮回归，要求第三轮起持续复用并确实产生 draft 验证；缺少模型或 GPU 时也以 77 跳过。
+NInfer 的 `ninfer_p4_history` 提供 `prefix-anchor` 与 `prefix-anchor-ssd` 模式，检查原生状态、
+复用进度和取消恢复。SSD 模式还要求实际发生冷 KV 读写，不能用仅开启参数代替验收。
+
 ## 职责
 
 | 对象 | 负责 | 引擎继续负责 |
@@ -89,6 +124,7 @@ Linux 目前只有公共层 WSL/GCC 证据，没有原生 Linux CUDA 推理验�
 | `PayloadLayout` / `NativeKvPayload` | 原生 bytes、所有 planes、stride、alignment、格式版本 | 解释量化编码，执行实际复制 |
 | `MemoryBackend` / `MemoryTransfer` | 必须实现的适配器契约 | 唯一的设备分配器、reservation、stream、event 和 graph |
 | `CheckpointIdentity` | 精确检查后端/模型/布局/会话/执行历史/frontier | checkpoint 字节、GDN 还原与 query 重放 |
+| `CheckpointCatalog` | 最大合法恢复点、用途、目录保留及数量/字节约束 | 原生状态、完整前缀证明、状态捕获/恢复和安全执行边界 |
 
 新后端不能继承旧 `KvMemBackend` 的默认空复制来表示已支持。`MemoryBackend`、`MemoryTransfer` 全部必需操作均为纯虚函数；缺失 backend、返回空 transaction 或缺少所需能力会明确失败。
 
@@ -174,7 +210,7 @@ llama 的预填充计划可包含已登记、尚未计算 KV 的行，而 `Memor
 ## 验证与复现
 
 ```sh
-cmake -S . -B build-host -DKVMEM_BUILD_LLAMA=OFF -DKVMEM_BUILD_SERVER_TESTS=OFF -DKVMEM_ENABLE_NVME=OFF
+cmake -S . -B build-host -DKVMEM_BUILD_LLAMA=OFF -DKVMEM_BUILD_SERVER_TESTS=OFF
 cmake --build build-host
 ctest --test-dir build-host --output-on-failure
 ```
@@ -208,7 +244,11 @@ P2 独立构建目标：Windows / MSVC 19.44、C++17，无 llama 子模块构建
 
 llama query 附件带捕获范围和前缀凭据，尾块 mean-K 附件带 checkpoint 行号和前缀凭据。导入还核对维度、有限值和有效行数。默认 user-query / 多模态 checkpoint 路径在恢复任何 recurrent/draft 字节前检查该凭据；选择时跳过已失效的候选，无法找到可信状态则从完整输入重新 prefill。输入/media 的逐前缀匹配继续由 driver 负责，统计附件的凭据不能替代该匹配。
 
-MTP 产品路径使用 `begin_speculative_evaluation` / `commit_speculative`。开始时绑定当前会话和执行历史，完成图计算后仅记录 evaluated 范围；接受时检查同一 capture、起点和宽度，先完成 GDN fold（若 recording），再推进 accepted KV 与 mean-K。未接受的草稿不生成 query 统计，不经 prefill mean-K 路径提交；零接受、部分接受、宽度一拒绝、超量/重复提交有真实 GPU 回归。原专用 hooks 保留，不要求 ninfer 使用 llama 的 tensor 或 recurrent 布局。
+MTP 产品路径使用 `begin_speculative_evaluation` / `commit_speculative`。开始时绑定当前会话和执行历史，完成图计算后仅记录 evaluated 范围；接受时检查同一 capture、起点和宽度，为 GDN fold（若 recording）建立完成依赖，再推进 accepted KV 与 mean-K。未接受的草稿不生成 query 统计，不经 prefill mean-K 路径提交；零接受、部分接受、宽度一拒绝、超量/重复提交有真实 GPU 回归。原专用 hooks 保留，不要求 ninfer 使用 llama 的 tensor 或 recurrent 布局。
+
+GPU 状态提交可以与不读取该状态的 Host 准备重叠。后续设备消费者必须排在提交之后，检查点、状态读取、迁移和释放必须排空相关依赖；逻辑接受不等于允许提前复用缓冲区。该规则由适配器兑现，公共核心不持有 CUDA stream/event，也不放宽 `MemoryTransfer::poll` 的 Complete 或 publish 门槛。
+
+llama ReplaySSM 在 Fold 流记录事件，并将依赖加入目标 context 的对应设备后端；原生 context 同步和检查点读取会排空该依赖。无事件/消费者支持时保持同步完成。`KVMEM_GDN_FOLD_SYNC=1` 是性能诊断用同步对照。NInfer 在普通 Fold 前取回验证阶段产生的候选统计，使后面的 Host 统计提交不再额外等待 Fold；重建锚点仍使用原来的完整捕获与恢复边界。
 
 这一步明确了适配器的统计/状态边界，没有把 Host worker 的完成事件伪装成公共 statistics version。`statistics_version=0`，公共 `pre_rope_statistics` / `state_checkpoint` 能力仍不声明。通用统计搬运接口、旧 server 编排分支和其余 legacy bridge 配置继续在 P3/P4 整理。
 

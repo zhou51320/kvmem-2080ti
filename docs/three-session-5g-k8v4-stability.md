@@ -1,5 +1,10 @@
 # Three-session 5 GiB K8/V4 stability and cold-prefill comparison
 
+> Historical separate-file cache evidence. Its manual runners were retired with the [public SSD migration](legacy-ssd-retirement-20261019.md); the measurements below retain their original scope.
+
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 This is an opt-in real-model service test of three independent IQ3 sessions.
 Main attention KV uses K=`q8_0`, V=`q4_0` (`-ctk q8_0 -ctv q4_0`). Each session
 grows to about 4.8 GiB, with a 5 GiB RAM soft limit and a **10 GiB NVMe quota**.
@@ -16,7 +21,7 @@ channel histories; it can take tens of minutes because it builds three roughly
 python scripts/test_server_three_session_5g.py `
   --server .\build-session\bin\llama-kvmem-server.exe `
   --model models\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf `
-  --gpu GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c `
+  --gpu GPU-B `
   --output artifacts\three-session-5g-k8v4-5060ti
 ```
 

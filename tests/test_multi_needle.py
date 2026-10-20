@@ -25,7 +25,7 @@ class PromptFileTest(unittest.TestCase):
         self.named_file = tempfile.NamedTemporaryFile
         self.real_run = subprocess.run
         for target, kwargs in (
-            ('apply_gpu', {'side_effect': lambda env, which: env}),
+            ('apply_gpu', {'side_effect': lambda env, which=None: env}),
             ('require_device', {'return_value': None}),
         ):
             mock = patch.object(module.gpu_env, target, **kwargs)

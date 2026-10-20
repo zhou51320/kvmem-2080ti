@@ -1,11 +1,14 @@
 # IQ4 MTP / Q5 KV 代码生成测速
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 2026-09-13，在 RTX 5060 Ti 上完成一次无缓存命中的约 61K token 代码请求。
 默认启动脚本：[scripts/start-iq4.sh](../scripts/start-iq4.sh)。
 
 模型为 `Qwen3.8-27B-UD-IQ4_XS-mtp-q4_0.gguf`，主权重 IQ4_XS，
 MTP 权重 Q4_0；主模型及 MTP KV 均为 Q5_0，草稿长度 2。
-GPU UUID：`GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`。
+GPU UUID：`GPU-B`。
 
 ```text
 -c 262144 -n 16000 -b 512 -ngl 99

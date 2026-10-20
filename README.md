@@ -178,6 +178,15 @@ The daily test uses one warm-up and three measured rounds with roughly 12K text,
 
 ## API and Web UI
 
+**Windows desktop console:** double-click `START-HERE-EN.bat` for English startup instructions
+and an English UI, or `START-HERE-CN.bat` for Chinese startup instructions.
+Offline console packages include a private Python runtime; a source checkout uses installed
+64-bit Python 3.9+. See [one-click startup and packaging](docs/windows-one-click.md).
+Alternatively, run `python scripts/local-console.py` and open
+`http://127.0.0.1:18199/monitor/` to configure, start and stop NInfer or llama.cpp, select local
+models, save templates and monitor the service. Python is required; workers and models are
+supplied separately. See the [console setup and limitations](ui/README.md#independent-local-console-windows).
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Readiness |
@@ -251,7 +260,7 @@ Source unified launcher examples:
 
 The unified launcher defaults to context=262144, B=32768, R=1024, prefill=128 and output limit=1024. NInfer uses INT8 with MTP/ngram/vision disabled; LRFU is enabled with sink=12288 and recent=1024. Enable NInfer vision/MTP explicitly with options such as `-Vision` and `-MtpDrafts`; pass llama.cpp-specific native options through `-WorkerArgs`.
 
-**The source-tree `start-ninfer.ps1` is a fixed-recipe shortcut reading `model.ninfer` from the repository root. It does not expose the packaged shortcut's extra `-Model`/`-NoVision` options.** Use the source unified launcher for custom models and settings; the earlier package quick start applies to extracted release ZIPs.
+The source-tree and newly built packages use the same `start-ninfer.ps1` shortcut. It accepts `-Model`, `-NoVision`, thinking settings and extra native arguments while retaining the 0.18 recipe. See the [Windows argument-passing guide](scripts/windows/README.md#multi-backend-launchers--多后端启动入口) for PowerShell arrays, external `-File` calls and exact JSON argument files. Previously published ZIPs retain their original scripts until updated.
 
 ### Linux / ROCm
 

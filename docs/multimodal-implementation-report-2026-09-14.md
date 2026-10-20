@@ -1,5 +1,8 @@
 # IQ3 多模态实现与验收
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 日期：2026-09-14。功能已完成并启动。代码位于当前工作树，没有创建提交或修改 submodule pin。
 依据：[设计](multimodal-integration-design-2026-09-13.md)、[计划](multimodal-implementation-plan-2026-09-13.md)。
 
@@ -124,7 +127,7 @@ CPU 投影嵌入缓存上限 128 MiB；此例每图约 9.45 MiB。最多保留�
 
 ```bash
 # 主机块存储、选择、CPU/NVMe、partial-block 截断测试
-LD_LIBRARY_PATH=/home/leye/kvmem_qw3/.cu13-env/lib \
+LD_LIBRARY_PATH=$CUDA_ROOT/lib \
   .venv/bin/ctest --test-dir build --output-on-failure
 
 # 实际 GPU 字节测试，需要本地 0.8B MTP 模型；普通 CTest 无模型时跳过此项

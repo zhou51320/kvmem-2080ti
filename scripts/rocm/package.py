@@ -116,7 +116,7 @@ def main():
     options = dict(re.findall(r'^([^/#\n][^:\n]*):[^=\n]+=(.*)$', cache, re.M))
     targets = [item for item in options.get('GPU_TARGETS', '').split(';') if item]
     for key, value in [('CMAKE_BUILD_TYPE', 'Release'), ('GGML_HIP', 'ON'),
-                       ('GGML_CUDA', 'OFF'), ('GGML_NATIVE', 'OFF'), ('KVMEM_ENABLE_NVME', 'OFF')]:
+                       ('GGML_CUDA', 'OFF'), ('GGML_NATIVE', 'OFF')]:
         if options.get(key) != value:
             raise RuntimeError(f'{key} must be {value}, got {options.get(key)}')
     if windows and not args.sdk:

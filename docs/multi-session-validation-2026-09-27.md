@@ -1,5 +1,7 @@
 # Multi-session validation, 2026-09-27–28
 
+> Historical separate-file cache evidence. Its manual runners were retired with the [public SSD migration](legacy-ssd-retirement-20261019.md); the measurements below retain their original scope.
+
 Validated server source `154fffb` (orphan session-cache cleanup) on Windows with
 RTX 5060 Ti 16 GiB and RTX 5050 Laptop 8 GiB, NVIDIA driver 610.62, MSVC 19.44,
 and a Release CUDA 13.2 build. Server SHA-256: `C9BEF58BAF34F0A7455AA07CB91FBDC0F03DDDA1C43F4D258E6F20BF60C36CE3`.

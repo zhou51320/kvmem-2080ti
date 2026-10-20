@@ -111,13 +111,7 @@ LIST_QUESTION = (
 
 
 def find_cli() -> Path:
-    for p in (
-        ROOT / "build/bin/llama-kvmem-cli",
-        ROOT / "build/llama-kvmem-cli",
-    ):
-        if p.is_file():
-            return p
-    raise SystemExit("llama-kvmem-cli not found; run scripts/build-cuda.sh")
+    return gpu_env.find_binary("llama-kvmem-cli")
 
 
 def filler(n: int, start: int) -> tuple[str, int]:
@@ -196,7 +190,7 @@ def recency_window_hit(n_prompt: int | None, force_pos: int | None,
 
 def run_cli(cli: Path, model: Path, extra: list[str], prompt: str,
             n_predict: int) -> tuple[str, str]:
-    env = gpu_env.apply_gpu(os.environ.copy(), "small")
+    env = gpu_env.apply_gpu(os.environ.copy())
     env.setdefault("KVMEM_TRACE", "1")
     # Hand the prompt over in a file. A single argv entry is capped by the
     # kernel at MAX_ARG_STRLEN (128 KiB on Linux), and a long-document prompt
@@ -223,7 +217,7 @@ def run_cli(cli: Path, model: Path, extra: list[str], prompt: str,
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr[-4000:])
         raise SystemExit(f"command failed rc={proc.returncode}")
-    gpu_env.require_device(proc.stderr, "RTX 5050")
+    gpu_env.require_device(proc.stderr, env)
     return proc.stdout, proc.stderr
 
 
@@ -331,7 +325,9 @@ def main() -> int:
     ap.add_argument("--skip-locate", action="store_true")
     ap.add_argument("--locate-model", type=Path, default=None,
                     help="optional smaller GGUF for locate (same tokenizer)")
+    gpu_env.add_gpu_argument(ap)
     args = ap.parse_args()
+    args.gpu = gpu_env.configure(args.gpu)
 
     models = args.models or [DEFAULT_MODEL]
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]

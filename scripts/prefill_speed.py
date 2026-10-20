@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prefill tok/s vs prompt length: off / recency / capture-only / retrieval.
 
-Default GPU is the 5050 (`--gpu small`). 27B must use `--gpu 27b` (5090).
+Select the validation GPU with --gpu or the inherited environment.
 """
 from __future__ import annotations
 
@@ -44,17 +44,11 @@ SPEC_RE = re.compile(
 
 
 def find_cli() -> Path:
-    for p in (
-        ROOT / "build/bin/llama-kvmem-cli",
-        ROOT / "build/llama-kvmem-cli",
-    ):
-        if p.is_file():
-            return p
-    raise SystemExit("llama-kvmem-cli not found; run scripts/build-cuda.sh")
+    return gpu_env.find_binary("llama-kvmem-cli")
 
 
 def run_once(cli: Path, model: Path, extra: list[str], prompt: str, n_ctx: int,
-             n_predict: int, gpu: str = "small",
+             n_predict: int, gpu: str | None = None,
              n_batch: int = 256, n_ubatch: int = 0) -> dict:
     env = gpu_env.apply_gpu(os.environ.copy(), gpu)
     env["KVMEM_TRACE"] = "1"  # Preserve the parsed MTP statistics; includes tracing overhead.
@@ -78,7 +72,7 @@ def run_once(cli: Path, model: Path, extra: list[str], prompt: str, n_ctx: int,
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr[-4000:])
         raise RuntimeError(f"command failed rc={proc.returncode}")
-    gpu_env.require_device(proc.stderr, env["KVMEM_GPU_NAME"])
+    gpu_env.require_device(proc.stderr, env)
     pm = PERF_RE.search(proc.stderr)
     sm = STAGE_RE.search(proc.stderr)
     wm = WALL_RE.search(proc.stderr)
@@ -166,13 +160,13 @@ def main() -> int:
                     help="--kvmem-budget for kvmem modes; 0 = CLI default (n_ctx)")
     ap.add_argument("--gen-reserve", type=int, default=0,
                     help="--kvmem-gen-reserve for kvmem modes; 0 = CLI default")
-    ap.add_argument("--gpu", choices=("small", "27b", "5050", "5090"), default="small",
-                    help="small/5050 = RTX 5050; 27b/5090 = RTX 5090 (27B only)")
     ap.add_argument("-b", "--batch", type=int, default=256,
                     help="llama.cpp -b (n_batch). 27B comparisons should use 512.")
     ap.add_argument("-ub", "--ubatch", type=int, default=0,
                     help="llama.cpp -ub (n_ubatch). 0 = same as --batch.")
+    gpu_env.add_gpu_argument(ap)
     args = ap.parse_args()
+    args.gpu = gpu_env.configure(args.gpu)
     if not args.model.is_file():
         raise SystemExit(f"missing model {args.model}")
     cli = find_cli()
@@ -181,7 +175,7 @@ def main() -> int:
     for mode in modes:
         extra_for(mode, args.spec_n_max, args.budget, args.gen_reserve)
 
-    gpu_name = "RTX 5090" if args.gpu in ("27b", "5090") else "RTX 5050"
+    gpu_name = os.environ["KVMEM_GPU_NAME"]
     print(f"model={args.model.name} warmup={args.warmup} runs={args.runs} "
           f"n_predict={args.n_predict} device={gpu_name} spec_n_max={args.spec_n_max} "
           f"batch={args.batch} ubatch={args.ubatch or args.batch}")

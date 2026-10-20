@@ -1,5 +1,8 @@
 # Dual NVFP4 KVMem qualification — 2026-10-04
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 The local source/build/model combination passed all **229 planned cases**, three
 product CPU unit programs and three independent B32768/R16384 MTP4 service-start
 checks. Both Main and MTP use NVFP4-G16 K/V. Ngram and lookup were disabled.
@@ -9,7 +12,7 @@ comparison remain separate work.
 ## Configuration
 
 - GPU: RTX 5060 Ti, 16,311 MiB,
-  `GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`, driver 610.62.
+  `GPU-B`, driver 610.62.
 - Artifact: `Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`, 12,790,639,360 bytes,
   with text, resident vision and MTP. IQ3S names the mixed GGUF weight recipe.
 - Build: Release, CUDA 13.2, sm_120a, MSVC 14.44.35207, eight compilation jobs.
@@ -115,7 +118,7 @@ Select the artifact explicitly and the GPU by UUID; keep ngram/lookup disabled.
 The large service arguments are:
 
 ```powershell
-$env:CUDA_VISIBLE_DEVICES = 'GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c'
+$env:CUDA_VISIBLE_DEVICES = 'GPU-B'
 ./build-backends/ninfer/apps/ninfer-serve.exe C:/models/model-vision-mtp.ninfer `
   --host 127.0.0.1 --port 18201 --model-id iq3s-nvfp4 `
   --max-context 131072 --max-concurrency 1 --prefill-chunk 256 `

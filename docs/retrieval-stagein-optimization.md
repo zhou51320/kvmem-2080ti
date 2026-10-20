@@ -1,12 +1,15 @@
 # Retrieval Stage-In / Layout Optimization (llama.cpp KVMem)
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 | Field | Value |
 |---|---|
 | **Title** | Next staged plan after harvest: `apply_retrieval` layout + cold stage-in |
 | **Date** | 2026-09-06 |
 | **Status** | Active (rev 2: harvest-V + NVMe with raw-K). PR 0–3 landed. |
-| **Repo** | `/home/leye/kvmem_llamacpp` (v0.5.0) |
-| **Reference (read-only)** | `/home/leye/kvmem_qw3` |
+| **Repo** | `$REPO` (v0.5.0) |
+| **Reference (read-only)** | `$REFERENCE` |
 | **Prior plan** | `docs/prefill-harvest-optimization.md` (Stage 1 harvest/NVMe; do not implement further harvest PRs from it) |
 
 Do not patch `ggml_flash_attn_ext`. Do not restart qw3. ISTA IQ3_S: MTP off (`--spec-type none`).
@@ -234,7 +237,7 @@ PR 6 optional ubatch
 | 16k/128k `--kvmem-raw-k-nvme --kvmem-harvest-v` | 5090 | PR 3: V not all in RSS |
 | 128k IQ3 `retr_ms` + SUM | 5090 | after PR 2–4 (milestone, not auto-fail) |
 
-Hardware: 5050 UUID `GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29` for **< 27B**; 5090 UUID `GPU-58a7c28b-e698-307f-c149-24d4ecd88bf4` for **27B only**. `source scripts/gpu.sh small|27b`.
+Hardware: 5050 UUID `GPU-A` for **< 27B**; 5090 UUID `GPU-C` for **27B only**. `source scripts/gpu.sh small|27b`.
 
 ---
 

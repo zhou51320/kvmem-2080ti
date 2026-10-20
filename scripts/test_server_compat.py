@@ -36,8 +36,12 @@ def check(name, ok):
 
 try:
     invalid = [
+        ['--kvmem-budget', '0'], ['--kvmem-gen-reserve', '0'], ['--kvmem-host-mib', '0'],
+        ['--kvmem-sessions', '0'], ['--kvmem', '--kvmem-sessions', '2', '--kvmem-conversations', '3'],
+        ['--no-kvmem', '--kvmem-budget', '1024'],
+        ['--kvmem', '--kvmem-disk-path', 'unused', '--kvmem-disk-mib', '0'],
         ['--gpu-layers', 'auto'], ['-ngl', '-1'], ['-ngl', 'abc'],
-        ['--parallel', '5'], ['-np', '0'], ['--threads', '4oops'],
+        ['--parallel', '9'], ['-np', '0'], ['--threads', '4oops'],
         ['--threads-batch', '2147483648'], ['-ub', '0'], ['-ub', '-1'],
         ['--batch-size', 'abc'], ['--ctx-size', '-1'], ['--port', '65536'],
         ['--flash-attn', 'maybe'], ['--alias', ''], ['--api-key', ''],
@@ -76,7 +80,7 @@ try:
         text = r.stderr.decode(errors='replace')
         check('reject ' + ' '.join(flags), r.returncode != 0 and
               'failed to load model' not in text and ('invalid' in text or 'missing value' in text))
-    for parallel in (2, 3, 4):
+    for parallel in (2, 3, 4, 5, 8):
         for extra in [['--no-kvmem'], ['--device', 'none'], ['--gpu-layers', '0'],
                       ['--threads-http', str(2 * parallel - 1)]]:
             flags = ['--parallel', str(parallel), *extra]
@@ -87,7 +91,8 @@ try:
                   r.returncode != 0 and 'failed to load model' not in text and
                   (f'KVMEM_STARTUP_ERROR --parallel {parallel} requires' in text or 'invalid arguments' in text))
     # Accepted aliases must get as far as the missing model, not silently become zero.
-    for flags in [['-ngl', 'all'], ['--gpu-layers', '0'],
+    for flags in [['--kvmem-sessions', '2', '--kvmem-disk-mib', '0', '--kvmem-lrfu', '--no-kvmem-lrfu'],
+                  ['-ngl', 'all'], ['--gpu-layers', '0'],
                   ['-t', '2', '-tb', '3', '-ub', '64', '-fa', 'on', '-np', '1'],
                   ['--alias', 'test-model', '--load-mode', 'none'],
                   ['--predict', '256', '-s', '123', '-mm', 'projector.gguf', '--no-webui'],
@@ -98,14 +103,18 @@ try:
                   ['--parallel', '4', '--kvmem-conversations', '1', '--threads-http', '8'],
                   ['--parallel', '4', '--threads-http', '0'],
                   ['--parallel', '4'],
+                  ['--parallel', '5'],
+                  ['--parallel', '8'],
                   ['--parallel', '2', '--kvmem-conversations', '3'],
-                  ['--parallel', '2', '--kvmem-conversations-gb', '24'],
+                  ['--parallel', '2', '--kvmem-conversations', '3', '--kvmem-conversations-gb', '24'],
                   ['--parallel', '2', '--mmproj', '__missing_projector__.gguf'],
                   ['--kvmem-conversations', '8', '--kvmem-conversations-gb', '24'],
                   ['--kvmem-conversations', '3', '--kvmem-session-ram-gb', '0'],
                   ['--kvmem-conversations', '3', '--kvmem-session-ram-gb', '0.01',
-                   '--kvmem-session-nvme-gb', '2', '--kvmem-session-cache-dir', str(out / 'unused-session-cache')]]:
-        r = subprocess.run([a.server, '-m', '__nonexistent__.gguf', '--device', 'CUDA0', *flags], env=env,
+                   '--kvmem-disk-mib', '2048', '--kvmem-disk-path', str(out / 'unused-session-cache')]]:
+        r = subprocess.run([a.server, '-m', '__nonexistent__.gguf', '--device', 'CUDA0',
+                           '--kvmem', '--kvmem-budget', '1024', '--kvmem-gen-reserve', '512',
+                           '--ctx-size', '8192', *flags], env=env,
                            capture_output=True, timeout=20)
         check('accept ' + ' '.join(flags), b'failed to load model' in r.stderr)
     check('invalid or model-less startup creates no session cache', not (out / 'unused-session-cache').exists())

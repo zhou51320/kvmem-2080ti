@@ -61,20 +61,16 @@ target_include_directories(kvmem-session-transfer-test PRIVATE tools)
 target_link_libraries(kvmem-session-transfer-test PRIVATE kvmem)
 add_test(NAME kvmem-session-transfer-test COMMAND kvmem-session-transfer-test)
 
-# Independent processes exercise actual OS lock release on forced termination.
-add_executable(kvmem-session-cache-lifecycle-worker tests/session-cache-lifecycle-worker.cpp)
-target_include_directories(kvmem-session-cache-lifecycle-worker PRIVATE tools kvmem/include)
-target_link_libraries(kvmem-session-cache-lifecycle-worker PRIVATE kvmem)
+add_executable(kvmem-spill-lifecycle-worker tests/spill-lifecycle-worker.cpp)
+target_include_directories(kvmem-spill-lifecycle-worker PRIVATE tools)
+target_link_libraries(kvmem-spill-lifecycle-worker PRIVATE kvmem)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if (Python3_Interpreter_FOUND)
-    add_test(NAME kvmem-session-cache-lifecycle-test
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_session_cache_lifecycle.py
-                $<TARGET_FILE:kvmem-session-cache-lifecycle-worker>)
-    set_tests_properties(kvmem-session-cache-lifecycle-test PROPERTIES TIMEOUT 90)
-else()
-    message(STATUS "Python3 unavailable: session cache process lifecycle test is not registered")
+    add_test(NAME kvmem-spill-lifecycle-test
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_spill_lifecycle.py
+                $<TARGET_FILE:kvmem-spill-lifecycle-worker>)
+    set_tests_properties(kvmem-spill-lifecycle-test PROPERTIES TIMEOUT 60)
 endif()
-
 option(KVMEM_BUILD_LLAMA "Build llama.cpp with the KVMem adapter" ON)
 option(KVMEM_BUILD_SERVER_TESTS "Build model-free server compatibility tests" ${KVMEM_BUILD_LLAMA})
 option(KVMEM_ROCM "Build KVMem with the HIP/ROCm backend" OFF)
@@ -293,20 +289,39 @@ if (KVMEM_BUILD_LLAMA)
     target_link_libraries(llama-kvmem-cli PRIVATE llama llama-common kvmem)
     target_compile_features(llama-kvmem-cli PRIVATE cxx_std_17)
 
-    add_executable(llama-kvmem-server tools/llama-kvmem-server.cpp tools/llama-kvmem-driver.cpp tools/kvmem-spec.cpp
+    add_executable(kvmem-speculative-shared-model-test tests/speculative-shared-model-test.cpp)
+    target_link_libraries(kvmem-speculative-shared-model-test PRIVATE llama llama-common)
+    target_compile_features(kvmem-speculative-shared-model-test PRIVATE cxx_std_17)
+    add_test(NAME kvmem-speculative-shared-model-test COMMAND kvmem-speculative-shared-model-test)
+    set_tests_properties(kvmem-speculative-shared-model-test PROPERTIES SKIP_RETURN_CODE 77)
+
+    option(KVMEM_BUILD_PERF_TOOLS "Build manual fixed-token backend comparison driver" OFF)
+    if (KVMEM_BUILD_PERF_TOOLS)
+        add_executable(kvmem-llama-backend-perf tests/llama-backend-perf.cpp)
+        target_include_directories(kvmem-llama-backend-perf PRIVATE src/adapter)
+        target_compile_definitions(kvmem-llama-backend-perf PRIVATE KVMEM_BENCH_ADAPTER=1)
+        target_link_libraries(kvmem-llama-backend-perf PRIVATE llama llama-common kvmem)
+    endif()
+
+    add_executable(llama-kvmem-server tools/kvmem-server-metrics.cpp tools/llama-kvmem-server.cpp tools/llama-kvmem-driver.cpp tools/kvmem-spec.cpp
         tools/kvmem-vision.cpp tools/kvmem-responses.cpp tools/kvmem-responses-stream.cpp
         backends/llamacpp/tools/server/server-common.cpp
         backends/llamacpp/tools/server/server-chat.cpp)
     target_include_directories(llama-kvmem-server PRIVATE
         kvmem/include
         src/adapter
+        backends/llamacpp/src
         backends/llamacpp/include
         backends/llamacpp/common
         backends/llamacpp/tools/server
         backends/llamacpp/tools/mtmd
         backends/llamacpp/vendor
         backends/llamacpp/vendor/cpp-httplib)
-    target_link_libraries(llama-kvmem-server PRIVATE llama llama-common cpp-httplib mtmd kvmem)
+    target_link_libraries(llama-kvmem-server PRIVATE llama llama-common cpp-httplib mtmd kvmem ${CMAKE_DL_LIBS})
+    if (KVMEM_GPU_BACKEND STREQUAL "CUDA")
+        find_package(CUDAToolkit QUIET)
+        target_include_directories(llama-kvmem-server PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    endif()
     target_compile_features(llama-kvmem-server PRIVATE cxx_std_17)
     # std::getenv is standard C++ and portable; MSVC marks it deprecated in
     # favour of the Windows-only _dupenv_s, and warns on the POSIX-ish helpers
@@ -318,9 +333,6 @@ if (KVMEM_BUILD_LLAMA)
         target_compile_definitions(llama-kvmem-cli    PRIVATE _CRT_SECURE_NO_WARNINGS)
         target_compile_definitions(llama-kvmem-server PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
-    foreach(tool llama-kvmem-cli llama-kvmem-server)
-        target_compile_definitions(${tool} PRIVATE KVMEM_ENABLE_NVME=$<BOOL:${KVMEM_ENABLE_NVME}>)
-    endforeach()
 
     # Run manually with an MTP GGUF path; no model is downloaded by CTest.
     # This test needs internal symbols. Windows static builds expose them;
@@ -339,10 +351,58 @@ if (KVMEM_BUILD_LLAMA)
         set_tests_properties(kvmem-mtp-kv-test PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME kvmem-session-restore-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/session-restore-regression.py
+                --exe $<TARGET_FILE:llama-kvmem-server>
+                --out ${CMAKE_CURRENT_BINARY_DIR}/session-restore-regression)
+        add_test(NAME kvmem-session-restore-mtp-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/session-restore-regression.py
+                --exe $<TARGET_FILE:llama-kvmem-server> --mtp
+                --out ${CMAKE_CURRENT_BINARY_DIR}/session-restore-mtp-regression)
+        add_test(NAME kvmem-session-restore-mtp-small-block-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/session-restore-regression.py
+                --exe $<TARGET_FILE:llama-kvmem-server> --mtp --block-tokens 32 --turns 12 --cancel-rounds 3
+                --out ${CMAKE_CURRENT_BINARY_DIR}/session-restore-mtp-small-block-regression)
+        set_tests_properties(kvmem-session-restore-regression kvmem-session-restore-mtp-regression
+            kvmem-session-restore-mtp-small-block-regression
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 RUN_SERIAL TRUE)
+        add_test(NAME kvmem-prefix-reuse-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/prefix-reuse-regression.py
+                --exe $<TARGET_FILE:llama-kvmem-server>
+                --out ${CMAKE_CURRENT_BINARY_DIR}/prefix-reuse-regression)
+        add_test(NAME kvmem-prefix-reuse-mtp-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/prefix-reuse-regression.py
+                --exe $<TARGET_FILE:llama-kvmem-server> --mtp --sessions 1 --turns 12
+                --out ${CMAKE_CURRENT_BINARY_DIR}/prefix-reuse-mtp-regression)
+        set_tests_properties(kvmem-prefix-reuse-regression kvmem-prefix-reuse-mtp-regression
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 RUN_SERIAL TRUE)
+    endif()
+
+    add_executable(kvmem-checkpoint-tail-test tests/checkpoint-tail-test.cpp)
+    target_include_directories(kvmem-checkpoint-tail-test PRIVATE src/adapter)
+    target_link_libraries(kvmem-checkpoint-tail-test PRIVATE llama kvmem)
+    add_test(NAME kvmem-checkpoint-tail-test COMMAND kvmem-checkpoint-tail-test)
+    set_tests_properties(kvmem-checkpoint-tail-test PROPERTIES SKIP_RETURN_CODE 77)
+
     add_executable(kvmem-gdn-replay-test tests/gdn-replay-test.cpp)
+    target_include_directories(kvmem-gdn-replay-test PRIVATE src/adapter)
     target_link_libraries(kvmem-gdn-replay-test PRIVATE ggml)
+    if (GGML_CUDA)
+        find_package(CUDAToolkit REQUIRED)
+        target_include_directories(kvmem-gdn-replay-test PRIVATE backends/llamacpp/ggml/src)
+        target_link_libraries(kvmem-gdn-replay-test PRIVATE CUDA::cudart)
+        target_compile_definitions(kvmem-gdn-replay-test PRIVATE KVMEM_TEST_CUDA)
+    endif()
     add_test(NAME kvmem-gdn-replay-test COMMAND kvmem-gdn-replay-test)
     set_tests_properties(kvmem-gdn-replay-test PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(kvmem-llama-commit-order-test tests/llama-commit-order-test.cpp)
+    target_include_directories(kvmem-llama-commit-order-test PRIVATE src/adapter kvmem/include)
+    target_link_libraries(kvmem-llama-commit-order-test PRIVATE llama)
+    add_test(NAME kvmem-llama-commit-order-test COMMAND kvmem-llama-commit-order-test)
+    set_tests_properties(kvmem-llama-commit-order-test PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(kvmem-gdn-output-fusion-test tests/gdn-output-fusion-test.cpp)
     target_link_libraries(kvmem-gdn-output-fusion-test PRIVATE ggml)
@@ -373,10 +433,20 @@ if (KVMEM_BUILD_SERVER_TESTS)
     add_test(NAME kvmem-chat-id-test COMMAND kvmem-chat-id-test)
 
     add_executable(kvmem-server-options-test tests/server-options-test.cpp)
-    target_include_directories(kvmem-server-options-test PRIVATE tools backends/llamacpp/include backends/llamacpp/ggml/include)
+    target_include_directories(kvmem-server-options-test PRIVATE tools kvmem/include backends/llamacpp/include backends/llamacpp/ggml/include)
     add_test(NAME kvmem-server-options-test COMMAND kvmem-server-options-test)
 
     find_package(Threads REQUIRED)
+    add_executable(kvmem-monitor-test tests/monitor-test.cpp)
+    target_include_directories(kvmem-monitor-test PRIVATE kvmem/include backends/llamacpp/vendor ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(kvmem-monitor-test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    add_test(NAME kvmem-monitor-test COMMAND kvmem-monitor-test)
+    add_executable(kvmem-server-metrics-test tests/server-metrics-test.cpp
+        tools/kvmem-server-metrics.cpp backends/llamacpp/tools/server/server-common.cpp)
+    target_include_directories(kvmem-server-metrics-test PRIVATE tools backends/llamacpp/tools/server
+        backends/llamacpp/tools/mtmd backends/llamacpp/vendor backends/llamacpp/vendor/cpp-httplib)
+    target_link_libraries(kvmem-server-metrics-test PRIVATE llama-common mtmd cpp-httplib)
+    add_test(NAME kvmem-server-metrics-test COMMAND kvmem-server-metrics-test)
     add_executable(kvmem-server-progress-test tests/server-progress-test.cpp)
     target_include_directories(kvmem-server-progress-test PRIVATE tools backends/llamacpp/vendor)
     target_link_libraries(kvmem-server-progress-test PRIVATE Threads::Threads)

@@ -1,5 +1,10 @@
 # 1:10 multi-session exchange stability test
 
+> Historical separate-file cache evidence. Its manual runners were retired with the [public SSD migration](legacy-ssd-retirement-20261019.md); the measurements below retain their original scope.
+
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 This is a release-level service stability check for the RAM/NVMe session cache.
 It scales the 10/15/20 GiB exchange case to approximately **1/1.5/2 GiB**:
 
@@ -29,7 +34,7 @@ the service log plus machine-readable result under `artifacts/`.
 python scripts/test_server_session_exchange_1to10.py `
   --server .\build-session\bin\llama-kvmem-server.exe `
   --model models\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf `
-  --gpu GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c `
+  --gpu GPU-B `
   --output artifacts\session-exchange-1to10-5060ti
 ```
 

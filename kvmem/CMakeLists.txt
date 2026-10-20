@@ -1,13 +1,3 @@
-if (WIN32)
-    set(KVMEM_NVME_DEFAULT OFF)
-else()
-    set(KVMEM_NVME_DEFAULT ON)
-endif()
-option(KVMEM_ENABLE_NVME "Build the POSIX NVMe KV storage tier" ${KVMEM_NVME_DEFAULT})
-if (WIN32 AND KVMEM_ENABLE_NVME)
-    message(FATAL_ERROR "NVMe storage is not supported on Windows; use KVMEM_ENABLE_NVME=OFF")
-endif()
-
 add_library(kvmem
     src/host/kvmem_store.cpp
     src/host/kvmem_runtime.cpp
@@ -19,6 +9,7 @@ add_library(kvmem
     src/host/host_kv_storage.cpp
     src/host/spill_io.cpp
     src/host/session_memory.cpp
+    src/host/prefix_checkpoint.cpp
     src/host/rope.cpp
 )
 set_target_properties(kvmem PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -28,7 +19,6 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     # ninfer's /d1trimfile prefix is its own source root and does not match this directory.
     add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/d1trimfile:${CMAKE_CURRENT_SOURCE_DIR}/>)
 endif()
-target_compile_definitions(kvmem PUBLIC KVMEM_ENABLE_NVME=$<BOOL:${KVMEM_ENABLE_NVME}>)
 
 if (WIN32)
     # std::getenv is standard C++ and portable; MSVC marks it deprecated in
@@ -58,19 +48,7 @@ kvmem_add_test(spill_io_test)
 kvmem_add_test(tiered_kv_storage_test)
 kvmem_add_test(native_residency_test)
 kvmem_add_test(kv_content_test)
+kvmem_add_test(prefix_checkpoint_test)
 kvmem_add_test(mean_key_retrieval_test)
-if (NOT WIN32 OR NOT KVMEM_ENABLE_NVME)
-    # The runtime suite already guards its only NVMe case with this option.
-    kvmem_add_test(kvmem_runtime_test)
-endif()
-if (WIN32)
-    # NVMe-specific suites require the POSIX implementation.
-    message(STATUS "kvmem: skipping POSIX/NVMe suites on Windows")
-else()
-    if (KVMEM_ENABLE_NVME)
-        kvmem_add_test(nvme_kv_tier_test)
-    else()
-        kvmem_add_test(nvme_disabled_test)
-    endif()
-    kvmem_add_test(raw_kv_store_test)
-endif()
+kvmem_add_test(kvmem_runtime_test)
+kvmem_add_test(raw_kv_store_test)

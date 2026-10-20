@@ -1,6 +1,7 @@
+# Device identifiers and private paths anonymized; measurements unchanged.
 # v0.4.0 quality excerpts (RTX 5050, 2026-09-04)
 # Device: NVIDIA GeForce RTX 5050 Laptop GPU, CUDA_DEVICE_ORDER=PCI_BUS_ID
-# UUID GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29
+# UUID GPU-A
 
 ========== host raw_kv_store_test ==========
 RAW_TEST_OK

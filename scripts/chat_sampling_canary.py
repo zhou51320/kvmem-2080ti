@@ -3,6 +3,7 @@
 
 Starts isolated servers for ordinary and MTP generation; leaves IQ4 untouched.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.request
 
 from mtp_canary import find_mtp_model
+import gpu_env
 
 ROOT = Path(__file__).resolve().parents[1]
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -31,16 +33,20 @@ def post(base, body):
 
 
 def main():
-    binary = ROOT / 'build/bin/llama-kvmem-server'
-    model = find_mtp_model()
+    parser = argparse.ArgumentParser(description=__doc__)
+    gpu_env.add_gpu_argument(parser)
+    parser.add_argument("--server", type=Path, default=None)
+    parser.add_argument("--model", type=Path)
+    args = parser.parse_args()
+    gpu_env.configure(args.gpu)
+    binary = args.server or gpu_env.find_binary("llama-kvmem-server")
+    model = args.model or find_mtp_model()
     folder = ROOT / 'logs' / ('chat_sampling_' + time.strftime('%Y%m%d_%H%M%S'))
     folder.mkdir()
     print('ARTIFACTS', folder, flush=True)
     env = os.environ.copy()
     env['KVMEM_TRACE'] = '1'  # Sampling records are opt-in diagnostics.
-    env['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    env['CUDA_VISIBLE_DEVICES'] = 'GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29'
-    env['LD_LIBRARY_PATH'] = str(ROOT / 'build/bin') + ':/home/leye/kvmem_qw3/.cu13-env/lib'
+    env = gpu_env.apply_gpu(env)
     results = []
     for mode in ('none', 'draft-mtp'):
         with socket.socket() as sock:

@@ -1,0 +1,127 @@
+name: Build KVMem llama.cpp for RTX 2080 Ti
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/build-2080ti-llama.yml'
+      - 'backends/versions.json'
+      - 'backends/patches/llamacpp-kvmem.patch'
+      - 'kvmem/**'
+      - 'src/**'
+      - 'tools/**'
+      - 'scripts/prepare-backends.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kvmem-2080ti-llama-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-llama:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.2.0-devel-ubuntu24.04
+    timeout-minutes: 360
+    steps:
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git python3 python3-pip ninja-build pkg-config \
+            libcurl4-openssl-dev patchelf binutils file
+          python3 -m pip install --break-system-packages --ignore-installed 'cmake>=3.28,<4'
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Prepare official llama.cpp backend and KVMem integration
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/backends/llamacpp"
+          python3 scripts/prepare-backends.py --backend llamacpp
+          python3 scripts/prepare-backends.py --backend llamacpp --check
+          git -C backends/llamacpp rev-parse HEAD
+
+      - name: Configure llama.cpp for Turing sm_75
+        run: |
+          cmake -S . -B build/llama -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=75 \
+            -DCMAKE_C_FLAGS='-march=x86-64 -mtune=generic' \
+            -DCMAKE_CXX_FLAGS='-march=x86-64 -mtune=generic' \
+            -DCMAKE_CUDA_FLAGS='-Xcompiler=-march=x86-64 -Xcompiler=-mtune=generic' \
+            -DGGML_CUDA=ON \
+            -DGGML_CUDA_FA_QUANTS=all \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DKVMEM_BUILD_LLAMA=ON \
+            -DKVMEM_BUILD_SERVER_TESTS=OFF
+
+      - name: Build llama-kvmem-server
+        run: |
+          nproc
+          free -h
+          /usr/bin/time -v cmake --build build/llama --parallel 2 \
+            --target llama-kvmem-server -- -k 0
+
+      - name: Package llama artifact
+        run: |
+          BIN=build/llama/bin/llama-kvmem-server
+          test -x "$BIN"
+          file "$BIN"
+          readelf -h "$BIN"
+          strings "$BIN" | grep -qi kvmem
+
+          rm -rf dist/llama
+          mkdir -p dist/llama/lib
+          cp "$BIN" dist/llama/
+          patchelf --set-rpath '$ORIGIN:$ORIGIN/lib' dist/llama/llama-kvmem-server
+          ldd dist/llama/llama-kvmem-server | tee dist/llama/ldd-build.txt || true
+          awk '/=> \/\// {print $3} /^\/[^ ]+ \(/ {print $1}' dist/llama/ldd-build.txt \
+            | sort -u \
+            | while read -r lib; do
+                [ -f "$lib" ] || continue
+                case "$(basename "$lib")" in
+                  libcuda.so*) continue ;;
+                  libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libresolv.so*|libutil.so*|ld-linux*.so*|libgcc_s.so*|libstdc++.so*) continue ;;
+                esac
+                cp -L "$lib" "dist/llama/lib/$(basename "$lib")"
+              done
+          cat > dist/llama/llama-kvmem <<'EOF'
+          #!/bin/sh
+          set -eu
+          HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$HERE/llama-kvmem-server" "$@"
+          EOF
+          chmod +x dist/llama/llama-kvmem
+          printf 'RTX 2080 Ti: CUDA 13.2, sm_75. NVIDIA driver is required on the target.\n' > dist/llama/README.txt
+          find dist/llama -maxdepth 2 -type f -printf '%p %s bytes\n' | sort
+          tar -C dist/llama -czf llama-kvmem-2080ti-sm75-cuda13.tar.gz .
+
+      - name: Upload llama artifact before runtime validation
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-kvmem-2080ti-sm75-cuda13
+          path: |
+            dist/llama/**
+            llama-kvmem-2080ti-sm75-cuda13.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Validate packaged shared-library dependencies
+        run: |
+          LD_LIBRARY_PATH="$PWD/dist/llama/lib" ldd dist/llama/llama-kvmem-server \
+            | tee dist/llama/ldd-bundled.txt || true
+          if grep 'not found' dist/llama/ldd-bundled.txt \
+              | grep -vE '^[[:space:]]*libcuda\.so\.1[[:space:]]+=> not found$' \
+              > /tmp/llama-unresolved.txt; then
+            echo 'Unresolved packaged dependencies (artifact is available above):' >&2
+            cat /tmp/llama-unresolved.txt >&2
+            exit 1
+          fi

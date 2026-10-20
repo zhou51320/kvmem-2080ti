@@ -1,5 +1,8 @@
 # ninfer-all 上游迁移评估与实施计划
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 日期：2026 年 10 月 7 日。状态：M0–M6 已完成，核心迁移验收通过。最终范围及覆盖边界见 [验收记录](ninfer-all-migration-validation.md)。
 
 ## 建议与难度
@@ -42,7 +45,7 @@ GitHub 提交接口在 `2026-10-01T00:00:00Z` 至查询时刻返回 ninfer-all �
 
 失败数表示补丁上下文不能直接应用，不是已经确认的 45 个功能缺陷；成功数也不表示语义兼容。此次只在独立上游检出中运行 `git apply --check`，没有应用补丁。
 
-本机研究证据保存在 `C:\Users\leyew\AppData\Local\KVMem\ninfer-all-research-20261007\`：`audit.json` 包含所有文件的检查结果，`audit.py` 可重现统计，两份 `*-recent-commits.json` 保存活动记录，`upstream/` 是固定提交的干净源码。2026-10-03 的旧研究仅作历史参考，不替代本次快照。
+本机研究证据保存在 `$ARTIFACTS\ninfer-all-research-20261007\`：`audit.json` 包含所有文件的检查结果，`audit.py` 可重现统计，两份 `*-recent-commits.json` 保存活动记录，`upstream/` 是固定提交的干净源码。2026-10-03 的旧研究仅作历史参考，不替代本次快照。
 
 ## 迁移范围与架构边界
 
@@ -86,7 +89,7 @@ ninfer-all 的 Host/disk prefix cache 不能替代 KVMem 的检索工作集。�
 | 已记录的 KVMem 集成补丁 | 按构建、KV、执行状态、服务入口分组适配；重点审查冲突文件和它们的调用方 |
 | 本轮额外的 21 个量化文件 | 保留当前现场和证据；采用上游已有生产实现，逐项迁移有增量价值的测试，避免重复实现 |
 
-量化步骤 2 的转换/加载已完成，已有 10 项定向 Python 测试和三格式加载验证。步骤 3 的 GPU 接线只写入了代码，**尚未编译或运行数值测试**。迁移前须按这个状态归档，不能将其纳入“已验证基线”。原始记录位于 `C:\Users\leyew\AppData\Local\KVMem\backend-p0p1-20261002\results\quant-wiring-20261007\`，包括 `step2-result.json`、`step2.diff` 和 `step3-before/`。
+量化步骤 2 的转换/加载已完成，已有 10 项定向 Python 测试和三格式加载验证。步骤 3 的 GPU 接线只写入了代码，**尚未编译或运行数值测试**。迁移前须按这个状态归档，不能将其纳入“已验证基线”。原始记录位于 `$ARTIFACTS\backend-p0p1-20261002\results\quant-wiring-20261007\`，包括 `step2-result.json`、`step2.diff` 和 `step3-before/`。
 
 ### Windows 差异需要重新判断
 
@@ -219,7 +222,7 @@ ninfer-all 的 Host/disk prefix cache 不能替代 KVMem 的检索工作集。�
 | M5 | 既有 golden/互操作、三格式定向算子与可用真实模型 | 重做量化内核、跑全 18 格式宽度矩阵、下载 37 GB 新模型 |
 | M6 | 准备/校验、源树重建和交付入口 | 重复整套验收、llama NVMe 压力测试 |
 
-功能/正确性测试先查询当前占用，使用能容纳工作负载的空闲 GPU，以 UUID/型号识别，不固定数字索引。性能比较不是本轮迁移完成的默认门槛，不据上游其他 GPU 的成绩宣称本机提速；若后续需要比较，只使用 RTX 5060 Ti `GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`，固定模型、B/R/H、KV、MTP、Graph、设备 profile、prefill 对齐与请求数据。另一张功能测试卡为 RTX 5050 Laptop `GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`。
+功能/正确性测试先查询当前占用，使用能容纳工作负载的空闲 GPU，以 UUID/型号识别，不固定数字索引。性能比较不是本轮迁移完成的默认门槛，不据上游其他 GPU 的成绩宣称本机提速；若后续需要比较，只使用 RTX 5060 Ti `GPU-B`，固定模型、B/R/H、KV、MTP、Graph、设备 profile、prefill 对齐与请求数据。另一张功能测试卡为 RTX 5050 Laptop `GPU-A`。
 
 默认编译并行度为 8。迁移候选的构建 wrapper 已将默认值从 2 更新为 8；只有实际资源压力或构建失败才降低，并记录原因。测试通过后，仅因新改动、失败或未解决的实质风险才扩大或重复测试。
 
@@ -280,7 +283,7 @@ M0 仅做版本、快照和文件完整性核对，没有编译、GPU、模型�
 
 精简验证为 **5/5 小测试通过、3/3 原生短生成通过**。五个小测试覆盖 CLI 参数、服务参数到 Engine 的映射、KV 容量、缓存/内存策略归一化和字符串状态分叉。三个实际策略分别为 default、strict、mixed；均输出 `1, 2, 3, 4, 5`，提示词 22 token、输出 14 token，检查了后续解码、统计与 Ctrl+Break 正常退出，三个进程均以 0 退出，未强制终止。
 
-运行时 5060 Ti 被占用，按 GPU 偏好使用空闲 RTX 5050 Laptop `GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29`，没有等待指定显卡。已有 Bonsai 模型使用 max_context 512、prefill_chunk 128、并发 1、BF16 KV、FP16 GDN、关闭 MTP/ngram/自动校准；采用 Host 保留为 0 的 Hybrid 缓存，仅 1 个 Device snapshot、0 个新 tap。default/strict 使用显式 512 KV，mixed 使用 auto 且实际解析为 512。strict 的驻留检查通过，Shared 为 413138944 B，与基线相等，64 MiB 预留验证通过。
+运行时 5060 Ti 被占用，按 GPU 偏好使用空闲 RTX 5050 Laptop `GPU-A`，没有等待指定显卡。已有 Bonsai 模型使用 max_context 512、prefill_chunk 128、并发 1、BF16 KV、FP16 GDN、关闭 MTP/ngram/自动校准；采用 Host 保留为 0 的 Hybrid 缓存，仅 1 个 Device snapshot、0 个新 tap。default/strict 使用显式 512 KV，mixed 使用 auto 且实际解析为 512。strict 的驻留检查通过，Shared 为 413138944 B，与基线相等，64 MiB 预留验证通过。
 
 首轮测试的 Legacy 零 Host 预算被正确拒绝：15 个必需状态图像需要 1176852480 B。随后 Hybrid 默认保留槽与 Graph 预留需要 448301312 B，但 5050 当时 CUDA 只报告 278458368 B 可用。保留了失败日志与命令，并选用最小保留槽、关闭 Graph 的有效配置完成 M1；没有修改预算逻辑或缩减 max_context。**本阶段 Graph 实际运行未验收，留到 M3 的执行状态验证**；没有做性能、分页压力、strict 自动 OOM 恢复矩阵、完整测试集或量化数值矩阵。独立 CLI 可执行文件未构建，M1 验证其参数链及本阶段实际 worker。
 

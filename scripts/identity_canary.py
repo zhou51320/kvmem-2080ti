@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Identity canary: greedy tokens with KVMem-off vs KVMem-on (budget >= prompt).
 
-Default GPU is the 5050 (`--gpu small`). 27B must use `--gpu 27b` (5090).
+Select the validation GPU with --gpu or the inherited environment.
 """
 from __future__ import annotations
 
@@ -20,13 +20,7 @@ DEFAULT_PROMPT = "Hello my name is"
 
 
 def find_cli() -> Path:
-    for p in (
-        ROOT / "build/bin/llama-kvmem-cli",
-        ROOT / "build/llama-kvmem-cli",
-    ):
-        if p.is_file():
-            return p
-    raise SystemExit("llama-kvmem-cli not found; run scripts/build-cuda.sh")
+    return gpu_env.find_binary("llama-kvmem-cli")
 
 
 def run(cli: Path, model: Path, extra: list[str], prompt: str, gpu: str) -> list[int]:
@@ -47,7 +41,7 @@ def run(cli: Path, model: Path, extra: list[str], prompt: str, gpu: str) -> list
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
         raise SystemExit(f"command failed rc={proc.returncode}: {' '.join(cmd)}")
-    gpu_env.require_device(proc.stderr, env["KVMEM_GPU_NAME"])
+    gpu_env.require_device(proc.stderr, env)
     ids = []
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -62,9 +56,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("-m", "--model", type=Path, default=DEFAULT_MODEL)
     ap.add_argument("-p", "--prompt", default=DEFAULT_PROMPT)
-    ap.add_argument("--gpu", choices=("small", "27b", "5050", "5090"), default="small",
-                    help="small/5050 = RTX 5050; 27b/5090 = RTX 5090 (27B only)")
+    gpu_env.add_gpu_argument(ap)
     args = ap.parse_args()
+    args.gpu = gpu_env.configure(args.gpu)
     if not args.model.is_file():
         raise SystemExit(f"missing model {args.model}")
 

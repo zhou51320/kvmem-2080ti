@@ -1,5 +1,8 @@
 # Active KV tiering implementation
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 Status: P1/P2 common RAM ownership and both backend acceptance gates passed.
 P3-P8 portable SSD, active/idle/concurrent correctness, feature combinations,
 fault/cancellation, patch reconstruction and Windows dependency packaging completed.
@@ -56,7 +59,7 @@ output length, budgets, speculation and cache conditions fixed. Report actual SS
 I/O cost separately from regressions of existing RAM tasks; freeze first correct SSD
 implementation as the optimization reference.
 
-Performance GPU: RTX 5060 Ti, GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c.
+Performance GPU: RTX 5060 Ti, GPU-B.
 Correctness may use either free GPU. Compilation defaults to eight jobs.
 Native Windows, native Linux and WSL evidence are labeled separately.
 

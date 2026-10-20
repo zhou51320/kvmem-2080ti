@@ -21,10 +21,7 @@ NEEDLE = "The secret code is BLUEBIRD-42."
 
 
 def find_server() -> Path:
-    for p in (ROOT / "build/bin/llama-kvmem-server", ROOT / "build/llama-kvmem-server"):
-        if p.is_file():
-            return p
-    raise SystemExit("llama-kvmem-server not found; run scripts/build-cuda.sh")
+    return gpu_env.find_binary("llama-kvmem-server")
 
 
 def post_json(url: str, body: dict, timeout: int = 180) -> tuple[int, str]:
@@ -79,11 +76,13 @@ def main() -> int:
     ap.add_argument("-m", "--model", type=Path, default=DEFAULT_MODEL)
     ap.add_argument("--port", type=int, default=18181)
     ap.add_argument("--host", default="127.0.0.1")
+    gpu_env.add_gpu_argument(ap)
     args = ap.parse_args()
+    args.gpu = gpu_env.configure(args.gpu)
     if not args.model.is_file():
         raise SystemExit(f"missing model {args.model}")
 
-    env = gpu_env.apply_gpu(os.environ.copy(), "small")
+    env = gpu_env.apply_gpu(os.environ.copy())
     env["KVMEM_TRACE"] = "1"
     log_path = ROOT / "logs" / "server_smoke.stderr.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,7 +109,7 @@ def main() -> int:
         else:
             raise SystemExit("server did not print listening line:\n" + log_path.read_text()[-4000:])
         wait_health(base)
-        gpu_env.require_device(log_path.read_text(), "RTX 5050")
+        gpu_env.require_device(log_path.read_text(), env)
 
         st, body = post_json(base + "/v1/chat/completions", {
             "messages": [{"role": "user", "content": "Say hi in one word."}],

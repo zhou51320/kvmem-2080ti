@@ -1,8 +1,11 @@
 #include "llama.h"
+#include "../backends/llamacpp/src/llama-ext.h"
 #include "llama-kvmem-hooks.h"
 #include "kvmem/retrieval_options.hpp"
+#include "kvmem/cli_options.h"
 #include "kvmem-spec.h"
 #include "kvmem-server-devices.h"
+#include "kvmem-execution-scope.h"
 
 #include <algorithm>
 #include <chrono>
@@ -12,6 +15,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -49,21 +53,22 @@ static void print_usage(const char * argv0) {
             "  --kvmem-gpu-ratio R        cap slot pool at this fraction of GPU VRAM (default 0.50)\n"
             "  --kvmem-gpu-high R         prefill offload high watermark (default 0.95)\n"
             "  --kvmem-gpu-low R          prefill offload low watermark (default 0.85)\n"
+            "  --kvmem-host-mib MIB      shared native KV RAM budget (default 16384 MiB)\n"
+            "  --kvmem-disk-mib MIB      shared native KV SSD budget; 0 = off\n"
+            "  --kvmem-disk-path PATH    process-local SSD directory; pair with disk-mib\n"
             "  --kvmem-cpu-gb GB          CPU spill arena in GiB (0 = off)\n"
-            "  --kvmem-nvme-gb GB         NVMe spill file in GiB (0 = off)\n"
-            "  --kvmem-nvme-dir PATH      NVMe spill directory (default /tmp/kvmem_nvme)\n"
-            "  --kvmem-harvest-v          prefill D2H V with raw-K (default off; RAM until NVMe flush)\n"
-            "  --kvmem-raw-k-nvme         store raw-K and V on NVMe (needs --kvmem-nvme-gb)\n"
+            "  --kvmem-harvest-v          optional prefill D2H V capture (default off)\n"
             "  --kvmem-dump-kv            after prefill, compare raw-rebuild KV vs GPU KV\n"
             "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | f32 | q8_0 | q5_0 | q4_0 (default q8_0)\n"
             "  -ctk, --cache-type-k TYPE  GPU K cache type (llama.cpp name; default q8_0)\n"
             "  -ctv, --cache-type-v TYPE  GPU V cache type (quantized: independently q8_0 | q5_0 | q4_0)\n"
-            "  --spec-type TYPE           none | draft-mtp (default none)\n"
-            "  --spec-kv-dtype TYPE       MTP K/V type (default: inherit target K/V types)\n"
-            "  --spec-draft-n-max N       MTP draft tokens (default 2)\n"
+            "  --seed N                   RNG seed; -1=random (ordinary default 0, MTP random)\n"
+            "  --spec-type TYPE           none | draft-mtp | draft-dflash (default none)\n"
+            "  --spec-kv-dtype TYPE       draft K/V type (default: inherit target K/V types)\n"
+            "  --spec-draft-n-max N       draft tokens (default 2)\n"
             "  --spec-draft-p-min P       min draft probability (default 0)\n"
             "  --kvmem-mtp-state MODE     snapshots | replay (default snapshots)\n"
-            "  --spec-draft-model PATH    optional sidecar MTP GGUF\n",
+            "  --spec-draft-model PATH    DFlash2 draft GGUF; optional sidecar MTP GGUF\n",
             argv0);
 }
 
@@ -89,6 +94,9 @@ int main(int argc, char ** argv) {
     bool tokens_only = false;
     bool no_prompt = false;
 
+    std::unique_ptr<llama_kvmem_execution_state, decltype(&llama_kvmem_execution_free)> execution{
+        llama_kvmem_execution_create(), llama_kvmem_execution_free};
+    kvmem_execution_scope execution_scope(execution.get());
     llama_kvmem_params kparams = {};
     kparams.block_tokens = 32;
     kparams.gen_reserve = 256;
@@ -98,12 +106,15 @@ int main(int argc, char ** argv) {
     kparams.force_pos = -1;
     int query_last = 64;
     std::string force_substr;
-    std::string nvme_dir;
+    kvmem::CliOptions storage_options;
     bool dump_kv = false;
     ggml_type cache_type_k = GGML_TYPE_Q8_0;
     ggml_type cache_type_v = GGML_TYPE_Q8_0;
     ggml_type spec_cache_type = GGML_TYPE_COUNT;
-    bool spec_mtp = false;
+    uint32_t seed = 0;
+    bool seed_set = false;
+    bool spec_enabled = false;
+    auto spec_algorithm = kvmem::SpeculativeAlgorithm::None;
     int spec_n_max = 2;
     float spec_p_min = 0.0f;
     std::string spec_draft_model;
@@ -119,6 +130,16 @@ int main(int argc, char ** argv) {
             }
             return argv[++i];
         };
+        try {
+            kvmem::reject_retired_storage_option(arg);
+            if (eq(arg, "--kvmem-host-mib") || eq(arg, "--kvmem-disk-mib") || eq(arg, "--kvmem-disk-path")) {
+                storage_options.parse(arg, need);
+                continue;
+            }
+        } catch (const std::invalid_argument & error) {
+            fprintf(stderr, "%s\n", error.what());
+            return 1;
+        }
         if (eq(arg, "-h") || eq(arg, "--help")) {
             print_usage(argv[0]);
             return 0;
@@ -214,16 +235,8 @@ int main(int argc, char ** argv) {
             const double gb = std::atof(need(arg));
             kparams.cpu_bytes = gb <= 0.0 ? 0
                 : static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
-        } else if (eq(arg, "--kvmem-nvme-gb")) {
-            const double gb = std::atof(need(arg));
-            kparams.nvme_bytes = gb <= 0.0 ? 0
-                : static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
-        } else if (eq(arg, "--kvmem-nvme-dir")) {
-            nvme_dir = need(arg);
         } else if (eq(arg, "--kvmem-harvest-v")) {
             kparams.harvest_v = true;
-        } else if (eq(arg, "--kvmem-raw-k-nvme")) {
-            kparams.raw_k_nvme = true;
         } else if (eq(arg, "--spec-kv-dtype")) {
             bool ok = false;
             spec_cache_type = kvmem_parse_cache_type(need(arg), &ok);
@@ -231,16 +244,29 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "unsupported MTP cache type (want f16|q8_0|q5_0|q4_0|f32)\n");
                 return 1;
             }
-        } else if (eq(arg, "--spec-type")) {
-            const char * t = need(arg);
-            if (eq(t, "draft-mtp")) {
-                spec_mtp = true;
-            } else if (eq(t, "none")) {
-                spec_mtp = false;
-            } else {
-                fprintf(stderr, "unsupported --spec-type %s (P7-0: draft-mtp|none)\n", t);
+        } else if (eq(arg, "--seed") || eq(arg, "-s")) {
+            const char * value = need(arg);
+            char * end = nullptr;
+            const auto parsed = std::strtoll(value, &end, 10);
+            if (!*value || *end || parsed < -1 || (parsed >= 0 && (uint64_t)parsed > UINT32_MAX)) {
+                fprintf(stderr, "--seed requires -1 or an integer in 0..4294967295\n");
                 return 1;
             }
+            seed = (uint32_t)parsed;
+            seed_set = true;
+        } else if (eq(arg, "--spec-type")) {
+            const char * t = need(arg);
+            if (eq(t, "draft-mtp") || eq(t, "mtp")) {
+                spec_algorithm = kvmem::SpeculativeAlgorithm::Mtp;
+            } else if (eq(t, "draft-dflash") || eq(t, "dflash2")) {
+                spec_algorithm = kvmem::SpeculativeAlgorithm::DFlash2;
+            } else if (eq(t, "none")) {
+                spec_algorithm = kvmem::SpeculativeAlgorithm::None;
+            } else {
+                fprintf(stderr, "unsupported --spec-type %s (none|draft-mtp|draft-dflash)\n", t);
+                return 1;
+            }
+            spec_enabled = spec_algorithm != kvmem::SpeculativeAlgorithm::None;
         } else if (eq(arg, "--spec-draft-n-max")) {
             spec_n_max = std::atoi(need(arg));
         } else if (eq(arg, "--spec-draft-p-min")) {
@@ -263,12 +289,22 @@ int main(int argc, char ** argv) {
             break;
         }
     }
-#if !KVMEM_ENABLE_NVME
-    if (kparams.nvme_bytes || kparams.raw_k_nvme) {
-        fprintf(stderr, "NVMe offload is disabled in this build (KVMEM_ENABLE_NVME=OFF)\n");
+    if (storage_options.payload_disk_dir.empty() != (storage_options.payload_disk_bytes == 0)) {
+        fprintf(stderr, "SSD requires --kvmem-disk-path and positive --kvmem-disk-mib together; omit the path when disabled\n");
         return 1;
     }
-#endif
+    if ((storage_options.payload_host_bytes || storage_options.payload_disk_bytes) && !kparams.enabled) {
+        fprintf(stderr, "RAM/SSD storage options require --kvmem\n");
+        return 1;
+    }
+    if (storage_options.payload_disk_bytes && kparams.cpu_bytes) {
+        fprintf(stderr, "shared KV SSD cannot be combined with the legacy CPU spill arena\n");
+        return 1;
+    }
+    kparams.payload_host_bytes = kparams.enabled ? (storage_options.payload_host_bytes ?
+        storage_options.payload_host_bytes : kvmem::CliOptions::default_host_bytes) : 0;
+    kparams.payload_disk_bytes = storage_options.payload_disk_bytes;
+    kparams.payload_disk_dir = storage_options.payload_disk_dir.empty() ? nullptr : storage_options.payload_disk_dir.c_str();
     // Validate before backend initialization and loading a potentially large model.
     if (!kvmem_cache_types_ok(cache_type_k, cache_type_v)) {
         fprintf(stderr, "incompatible KV cache types: K=%s, V=%s; quantized K/V must both use q8_0, q5_0 or q4_0; "
@@ -307,29 +343,39 @@ int main(int argc, char ** argv) {
 
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = ngl;
-    model_params.load_mtp = spec_mtp;
+    model_params.load_mtp = spec_algorithm == kvmem::SpeculativeAlgorithm::Mtp;
     try {
         device_config.apply(device_options, model_params);
     } catch (const std::exception & e) {
         fprintf(stderr, "invalid GPU configuration: %s\n", e.what());
         return 1;
     }
-    if (model_params.split_mode == LLAMA_SPLIT_MODE_TENSOR && spec_mtp && kparams.enabled && kparams.mtp_state != 0) {
+    if (spec_algorithm == kvmem::SpeculativeAlgorithm::DFlash2 &&
+            (spec_draft_model.empty() || device_config.devices.size() > 2 || model_params.split_mode == LLAMA_SPLIT_MODE_TENSOR)) {
+        fprintf(stderr, "DFlash2 requires --spec-draft-model and one GPU\n");
+        return 1;
+    }
+    if (model_params.split_mode == LLAMA_SPLIT_MODE_TENSOR && spec_enabled && kparams.enabled && kparams.mtp_state != 0) {
         fprintf(stderr, "tensor KVMem currently supports MTP snapshots only; use --kvmem-mtp-state snapshots\n");
         return 1;
     }
-    if (device_config.devices.size() > 2 && spec_mtp && !kparams.enabled &&
+    if (device_config.devices.size() > 2 && spec_enabled && !kparams.enabled &&
         model_params.split_mode != LLAMA_SPLIT_MODE_TENSOR) {
         fprintf(stderr, "multi-GPU MTP requires --kvmem\n");
         return 1;
     }
-    if (device_config.devices.size() > 2 && spec_mtp && !spec_draft_model.empty()) {
+    if (device_config.devices.size() > 2 && spec_enabled && !spec_draft_model.empty()) {
         fprintf(stderr, "multi-GPU MTP currently requires an embedded nextn draft layer\n");
         return 1;
     }
     llama_model * model = llama_model_load_from_file(model_path.c_str(), model_params);
     if (!model) {
         fprintf(stderr, "failed to load model: %s\n", model_path.c_str());
+        return 1;
+    }
+    if (spec_algorithm == kvmem::SpeculativeAlgorithm::DFlash2 && llama_model_n_devices(model) > 1) {
+        fprintf(stderr, "DFlash2 requires a single target GPU; select one device\n");
+        llama_model_free(model);
         return 1;
     }
 
@@ -372,10 +418,7 @@ int main(int argc, char ** argv) {
     }
 
     if (kparams.enabled) {
-        if (!spec_mtp) kparams.mtp_state = 0;
-        if (!nvme_dir.empty()) {
-            kparams.nvme_dir = nvme_dir.c_str();
-        }
+        if (!spec_enabled) kparams.mtp_state = 0;
         if (dump_kv) {
 #ifdef _WIN32
             _putenv_s("KVMEM_DUMP_CAPTURE", "1");
@@ -420,7 +463,7 @@ int main(int argc, char ** argv) {
     ctx_params.no_perf = false;
     ctx_params.type_k = cache_type_k;
     ctx_params.type_v = cache_type_v;
-    if (spec_mtp) {
+    if (spec_enabled) {
         const uint32_t n_out = (uint32_t) (1 + std::max(0, spec_n_max));
         ctx_params.n_outputs_max = n_out;
         ctx_params.n_outputs_max_per_seq = n_out;
@@ -436,7 +479,7 @@ int main(int argc, char ** argv) {
     }
 
     kvmem_spec_session spec_sess;
-    if (spec_mtp) {
+    if (spec_enabled) {
         kvmem_spec_opts sopts;
         sopts.n_max = spec_n_max;
         sopts.p_min = spec_p_min;
@@ -446,6 +489,7 @@ int main(int argc, char ** argv) {
         sopts.n_ubatch = n_ubatch;
         sopts.kvmem_enabled = kparams.enabled;
         sopts.draft_model = spec_draft_model;
+        sopts.algorithm = spec_algorithm;
         sopts.type_k = cache_type_k;
         sopts.type_v = cache_type_v;
         sopts.draft_type = spec_cache_type;
@@ -461,7 +505,7 @@ int main(int argc, char ** argv) {
         llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
     } else {
         llama_sampler_chain_add(smpl, llama_sampler_init_temp(temp));
-        llama_sampler_chain_add(smpl, llama_sampler_init_dist(0));
+        llama_sampler_chain_add(smpl, llama_sampler_init_dist(seed));
     }
 
     if (!tokens_only && !no_prompt) {
@@ -637,7 +681,8 @@ int main(int argc, char ** argv) {
                         fwrite(piece.data(), 1, piece.size(), stdout);
                         fflush(stdout);
                     }
-                });
+                }, seed_set ? seed : LLAMA_DEFAULT_SEED);
+        fprintf(stderr, "KVMEM_SPEC_METRICS %s\n", gst.metrics().dump().c_str());
         if (gst.failed) {
             kvmem_spec_stop(spec_sess);
             llama_sampler_free(smpl);
@@ -718,6 +763,15 @@ int main(int argc, char ** argv) {
                 n_out, gen_wall_ms, gen_wall_tps);
     }
 
+    if (kparams.enabled) {
+        const auto storage = llama_kvmem_execution_storage_stats(execution.get());
+        fprintf(stderr, "KVMEM_STORAGE host_bytes=%llu host_budget=%llu disk_bytes=%llu disk_budget=%llu "
+                "read_bytes=%llu written_bytes=%llu errors=%llu\n",
+                (unsigned long long)storage.host_bytes, (unsigned long long)storage.host_capacity,
+                (unsigned long long)storage.disk_bytes, (unsigned long long)storage.disk_capacity,
+                (unsigned long long)storage.read_bytes, (unsigned long long)storage.written_bytes,
+                (unsigned long long)storage.errors);
+    }
     kvmem_spec_stop(spec_sess);
     llama_sampler_free(smpl);
     llama_free(ctx);

@@ -1,0 +1,2423 @@
+{
+  "date": "2026-10-19",
+  "gpu_uuid": "GPU-B",
+  "purpose": "bounded concurrency/state qualification, no throughput benchmark",
+  "toolchain": {
+    "os": "Windows",
+    "cuda": "13.2",
+    "msvc": "19.44",
+    "max_build_jobs": 8
+  },
+  "native_math_changed": false,
+  "target": "Qwen3.8-27B GSQ-RCO IQ3_S",
+  "draft": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf (or matching embedded NInfer component)",
+  "trained_settings": {
+    "context": 4096,
+    "selected": 512,
+    "reserve": 256,
+    "prefill": 128,
+    "drafts": 5,
+    "ngram": 0
+  },
+  "promoted_limits": {
+    "llamacpp": {
+      "concurrency": 4,
+      "devices": 1
+    },
+    "ninfer": {
+      "concurrency": 4,
+      "devices": 1
+    }
+  },
+  "same_gpu_stage_isolated_output_matches": [
+    true,
+    true
+  ],
+  "physical_multi_gpu_qualified": false,
+  "cpu_checks": {
+    "console_python": 37,
+    "worker_argv_python": 7,
+    "browser_suite": "pass",
+    "native_serve_options": "pass"
+  },
+  "cases": [
+    {
+      "backend": "llamacpp",
+      "lanes": 2,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": true,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "synthetic rejection output equals isolated",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": false
+        }
+      ],
+      "name": "llamacpp-c2-s1-synthetic",
+      "request_records": 4,
+      "error": "AssertionError('sustained decode')",
+      "peak_active": 2,
+      "serial_concurrent_exact": [
+        true,
+        true
+      ]
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 2,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": true,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "synthetic rejection output equals isolated",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "fixture rejection path",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c2-s1-synthetic-bounded",
+      "request_records": 7,
+      "peak_active": 2,
+      "serial_concurrent_exact": [
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        535,
+        534
+      ],
+      "statistics": {
+        "acceptance_rate": 0.0,
+        "accepted_tokens": 0,
+        "drafted_tokens": 1810,
+        "fallback_steps": 0,
+        "generated_tokens": 370,
+        "requests": 8,
+        "rounds": 372,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": true,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "synthetic rejection output equals isolated",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "fixture rejection path",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-synthetic-bounded",
+      "request_records": 13,
+      "peak_active": 4,
+      "serial_concurrent_exact": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        533,
+        533,
+        535,
+        534
+      ],
+      "statistics": {
+        "acceptance_rate": 0.0,
+        "accepted_tokens": 0,
+        "drafted_tokens": 3670,
+        "fallback_steps": 0,
+        "generated_tokens": 754,
+        "requests": 14,
+        "rounds": 756,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 2,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c2-s1-trained",
+      "request_records": 7,
+      "peak_active": 2,
+      "serial_concurrent_exact": [
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        1055,
+        1054
+      ],
+      "statistics": {
+        "acceptance_rate": 0.8627450980392157,
+        "accepted_tokens": 220,
+        "drafted_tokens": 255,
+        "fallback_steps": 0,
+        "generated_tokens": 267,
+        "requests": 8,
+        "rounds": 51,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-trained",
+      "request_records": 0,
+      "error": "ConnectionResetError(10054, '远程主机强迫关闭了一个现有的连接。', None, 10054, None)"
+    },
+    {
+      "backend": "ninfer",
+      "lanes": 2,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": false
+        }
+      ],
+      "name": "ninfer-c2-s1-trained",
+      "request_records": 6,
+      "error": "AssertionError('history reuse observed')",
+      "peak_active": 2,
+      "serial_concurrent_exact": [
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        0,
+        0
+      ]
+    },
+    {
+      "backend": "ninfer",
+      "lanes": 2,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "ninfer-c2-s1-trained-native-usage",
+      "request_records": 7,
+      "peak_active": 2,
+      "serial_concurrent_exact": [
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        1049,
+        1048
+      ],
+      "statistics": {
+        "acceptance_rate": 0.7620817843866171,
+        "accepted_tokens": 205,
+        "drafted_tokens": 269,
+        "fallback_steps": 0,
+        "generated_tokens": 267,
+        "requests": 7,
+        "rounds": 55,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "backend": "ninfer",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": false
+        }
+      ],
+      "name": "ninfer-c4-s1-trained-native-usage",
+      "request_records": 8,
+      "error": "AssertionError('requested requests really overlap')",
+      "peak_active": 3
+    },
+    {
+      "backend": "ninfer",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "ninfer-c4-s1-trained-overlap",
+      "request_records": 13,
+      "peak_active": 4,
+      "serial_concurrent_exact": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        62,
+        62,
+        64,
+        63
+      ],
+      "statistics": {
+        "acceptance_rate": 0.9646924829157175,
+        "accepted_tokens": 847,
+        "drafted_tokens": 878,
+        "fallback_steps": 5,
+        "generated_tokens": 1037,
+        "requests": 13,
+        "rounds": 177,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "backend": "ninfer",
+      "lanes": 2,
+      "stages_on_one_physical_gpu": 2,
+      "synthetic": false,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "ninfer-c2-s2-trained-protocol",
+      "request_records": 7,
+      "peak_active": 2,
+      "serial_concurrent_exact": [
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        1049,
+        1048
+      ],
+      "statistics": {
+        "acceptance_rate": 0.7620817843866171,
+        "accepted_tokens": 205,
+        "drafted_tokens": 269,
+        "fallback_steps": 0,
+        "generated_tokens": 267,
+        "requests": 7,
+        "rounds": 55,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-trained-shared",
+      "request_records": 0,
+      "error": "ConnectionResetError(10054, '远程主机强迫关闭了一个现有的连接。', None, 10054, None)",
+      "memory_samples": [
+        {
+          "label": "ready",
+          "counters": [
+            {
+              "InstanceName": "pid_11624_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_11624_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_11624_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_11624_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 14377816064
+            },
+            {
+              "InstanceName": "pid_11624_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_11624_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_11624_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_11624_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 153092096
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-trained-shared-repeat",
+      "request_records": 3,
+      "error": "ConnectionResetError(10054, '远程主机强迫关闭了一个现有的连接。', None, 10054, None)"
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-trained-shared-vmm16",
+      "request_records": 3,
+      "error": "ConnectionResetError(10054, '远程主机强迫关闭了一个现有的连接。', None, 10054, None)",
+      "memory_samples": [
+        {
+          "label": "ready",
+          "counters": [
+            {
+              "InstanceName": "pid_21500_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_21500_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_21500_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_21500_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 14377816064
+            },
+            {
+              "InstanceName": "pid_21500_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_21500_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_21500_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_21500_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 153092096
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-trained-shared-vmm-trace",
+      "request_records": 3,
+      "error": "ConnectionResetError(10054, '远程主机强迫关闭了一个现有的连接。', None, 10054, None)"
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-trained-shared-no-graphs",
+      "request_records": 3,
+      "error": "ConnectionResetError(10054, '远程主机强迫关闭了一个现有的连接。', None, 10054, None)",
+      "cuda_graphs_disabled": true,
+      "memory_samples": [
+        {
+          "label": "ready",
+          "counters": [
+            {
+              "InstanceName": "pid_46756_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_46756_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_46756_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_46756_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 14377816064
+            },
+            {
+              "InstanceName": "pid_46756_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_46756_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_46756_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_46756_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 153092096
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [],
+      "name": "llamacpp-c4-s1-trained-shared-cpu56",
+      "request_records": 0,
+      "error": "RuntimeError('startup exit 1')",
+      "cuda_graphs_disabled": false
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-trained-shared-cpu48-snapshots",
+      "request_records": 0,
+      "error": "<HTTPError 500: 'Internal Server Error'>",
+      "cuda_graphs_disabled": false,
+      "memory_samples": [
+        {
+          "label": "ready",
+          "counters": [
+            {
+              "InstanceName": "pid_44084_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_44084_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_44084_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_44084_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 13937623040
+            },
+            {
+              "InstanceName": "pid_44084_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_44084_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_44084_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_44084_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 262144000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 2,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c2-s1-trained-shared-final",
+      "request_records": 7,
+      "peak_active": 2,
+      "serial_concurrent_exact": [
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        1055,
+        1054
+      ],
+      "cuda_graphs_disabled": false,
+      "memory_samples": [
+        {
+          "label": "ready",
+          "counters": [
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 13492740096
+            },
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 115343360
+            }
+          ]
+        },
+        {
+          "label": "isolated_all_lanes_warm",
+          "counters": [
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 14764494848
+            },
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 553648128
+            }
+          ]
+        },
+        {
+          "label": "concurrent_complete",
+          "counters": [
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 14764494848
+            },
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_23232_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_23232_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 553648128
+            }
+          ]
+        }
+      ],
+      "statistics": {
+        "acceptance_rate": 0.8627450980392157,
+        "accepted_tokens": 220,
+        "drafted_tokens": 255,
+        "fallback_steps": 0,
+        "generated_tokens": 267,
+        "requests": 8,
+        "rounds": 51,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": false,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-trained-mixed-fixed-cpu40",
+      "request_records": 8,
+      "error": "ConnectionResetError(10054, '远程主机强迫关闭了一个现有的连接。', None, 10054, None)",
+      "peak_active": 4,
+      "serial_concurrent_exact": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "cuda_graphs_disabled": false,
+      "memory_samples": [
+        {
+          "label": "ready",
+          "counters": [
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 12186488832
+            },
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 262144000
+            }
+          ]
+        },
+        {
+          "label": "isolated_all_lanes_warm",
+          "counters": [
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 14606270464
+            },
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 1136656384
+            }
+          ]
+        },
+        {
+          "label": "concurrent_complete",
+          "counters": [
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 14719516672
+            },
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_35168_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_35168_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 1136656384
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 2,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c2-s1-trained-layout-fixed-gpu",
+      "request_records": 7,
+      "peak_active": 2,
+      "serial_concurrent_exact": [
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        1055,
+        1054
+      ],
+      "cuda_graphs_disabled": false,
+      "statistics": {
+        "acceptance_rate": 0.88,
+        "accepted_tokens": 220,
+        "drafted_tokens": 250,
+        "fallback_steps": 0,
+        "generated_tokens": 267,
+        "requests": 8,
+        "rounds": 50,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 4,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c4-s1-trained-capture-fixed-cpu40",
+      "request_records": 13,
+      "peak_active": 4,
+      "serial_concurrent_exact": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        1053,
+        1053,
+        1055,
+        1054
+      ],
+      "cuda_graphs_disabled": false,
+      "memory_samples": [
+        {
+          "label": "ready",
+          "counters": [
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 12186488832
+            },
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 262144000
+            }
+          ]
+        },
+        {
+          "label": "isolated_all_lanes_warm",
+          "counters": [
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 14606270464
+            },
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 1136656384
+            }
+          ]
+        },
+        {
+          "label": "concurrent_complete",
+          "counters": [
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x00014973_phys_0)\\dedicated usage",
+              "CookedValue": 270336
+            },
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x000159b2_phys_0)\\dedicated usage",
+              "CookedValue": 14717419520
+            },
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x00014973_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x00014973_phys_0)\\shared usage",
+              "CookedValue": 0
+            },
+            {
+              "InstanceName": "pid_20412_luid_0x00000000_0x000159b2_phys_0",
+              "Path": "\\\\gram17\\gpu process memory(pid_20412_luid_0x00000000_0x000159b2_phys_0)\\shared usage",
+              "CookedValue": 1136656384
+            }
+          ]
+        }
+      ],
+      "statistics": {
+        "acceptance_rate": 0.8574257425742574,
+        "accepted_tokens": 433,
+        "drafted_tokens": 505,
+        "fallback_steps": 0,
+        "generated_tokens": 529,
+        "requests": 14,
+        "rounds": 101,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "backend": "llamacpp",
+      "lanes": 2,
+      "stages_on_one_physical_gpu": 1,
+      "synthetic": false,
+      "pass": true,
+      "checks": [
+        {
+          "name": "all requested slots exposed",
+          "pass": true
+        },
+        {
+          "name": "DFlash2 active",
+          "pass": true
+        },
+        {
+          "name": "isolated secret oracle",
+          "pass": true
+        },
+        {
+          "name": "requested requests really overlap",
+          "pass": true
+        },
+        {
+          "name": "concurrent secret oracle",
+          "pass": true
+        },
+        {
+          "name": "sustained decode",
+          "pass": true
+        },
+        {
+          "name": "history remains isolated",
+          "pass": true
+        },
+        {
+          "name": "history reuse observed",
+          "pass": true
+        },
+        {
+          "name": "cancel after an output token",
+          "pass": true
+        },
+        {
+          "name": "request after cancellation",
+          "pass": true
+        },
+        {
+          "name": "native verification counters",
+          "pass": true
+        },
+        {
+          "name": "no native state or CUDA failure",
+          "pass": true
+        }
+      ],
+      "name": "llamacpp-c2-s1-trained-capture-fixed-gpu",
+      "request_records": 7,
+      "peak_active": 2,
+      "serial_concurrent_exact": [
+        true,
+        true
+      ],
+      "follow_cache_hits": [
+        1055,
+        1054
+      ],
+      "cuda_graphs_disabled": false,
+      "statistics": {
+        "acceptance_rate": 0.8627450980392157,
+        "accepted_tokens": 220,
+        "drafted_tokens": 255,
+        "fallback_steps": 0,
+        "generated_tokens": 267,
+        "requests": 8,
+        "rounds": 51,
+        "scope": "completed_requests"
+      }
+    },
+    {
+      "name": "final-llamacpp-vision",
+      "backend": "llamacpp",
+      "lanes": 2,
+      "pass": true,
+      "request_records": 4,
+      "statistics": {
+        "acceptance_rate": 0.2,
+        "accepted_tokens": 4,
+        "drafted_tokens": 20,
+        "fallback_steps": 0,
+        "generated_tokens": 4,
+        "requests": 4,
+        "rounds": 4,
+        "scope": "completed_requests"
+      },
+      "image_follow_cache_hits": [
+        42,
+        42
+      ]
+    },
+    {
+      "name": "final-ninfer-vision",
+      "backend": "ninfer",
+      "lanes": 4,
+      "pass": true,
+      "request_records": 6,
+      "statistics": {
+        "acceptance_rate": 0.2,
+        "accepted_tokens": 6,
+        "drafted_tokens": 30,
+        "fallback_steps": 0,
+        "generated_tokens": 12,
+        "requests": 6,
+        "rounds": 6,
+        "scope": "completed_requests"
+      },
+      "image_follow_cache_hits": [
+        90,
+        90
+      ]
+    },
+    {
+      "name": "final-llamacpp-vision-shared",
+      "backend": "llamacpp",
+      "lanes": 2,
+      "pass": true,
+      "request_records": 4,
+      "image_follow_cache_hits": [
+        42,
+        42
+      ]
+    },
+    {
+      "name": "final-llamacpp-vision-capture-fixed-c4",
+      "backend": "llamacpp",
+      "lanes": 4,
+      "pass": true,
+      "request_records": 6,
+      "image_follow_cache_hits": [
+        42,
+        42
+      ]
+    }
+  ],
+  "llamacpp_c4_memory": {
+    "gpu_uuid": "GPU-B",
+    "probe_pid": 42152,
+    "windows_gpu_process_memory": {
+      "dedicated_bytes": 16798728192,
+      "shared_bytes": 1616904192,
+      "luid": "0x00000000_0x000159b2"
+    },
+    "observed_first_prefill_chunk_tokens": 128,
+    "observed_first_prefill_chunk_ms": 22470.007,
+    "disposition": "Owned probe stopped after confirming capacity spill; not a completed correctness run or speed benchmark."
+  },
+  "failed_or_partial_attempts": {
+    "llamacpp-c2-s1-synthetic": "Harness required exactly 64 tokens despite normal EOS at 24; bounded run corrected.",
+    "ninfer-c2-s1-trained": "Harness read llama.cpp cache usage field; corrected native nested cached_tokens field.",
+    "ninfer-c4-s1-trained-native-usage": "All four callers completed; peak active 3, so not a four-active qualification. Short-prompt run observes 4.",
+    "llamacpp-c4-s1-trained": "Deliberately stopped after confirming dedicated-memory spill; ConnectionResetError is from owned process termination.",
+    "first_native_options_test_link": "Wrong entry object path selected application main; relinked with test object and passed."
+  },
+  "shared_draft_weights": {
+    "implemented": true,
+    "qualified_real_model_concurrency": 4,
+    "qualified_placements": {
+      "C2": "all GPU",
+      "C4": "40 target layers on GPU, remaining on CPU, snapshots"
+    },
+    "first_owner_release_and_independent_candidate_reference": "pass",
+    "cli_ordinary_mtp3_synthetic_dflash2_5_greedy_equal": true,
+    "one_weight_load_four_contexts_observed": true,
+    "all_gpu_c4_ready_dedicated_bytes": 14377816064,
+    "all_gpu_c4_ready_shared_bytes": 153092096,
+    "vmm_trace_before_failure": {
+      "free_bytes": 0,
+      "requested_growth_bytes": 171966464,
+      "cuMemGetInfo_success": true
+    },
+    "vmm_16_gib_probe_pass": false,
+    "cuda_graph_disabled_c4_pass": false,
+    "product_allocator_changed": false
+  },
+  "cpu_offload_control": {
+    "argv": [
+      "$ARTIFACTS\\dflash2-llama-validation-20261018\\build\\bin\\llama-kvmem-server.exe",
+      "-m",
+      "$ARTIFACTS\\models\\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "9419",
+      "--device",
+      "CUDA0",
+      "-ngl",
+      "48",
+      "-c",
+      "4096",
+      "-b",
+      "128",
+      "-ub",
+      "128",
+      "--parallel",
+      "1",
+      "--threads-http",
+      "8",
+      "--no-ui",
+      "--no-think",
+      "--kvmem",
+      "--kvmem-budget",
+      "512",
+      "--kvmem-gen-reserve",
+      "256",
+      "--kvmem-host-mib",
+      "2048",
+      "--kvmem-sessions",
+      "8",
+      "--kvmem-sink-tokens",
+      "64",
+      "--kvmem-recent-tokens",
+      "64",
+      "--kv-dtype",
+      "q8_0",
+      "--kvmem-trace"
+    ],
+    "gpu_uuid": "GPU-B",
+    "ordinary": true,
+    "lanes": 1,
+    "props": {
+      "bos_token": "<|endoftext|>",
+      "build_info": "b574-620d222",
+      "chat_template": "{%- set image_count = namespace(value=0) %}\n{%- set video_count = namespace(value=0) %}\n{%- macro render_content(content, do_vision_count, is_system_content=false) %}\n    {%- if content is string %}\n        {{- content }}\n    {%- elif content is iterable and content is not mapping %}\n        {%- for item in content %}\n            {%- if 'image' in item or 'image_url' in item or item.type == 'image' %}\n                {%- if is_system_content %}\n                    {{- raise_exception('System message cannot contain images.') }}\n                {%- endif %}\n                {%- if do_vision_count %}\n                    {%- set image_count.value = image_count.value + 1 %}\n                {%- endif %}\n                {%- if add_vision_id %}\n                    {{- 'Picture ' ~ image_count.value ~ ': ' }}\n                {%- endif %}\n                {{- '<|vision_start|><|image_pad|><|vision_end|>' }}\n            {%- elif 'video' in item or item.type == 'video' %}\n                {%- if is_system_content %}\n                    {{- raise_exception('System message cannot contain videos.') }}\n                {%- endif %}\n                {%- if do_vision_count %}\n                    {%- set video_count.value = video_count.value + 1 %}\n                {%- endif %}\n                {%- if add_vision_id %}\n                    {{- 'Video ' ~ video_count.value ~ ': ' }}\n                {%- endif %}\n                {{- '<|vision_start|><|video_pad|><|vision_end|>' }}\n            {%- elif 'text' in item %}\n                {{- item.text }}\n            {%- else %}\n                {{- raise_exception('Unexpected item type in content.') }}\n            {%- endif %}\n        {%- endfor %}\n    {%- elif content is none or content is undefined %}\n        {{- '' }}\n    {%- else %}\n        {{- raise_exception('Unexpected content type.') }}\n    {%- endif %}\n{%- endmacro %}\n{%- if not messages %}\n    {{- raise_exception('No messages provided.') }}\n{%- endif %}\n{%- set reasoning_instructions = '' %}\n{%- if enable_thinking is undefined or enable_thinking is true %}\n    {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}\n    {%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}\n        {{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '. Supported types are xhigh (default), medium, and low.') }}\n    {%- endif %}\n    {%- if resolved_reasoning_effort == 'xhigh' %}\n        {%- set reasoning_instructions = 'Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.' %}\n    {%- elif resolved_reasoning_effort == 'low' %}\n        {%- set reasoning_instructions = 'Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.' %}\n    {%- endif %}\n{%- endif %}\n{%- if tools and tools is iterable and tools is not mapping %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if reasoning_instructions %}\n        {{- reasoning_instructions + '\\n\\n' }}\n    {%- endif %}\n    {{- \"# Tools\\n\\nYou have access to the following functions:\\n\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\" }}\n    {{- '\\n\\nIf you choose to call a function ONLY reply in the following format with NO suffix:\\n\\n<tool_call>\\n<function=example_function_name>\\n<parameter=example_parameter_1>\\nvalue_1\\n</parameter>\\n<parameter=example_parameter_2>\\nThis is the value for the second parameter\\nthat can span\\nmultiple lines\\n</parameter>\\n</function>\\n</tool_call>\\n\\n<IMPORTANT>\\nReminder:\\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\\n- Required parameters MUST be specified\\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\\n</IMPORTANT>' }}\n    {%- if messages[0].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false, true)|trim %}\n        {%- if content %}\n            {{- '\\n\\n' + content }}\n        {%- endif %}\n    {%- endif %}\n    {{- '<|im_end|>\\n' }}\n{%- else %}\n    {%- if messages[0].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false, true)|trim %}\n        {%- if content %}\n            {{- '<|im_start|>system\\n' + (reasoning_instructions + '\\n\\n' if reasoning_instructions else '')  + content + '<|im_end|>\\n' }}\n        {%- elif reasoning_instructions %}\n            {{- '<|im_start|>system\\n' + reasoning_instructions + '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- elif reasoning_instructions %}\n        {{- '<|im_start|>system\\n' + reasoning_instructions + '<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}\n{%- for message in messages[::-1] %}\n    {%- set index = (messages|length - 1) - loop.index0 %}\n    {%- if ns.multi_step_tool and message.role == \"user\" %}\n        {%- set content = render_content(message.content, false)|trim %}\n        {%- if not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}\n            {%- set ns.multi_step_tool = false %}\n            {%- set ns.last_query_index = index %}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if ns.multi_step_tool %}\n    {{- raise_exception('No user query found in messages.') }}\n{%- endif %}\n{%- for message in messages %}\n    {%- set content = render_content(message.content, true)|trim %}\n    {%- if message.role == \"system\" %}\n        {%- if not loop.first %}\n            {{- raise_exception('System message must be at the beginning.') }}\n        {%- endif %}\n    {%- elif message.role == \"user\" %}\n        {{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {%- set reasoning_content = '' %}\n        {%- if message.reasoning_content is string %}\n            {%- set reasoning_content = message.reasoning_content %}\n        {%- endif %}\n        {%- set reasoning_content = reasoning_content|trim %}\n        {%- if preserve_thinking is undefined or preserve_thinking is true or loop.index0 > ns.last_query_index %}\n            {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}\n        {%- else %}\n            {{- '<|im_start|>' + message.role + '\\n' + content }}\n        {%- endif %}\n        {%- if message.tool_calls and message.tool_calls is iterable and message.tool_calls is not mapping %}\n            {%- for tool_call in message.tool_calls %}\n                {%- if tool_call.function is defined %}\n                    {%- set tool_call = tool_call.function %}\n                {%- endif %}\n                {%- if loop.first %}\n                    {%- if content|trim %}\n                        {{- '\\n\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                    {%- else %}\n                        {{- '<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                    {%- endif %}\n                {%- else %}\n                    {{- '\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                {%- endif %}\n                {%- if tool_call.arguments is defined and tool_call.arguments != '' %}\n                    {%- for args_name, args_value in tool_call.arguments|items %}\n                        {{- '<parameter=' + args_name + '>\\n' }}\n                        {%- set args_value = args_value | string if args_value is string else args_value | tojson | safe %}\n                        {{- args_value }}\n                        {{- '\\n</parameter>\\n' }}\n                    {%- endfor %}\n                {%- endif %}\n                {{- '</function>\\n</tool_call>' }}\n            {%- endfor %}\n        {%- endif %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if loop.previtem and loop.previtem.role != \"tool\" %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- content }}\n        {{- '\\n</tool_response>' }}\n        {%- if not loop.last and loop.nextitem.role != \"tool\" %}\n            {{- '<|im_end|>\\n' }}\n        {%- elif loop.last %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- else %}\n        {{- raise_exception('Unexpected message role.') }}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n    {%- if enable_thinking is defined and enable_thinking is false %}\n        {{- '<think>\\n\\n</think>\\n\\n' }}\n    {%- else %}\n        {{- '<think>\\n' }}\n    {%- endif %}\n{%- endif %}",
+      "chat_template_caps": {
+        "supports_object_arguments": true,
+        "supports_parallel_tool_calls": true,
+        "supports_preserve_reasoning": true,
+        "supports_reasoning_effort": true,
+        "supports_string_content": true,
+        "supports_system_role": true,
+        "supports_tool_calls": true,
+        "supports_tools": true,
+        "supports_typed_content": true
+      },
+      "cors_proxy_enabled": false,
+      "default_generation_settings": {
+        "n_ctx": 4096,
+        "params": {
+          "frequency_penalty": 0.0,
+          "max_tokens": 256,
+          "min_p": 0.0,
+          "n_predict": 256,
+          "presence_penalty": 1.5,
+          "repeat_penalty": 1.0,
+          "temperature": 0.699999988079071,
+          "top_k": 20,
+          "top_p": 0.800000011920929
+        }
+      },
+      "endpoint_metrics": false,
+      "endpoint_props": false,
+      "endpoint_slots": true,
+      "eos_token": "<|im_end|>",
+      "execution": {
+        "mode": "single",
+        "monitor_devices": [
+          {
+            "name": "NVIDIA GeForce RTX 5060 Ti",
+            "pci_bus_id": "0000:04:00.0"
+          }
+        ]
+      },
+      "is_sleeping": false,
+      "kvmem": {
+        "conversation_bytes_max": 0,
+        "conversation_cpu_bytes": 0,
+        "defaults": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          },
+          "enable_thinking": false,
+          "reasoning_budget_tokens": -1
+        },
+        "enabled": true,
+        "generation_limit": 256,
+        "parallel": 1,
+        "retained_sessions_limit": 8,
+        "sampling": {
+          "non_thinking": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "repeat_penalty": 1.0,
+            "temperature": 0.699999988079071,
+            "top_k": 20,
+            "top_p": 0.800000011920929
+          },
+          "thinking": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 0.0,
+            "repeat_penalty": 1.0,
+            "temperature": 1.0,
+            "top_k": 20,
+            "top_p": 0.949999988079071
+          }
+        },
+        "usage": {
+          "active_sessions": 0,
+          "bytes": 1576928,
+          "bytes_max": 0,
+          "count": 1,
+          "evictions": 0,
+          "extends": 0,
+          "forks": 0,
+          "max": 8,
+          "retained_sessions": 0,
+          "retained_sessions_limit": 8,
+          "session_limit_kind": "inactive",
+          "switches": 0
+        },
+        "vision": {
+          "device": "auto",
+          "enabled": false,
+          "gpu": true,
+          "projector": "",
+          "video_fps": 2.0
+        }
+      },
+      "media_marker": "<__media__>",
+      "modalities": {
+        "audio": false,
+        "video": false,
+        "vision": false
+      },
+      "model_alias": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "model_ftype": "",
+      "model_name": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "model_path": "$ARTIFACTS\\models\\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "role": "model",
+      "speculative": {
+        "adaptive": false,
+        "algorithm": "none",
+        "capabilities": [
+          {
+            "adaptive": false,
+            "algorithm": "mtp",
+            "draft_asset": "optional_gguf",
+            "max_concurrency": 4,
+            "max_devices": 8,
+            "max_draft_tokens": 5,
+            "ngram": false
+          },
+          {
+            "adaptive": false,
+            "algorithm": "dflash2",
+            "draft_asset": "required_gguf",
+            "max_concurrency": 2,
+            "max_devices": 1,
+            "max_draft_tokens": 5,
+            "ngram": false
+          }
+        ],
+        "draft_tokens": 0,
+        "enabled": false,
+        "ngram_draft_tokens": 0,
+        "schema_version": 1,
+        "statistics": {
+          "acceptance_rate": null,
+          "accepted_tokens": 0,
+          "drafted_tokens": 0,
+          "fallback_steps": 0,
+          "generated_tokens": 0,
+          "requests": 0,
+          "rounds": 0,
+          "scope": "completed_requests"
+        }
+      },
+      "total_slots": 1,
+      "ui": false,
+      "ui_settings": {}
+    },
+    "http_status": 500,
+    "response": {
+      "error": "stale or foreign mean-K/recurrent checkpoint"
+    },
+    "layout_failure_reproduced": true,
+    "process_exit": 1
+  },
+  "cpu_layout_source": {
+    "base_commit": "1b9cc6be00dcbd2959e23c8c7ee60efeeb66ba93",
+    "function_unchanged_from_base": true,
+    "function_sha256": "e982b24825bd69a4ea0f0f68796fd7263669286532b9147f58a2e57e185cf9c6"
+  },
+  "mixed_layout_fix": {
+    "implemented": true,
+    "ordinary_long_prompt_http_status": 200,
+    "native_checkpoint_bytes_mixed_gpu_layers": 12,
+    "native_checkpoint_rows": [
+      65,
+      95
+    ],
+    "native_checkpoint_bytes_coverage_and_fresh_recovery": "pass",
+    "same_sparse_layout_test_before_after": {
+      "gpu_uuid": "GPU-B",
+      "before_dll_sha256": "c796c70569a2e60a7bef867a2f3452abb2edfd7f19e3d8511f770030b83340ad",
+      "fixed_dll_sha256": "404370faf4123aa3447cbccc8519f0a23257aad12ebeb7c299340ba5238622a8",
+      "runs": [
+        {
+          "name": "fixed",
+          "returncode": 0,
+          "layout_copy_failure": false,
+          "exact_native_byte_checks": 2
+        },
+        {
+          "name": "before",
+          "returncode": 1,
+          "layout_copy_failure": true,
+          "exact_native_byte_checks": 0
+        }
+      ]
+    },
+    "all_gpu_native_checkpoint_bytes": "pass",
+    "before_capture_fix": {
+      "c4_peak_active": 4,
+      "c4_completed_request_records": 8,
+      "c4_history_and_cancellation_qualified": false
+    }
+  },
+  "ordinary_after_layout_fix": {
+    "argv": [
+      "$ARTIFACTS\\dflash2-llama-validation-20261018\\build\\bin\\llama-kvmem-server.exe",
+      "-m",
+      "$ARTIFACTS\\models\\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "12114",
+      "--device",
+      "CUDA0",
+      "-ngl",
+      "48",
+      "-c",
+      "4096",
+      "-b",
+      "128",
+      "-ub",
+      "128",
+      "--parallel",
+      "1",
+      "--threads-http",
+      "8",
+      "--no-ui",
+      "--no-think",
+      "--kvmem",
+      "--kvmem-budget",
+      "512",
+      "--kvmem-gen-reserve",
+      "256",
+      "--kvmem-host-mib",
+      "2048",
+      "--kvmem-sessions",
+      "8",
+      "--kvmem-sink-tokens",
+      "64",
+      "--kvmem-recent-tokens",
+      "64",
+      "--kv-dtype",
+      "q8_0",
+      "--kvmem-trace"
+    ],
+    "gpu_uuid": "GPU-B",
+    "ordinary": true,
+    "lanes": 1,
+    "props": {
+      "bos_token": "<|endoftext|>",
+      "build_info": "b574-620d222",
+      "chat_template": "{%- set image_count = namespace(value=0) %}\n{%- set video_count = namespace(value=0) %}\n{%- macro render_content(content, do_vision_count, is_system_content=false) %}\n    {%- if content is string %}\n        {{- content }}\n    {%- elif content is iterable and content is not mapping %}\n        {%- for item in content %}\n            {%- if 'image' in item or 'image_url' in item or item.type == 'image' %}\n                {%- if is_system_content %}\n                    {{- raise_exception('System message cannot contain images.') }}\n                {%- endif %}\n                {%- if do_vision_count %}\n                    {%- set image_count.value = image_count.value + 1 %}\n                {%- endif %}\n                {%- if add_vision_id %}\n                    {{- 'Picture ' ~ image_count.value ~ ': ' }}\n                {%- endif %}\n                {{- '<|vision_start|><|image_pad|><|vision_end|>' }}\n            {%- elif 'video' in item or item.type == 'video' %}\n                {%- if is_system_content %}\n                    {{- raise_exception('System message cannot contain videos.') }}\n                {%- endif %}\n                {%- if do_vision_count %}\n                    {%- set video_count.value = video_count.value + 1 %}\n                {%- endif %}\n                {%- if add_vision_id %}\n                    {{- 'Video ' ~ video_count.value ~ ': ' }}\n                {%- endif %}\n                {{- '<|vision_start|><|video_pad|><|vision_end|>' }}\n            {%- elif 'text' in item %}\n                {{- item.text }}\n            {%- else %}\n                {{- raise_exception('Unexpected item type in content.') }}\n            {%- endif %}\n        {%- endfor %}\n    {%- elif content is none or content is undefined %}\n        {{- '' }}\n    {%- else %}\n        {{- raise_exception('Unexpected content type.') }}\n    {%- endif %}\n{%- endmacro %}\n{%- if not messages %}\n    {{- raise_exception('No messages provided.') }}\n{%- endif %}\n{%- set reasoning_instructions = '' %}\n{%- if enable_thinking is undefined or enable_thinking is true %}\n    {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}\n    {%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}\n        {{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '. Supported types are xhigh (default), medium, and low.') }}\n    {%- endif %}\n    {%- if resolved_reasoning_effort == 'xhigh' %}\n        {%- set reasoning_instructions = 'Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.' %}\n    {%- elif resolved_reasoning_effort == 'low' %}\n        {%- set reasoning_instructions = 'Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.' %}\n    {%- endif %}\n{%- endif %}\n{%- if tools and tools is iterable and tools is not mapping %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if reasoning_instructions %}\n        {{- reasoning_instructions + '\\n\\n' }}\n    {%- endif %}\n    {{- \"# Tools\\n\\nYou have access to the following functions:\\n\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\" }}\n    {{- '\\n\\nIf you choose to call a function ONLY reply in the following format with NO suffix:\\n\\n<tool_call>\\n<function=example_function_name>\\n<parameter=example_parameter_1>\\nvalue_1\\n</parameter>\\n<parameter=example_parameter_2>\\nThis is the value for the second parameter\\nthat can span\\nmultiple lines\\n</parameter>\\n</function>\\n</tool_call>\\n\\n<IMPORTANT>\\nReminder:\\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\\n- Required parameters MUST be specified\\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\\n</IMPORTANT>' }}\n    {%- if messages[0].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false, true)|trim %}\n        {%- if content %}\n            {{- '\\n\\n' + content }}\n        {%- endif %}\n    {%- endif %}\n    {{- '<|im_end|>\\n' }}\n{%- else %}\n    {%- if messages[0].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false, true)|trim %}\n        {%- if content %}\n            {{- '<|im_start|>system\\n' + (reasoning_instructions + '\\n\\n' if reasoning_instructions else '')  + content + '<|im_end|>\\n' }}\n        {%- elif reasoning_instructions %}\n            {{- '<|im_start|>system\\n' + reasoning_instructions + '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- elif reasoning_instructions %}\n        {{- '<|im_start|>system\\n' + reasoning_instructions + '<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}\n{%- for message in messages[::-1] %}\n    {%- set index = (messages|length - 1) - loop.index0 %}\n    {%- if ns.multi_step_tool and message.role == \"user\" %}\n        {%- set content = render_content(message.content, false)|trim %}\n        {%- if not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}\n            {%- set ns.multi_step_tool = false %}\n            {%- set ns.last_query_index = index %}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if ns.multi_step_tool %}\n    {{- raise_exception('No user query found in messages.') }}\n{%- endif %}\n{%- for message in messages %}\n    {%- set content = render_content(message.content, true)|trim %}\n    {%- if message.role == \"system\" %}\n        {%- if not loop.first %}\n            {{- raise_exception('System message must be at the beginning.') }}\n        {%- endif %}\n    {%- elif message.role == \"user\" %}\n        {{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {%- set reasoning_content = '' %}\n        {%- if message.reasoning_content is string %}\n            {%- set reasoning_content = message.reasoning_content %}\n        {%- endif %}\n        {%- set reasoning_content = reasoning_content|trim %}\n        {%- if preserve_thinking is undefined or preserve_thinking is true or loop.index0 > ns.last_query_index %}\n            {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}\n        {%- else %}\n            {{- '<|im_start|>' + message.role + '\\n' + content }}\n        {%- endif %}\n        {%- if message.tool_calls and message.tool_calls is iterable and message.tool_calls is not mapping %}\n            {%- for tool_call in message.tool_calls %}\n                {%- if tool_call.function is defined %}\n                    {%- set tool_call = tool_call.function %}\n                {%- endif %}\n                {%- if loop.first %}\n                    {%- if content|trim %}\n                        {{- '\\n\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                    {%- else %}\n                        {{- '<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                    {%- endif %}\n                {%- else %}\n                    {{- '\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                {%- endif %}\n                {%- if tool_call.arguments is defined and tool_call.arguments != '' %}\n                    {%- for args_name, args_value in tool_call.arguments|items %}\n                        {{- '<parameter=' + args_name + '>\\n' }}\n                        {%- set args_value = args_value | string if args_value is string else args_value | tojson | safe %}\n                        {{- args_value }}\n                        {{- '\\n</parameter>\\n' }}\n                    {%- endfor %}\n                {%- endif %}\n                {{- '</function>\\n</tool_call>' }}\n            {%- endfor %}\n        {%- endif %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if loop.previtem and loop.previtem.role != \"tool\" %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- content }}\n        {{- '\\n</tool_response>' }}\n        {%- if not loop.last and loop.nextitem.role != \"tool\" %}\n            {{- '<|im_end|>\\n' }}\n        {%- elif loop.last %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- else %}\n        {{- raise_exception('Unexpected message role.') }}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n    {%- if enable_thinking is defined and enable_thinking is false %}\n        {{- '<think>\\n\\n</think>\\n\\n' }}\n    {%- else %}\n        {{- '<think>\\n' }}\n    {%- endif %}\n{%- endif %}",
+      "chat_template_caps": {
+        "supports_object_arguments": true,
+        "supports_parallel_tool_calls": true,
+        "supports_preserve_reasoning": true,
+        "supports_reasoning_effort": true,
+        "supports_string_content": true,
+        "supports_system_role": true,
+        "supports_tool_calls": true,
+        "supports_tools": true,
+        "supports_typed_content": true
+      },
+      "cors_proxy_enabled": false,
+      "default_generation_settings": {
+        "n_ctx": 4096,
+        "params": {
+          "frequency_penalty": 0.0,
+          "max_tokens": 256,
+          "min_p": 0.0,
+          "n_predict": 256,
+          "presence_penalty": 1.5,
+          "repeat_penalty": 1.0,
+          "temperature": 0.699999988079071,
+          "top_k": 20,
+          "top_p": 0.800000011920929
+        }
+      },
+      "endpoint_metrics": false,
+      "endpoint_props": false,
+      "endpoint_slots": true,
+      "eos_token": "<|im_end|>",
+      "execution": {
+        "mode": "single",
+        "monitor_devices": [
+          {
+            "name": "NVIDIA GeForce RTX 5060 Ti",
+            "pci_bus_id": "0000:04:00.0"
+          }
+        ]
+      },
+      "is_sleeping": false,
+      "kvmem": {
+        "conversation_bytes_max": 0,
+        "conversation_cpu_bytes": 0,
+        "defaults": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          },
+          "enable_thinking": false,
+          "reasoning_budget_tokens": -1
+        },
+        "enabled": true,
+        "generation_limit": 256,
+        "parallel": 1,
+        "retained_sessions_limit": 8,
+        "sampling": {
+          "non_thinking": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "repeat_penalty": 1.0,
+            "temperature": 0.699999988079071,
+            "top_k": 20,
+            "top_p": 0.800000011920929
+          },
+          "thinking": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 0.0,
+            "repeat_penalty": 1.0,
+            "temperature": 1.0,
+            "top_k": 20,
+            "top_p": 0.949999988079071
+          }
+        },
+        "usage": {
+          "active_sessions": 0,
+          "bytes": 1576928,
+          "bytes_max": 0,
+          "count": 1,
+          "evictions": 0,
+          "extends": 0,
+          "forks": 0,
+          "max": 8,
+          "retained_sessions": 0,
+          "retained_sessions_limit": 8,
+          "session_limit_kind": "inactive",
+          "switches": 0
+        },
+        "vision": {
+          "device": "auto",
+          "enabled": false,
+          "gpu": true,
+          "projector": "",
+          "video_fps": 2.0
+        }
+      },
+      "media_marker": "<__media__>",
+      "modalities": {
+        "audio": false,
+        "video": false,
+        "vision": false
+      },
+      "model_alias": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "model_ftype": "",
+      "model_name": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "model_path": "$ARTIFACTS\\models\\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "role": "model",
+      "speculative": {
+        "adaptive": false,
+        "algorithm": "none",
+        "capabilities": [
+          {
+            "adaptive": false,
+            "algorithm": "mtp",
+            "draft_asset": "optional_gguf",
+            "max_concurrency": 4,
+            "max_devices": 8,
+            "max_draft_tokens": 5,
+            "ngram": false
+          },
+          {
+            "adaptive": false,
+            "algorithm": "dflash2",
+            "draft_asset": "required_gguf",
+            "max_concurrency": 2,
+            "max_devices": 1,
+            "max_draft_tokens": 5,
+            "ngram": false
+          }
+        ],
+        "draft_tokens": 0,
+        "enabled": false,
+        "ngram_draft_tokens": 0,
+        "schema_version": 1,
+        "statistics": {
+          "acceptance_rate": null,
+          "accepted_tokens": 0,
+          "drafted_tokens": 0,
+          "fallback_steps": 0,
+          "generated_tokens": 0,
+          "requests": 0,
+          "rounds": 0,
+          "scope": "completed_requests"
+        }
+      },
+      "total_slots": 1,
+      "ui": false,
+      "ui_settings": {}
+    },
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "READY",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1792379188,
+      "id": "chatcmpl-78539cd6d8757683dd47a653cf073f9f_0",
+      "model": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b574-620d222",
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 217.6498,
+        "predicted_n": 1,
+        "predicted_per_second": 4.594536728267152,
+        "predicted_per_token_ms": 217.6498,
+        "prompt_ms": 10860.0011,
+        "prompt_n": 1007,
+        "prompt_per_second": 92.72558913460884,
+        "prompt_per_token_ms": 10.78450953326713
+      },
+      "usage": {
+        "completion_tokens": 1,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 1007,
+        "prompt_tokens": 1007,
+        "total_tokens": 1008
+      }
+    },
+    "http_status": 200,
+    "layout_failure_reproduced": false,
+    "process_exit": 3221226505
+  },
+  "cpu_capture_source": {
+    "base_commit": "1b9cc6be00dcbd2959e23c8c7ee60efeeb66ba93",
+    "unchanged_from_base": true,
+    "d2h_submit_sha256": "8460aebfb11e5abf50b8540b1f6ca27e1bb4d51d7ff98b181214dc5cec13cbe7"
+  },
+  "mixed_capture_fix": {
+    "implemented": true,
+    "pure_gpu_async_retained": true,
+    "ordinary_prefix_hit_tokens": 1008,
+    "c4_peak_active": 4,
+    "c4_request_records": 13,
+    "c4_follow_cache_hits": [
+      1053,
+      1053,
+      1055,
+      1054
+    ],
+    "c4_history_and_cancellation_qualified": true,
+    "c4_statistics": {
+      "acceptance_rate": 0.8574257425742574,
+      "accepted_tokens": 433,
+      "drafted_tokens": 505,
+      "fallback_steps": 0,
+      "generated_tokens": 529,
+      "requests": 14,
+      "rounds": 101,
+      "scope": "completed_requests"
+    },
+    "native_checkpoint_bytes_mixed_and_all_gpu": "pass",
+    "capture_order": "synchronize all producers, drain previous async captures, then per-tensor host capture"
+  },
+  "ordinary_after_capture_fix": {
+    "argv": [
+      "$ARTIFACTS\\dflash2-llama-validation-20261018\\build\\bin\\llama-kvmem-server.exe",
+      "-m",
+      "$ARTIFACTS\\models\\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "6044",
+      "--device",
+      "CUDA0",
+      "-ngl",
+      "48",
+      "-c",
+      "4096",
+      "-b",
+      "128",
+      "-ub",
+      "128",
+      "--parallel",
+      "1",
+      "--threads-http",
+      "8",
+      "--no-ui",
+      "--no-think",
+      "--kvmem",
+      "--kvmem-budget",
+      "512",
+      "--kvmem-gen-reserve",
+      "256",
+      "--kvmem-host-mib",
+      "2048",
+      "--kvmem-sessions",
+      "8",
+      "--kvmem-sink-tokens",
+      "64",
+      "--kvmem-recent-tokens",
+      "64",
+      "--kv-dtype",
+      "q8_0",
+      "--kvmem-trace"
+    ],
+    "gpu_uuid": "GPU-B",
+    "ordinary": true,
+    "lanes": 1,
+    "props": {
+      "bos_token": "<|endoftext|>",
+      "build_info": "b574-620d222",
+      "chat_template": "{%- set image_count = namespace(value=0) %}\n{%- set video_count = namespace(value=0) %}\n{%- macro render_content(content, do_vision_count, is_system_content=false) %}\n    {%- if content is string %}\n        {{- content }}\n    {%- elif content is iterable and content is not mapping %}\n        {%- for item in content %}\n            {%- if 'image' in item or 'image_url' in item or item.type == 'image' %}\n                {%- if is_system_content %}\n                    {{- raise_exception('System message cannot contain images.') }}\n                {%- endif %}\n                {%- if do_vision_count %}\n                    {%- set image_count.value = image_count.value + 1 %}\n                {%- endif %}\n                {%- if add_vision_id %}\n                    {{- 'Picture ' ~ image_count.value ~ ': ' }}\n                {%- endif %}\n                {{- '<|vision_start|><|image_pad|><|vision_end|>' }}\n            {%- elif 'video' in item or item.type == 'video' %}\n                {%- if is_system_content %}\n                    {{- raise_exception('System message cannot contain videos.') }}\n                {%- endif %}\n                {%- if do_vision_count %}\n                    {%- set video_count.value = video_count.value + 1 %}\n                {%- endif %}\n                {%- if add_vision_id %}\n                    {{- 'Video ' ~ video_count.value ~ ': ' }}\n                {%- endif %}\n                {{- '<|vision_start|><|video_pad|><|vision_end|>' }}\n            {%- elif 'text' in item %}\n                {{- item.text }}\n            {%- else %}\n                {{- raise_exception('Unexpected item type in content.') }}\n            {%- endif %}\n        {%- endfor %}\n    {%- elif content is none or content is undefined %}\n        {{- '' }}\n    {%- else %}\n        {{- raise_exception('Unexpected content type.') }}\n    {%- endif %}\n{%- endmacro %}\n{%- if not messages %}\n    {{- raise_exception('No messages provided.') }}\n{%- endif %}\n{%- set reasoning_instructions = '' %}\n{%- if enable_thinking is undefined or enable_thinking is true %}\n    {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}\n    {%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}\n        {{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '. Supported types are xhigh (default), medium, and low.') }}\n    {%- endif %}\n    {%- if resolved_reasoning_effort == 'xhigh' %}\n        {%- set reasoning_instructions = 'Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.' %}\n    {%- elif resolved_reasoning_effort == 'low' %}\n        {%- set reasoning_instructions = 'Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.' %}\n    {%- endif %}\n{%- endif %}\n{%- if tools and tools is iterable and tools is not mapping %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if reasoning_instructions %}\n        {{- reasoning_instructions + '\\n\\n' }}\n    {%- endif %}\n    {{- \"# Tools\\n\\nYou have access to the following functions:\\n\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\" }}\n    {{- '\\n\\nIf you choose to call a function ONLY reply in the following format with NO suffix:\\n\\n<tool_call>\\n<function=example_function_name>\\n<parameter=example_parameter_1>\\nvalue_1\\n</parameter>\\n<parameter=example_parameter_2>\\nThis is the value for the second parameter\\nthat can span\\nmultiple lines\\n</parameter>\\n</function>\\n</tool_call>\\n\\n<IMPORTANT>\\nReminder:\\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\\n- Required parameters MUST be specified\\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\\n</IMPORTANT>' }}\n    {%- if messages[0].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false, true)|trim %}\n        {%- if content %}\n            {{- '\\n\\n' + content }}\n        {%- endif %}\n    {%- endif %}\n    {{- '<|im_end|>\\n' }}\n{%- else %}\n    {%- if messages[0].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false, true)|trim %}\n        {%- if content %}\n            {{- '<|im_start|>system\\n' + (reasoning_instructions + '\\n\\n' if reasoning_instructions else '')  + content + '<|im_end|>\\n' }}\n        {%- elif reasoning_instructions %}\n            {{- '<|im_start|>system\\n' + reasoning_instructions + '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- elif reasoning_instructions %}\n        {{- '<|im_start|>system\\n' + reasoning_instructions + '<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}\n{%- for message in messages[::-1] %}\n    {%- set index = (messages|length - 1) - loop.index0 %}\n    {%- if ns.multi_step_tool and message.role == \"user\" %}\n        {%- set content = render_content(message.content, false)|trim %}\n        {%- if not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}\n            {%- set ns.multi_step_tool = false %}\n            {%- set ns.last_query_index = index %}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if ns.multi_step_tool %}\n    {{- raise_exception('No user query found in messages.') }}\n{%- endif %}\n{%- for message in messages %}\n    {%- set content = render_content(message.content, true)|trim %}\n    {%- if message.role == \"system\" %}\n        {%- if not loop.first %}\n            {{- raise_exception('System message must be at the beginning.') }}\n        {%- endif %}\n    {%- elif message.role == \"user\" %}\n        {{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {%- set reasoning_content = '' %}\n        {%- if message.reasoning_content is string %}\n            {%- set reasoning_content = message.reasoning_content %}\n        {%- endif %}\n        {%- set reasoning_content = reasoning_content|trim %}\n        {%- if preserve_thinking is undefined or preserve_thinking is true or loop.index0 > ns.last_query_index %}\n            {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}\n        {%- else %}\n            {{- '<|im_start|>' + message.role + '\\n' + content }}\n        {%- endif %}\n        {%- if message.tool_calls and message.tool_calls is iterable and message.tool_calls is not mapping %}\n            {%- for tool_call in message.tool_calls %}\n                {%- if tool_call.function is defined %}\n                    {%- set tool_call = tool_call.function %}\n                {%- endif %}\n                {%- if loop.first %}\n                    {%- if content|trim %}\n                        {{- '\\n\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                    {%- else %}\n                        {{- '<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                    {%- endif %}\n                {%- else %}\n                    {{- '\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                {%- endif %}\n                {%- if tool_call.arguments is defined and tool_call.arguments != '' %}\n                    {%- for args_name, args_value in tool_call.arguments|items %}\n                        {{- '<parameter=' + args_name + '>\\n' }}\n                        {%- set args_value = args_value | string if args_value is string else args_value | tojson | safe %}\n                        {{- args_value }}\n                        {{- '\\n</parameter>\\n' }}\n                    {%- endfor %}\n                {%- endif %}\n                {{- '</function>\\n</tool_call>' }}\n            {%- endfor %}\n        {%- endif %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if loop.previtem and loop.previtem.role != \"tool\" %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- content }}\n        {{- '\\n</tool_response>' }}\n        {%- if not loop.last and loop.nextitem.role != \"tool\" %}\n            {{- '<|im_end|>\\n' }}\n        {%- elif loop.last %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- else %}\n        {{- raise_exception('Unexpected message role.') }}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n    {%- if enable_thinking is defined and enable_thinking is false %}\n        {{- '<think>\\n\\n</think>\\n\\n' }}\n    {%- else %}\n        {{- '<think>\\n' }}\n    {%- endif %}\n{%- endif %}",
+      "chat_template_caps": {
+        "supports_object_arguments": true,
+        "supports_parallel_tool_calls": true,
+        "supports_preserve_reasoning": true,
+        "supports_reasoning_effort": true,
+        "supports_string_content": true,
+        "supports_system_role": true,
+        "supports_tool_calls": true,
+        "supports_tools": true,
+        "supports_typed_content": true
+      },
+      "cors_proxy_enabled": false,
+      "default_generation_settings": {
+        "n_ctx": 4096,
+        "params": {
+          "frequency_penalty": 0.0,
+          "max_tokens": 256,
+          "min_p": 0.0,
+          "n_predict": 256,
+          "presence_penalty": 1.5,
+          "repeat_penalty": 1.0,
+          "temperature": 0.699999988079071,
+          "top_k": 20,
+          "top_p": 0.800000011920929
+        }
+      },
+      "endpoint_metrics": false,
+      "endpoint_props": false,
+      "endpoint_slots": true,
+      "eos_token": "<|im_end|>",
+      "execution": {
+        "mode": "single",
+        "monitor_devices": [
+          {
+            "name": "NVIDIA GeForce RTX 5060 Ti",
+            "pci_bus_id": "0000:04:00.0"
+          }
+        ]
+      },
+      "is_sleeping": false,
+      "kvmem": {
+        "conversation_bytes_max": 0,
+        "conversation_cpu_bytes": 0,
+        "defaults": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          },
+          "enable_thinking": false,
+          "reasoning_budget_tokens": -1
+        },
+        "enabled": true,
+        "generation_limit": 256,
+        "parallel": 1,
+        "retained_sessions_limit": 8,
+        "sampling": {
+          "non_thinking": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "repeat_penalty": 1.0,
+            "temperature": 0.699999988079071,
+            "top_k": 20,
+            "top_p": 0.800000011920929
+          },
+          "thinking": {
+            "frequency_penalty": 0.0,
+            "min_p": 0.0,
+            "presence_penalty": 0.0,
+            "repeat_penalty": 1.0,
+            "temperature": 1.0,
+            "top_k": 20,
+            "top_p": 0.949999988079071
+          }
+        },
+        "usage": {
+          "active_sessions": 0,
+          "bytes": 1576928,
+          "bytes_max": 0,
+          "count": 1,
+          "evictions": 0,
+          "extends": 0,
+          "forks": 0,
+          "max": 8,
+          "retained_sessions": 0,
+          "retained_sessions_limit": 8,
+          "session_limit_kind": "inactive",
+          "switches": 0
+        },
+        "vision": {
+          "device": "auto",
+          "enabled": false,
+          "gpu": true,
+          "projector": "",
+          "video_fps": 2.0
+        }
+      },
+      "media_marker": "<__media__>",
+      "modalities": {
+        "audio": false,
+        "video": false,
+        "vision": false
+      },
+      "model_alias": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "model_ftype": "",
+      "model_name": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "model_path": "$ARTIFACTS\\models\\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "role": "model",
+      "speculative": {
+        "adaptive": false,
+        "algorithm": "none",
+        "capabilities": [
+          {
+            "adaptive": false,
+            "algorithm": "mtp",
+            "draft_asset": "optional_gguf",
+            "max_concurrency": 4,
+            "max_devices": 8,
+            "max_draft_tokens": 5,
+            "ngram": false
+          },
+          {
+            "adaptive": false,
+            "algorithm": "dflash2",
+            "draft_asset": "required_gguf",
+            "max_concurrency": 2,
+            "max_devices": 1,
+            "max_draft_tokens": 5,
+            "ngram": false
+          }
+        ],
+        "draft_tokens": 0,
+        "enabled": false,
+        "ngram_draft_tokens": 0,
+        "schema_version": 1,
+        "statistics": {
+          "acceptance_rate": null,
+          "accepted_tokens": 0,
+          "drafted_tokens": 0,
+          "fallback_steps": 0,
+          "generated_tokens": 0,
+          "requests": 0,
+          "rounds": 0,
+          "scope": "completed_requests"
+        }
+      },
+      "total_slots": 1,
+      "ui": false,
+      "ui_settings": {}
+    },
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "READY",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1792395277,
+      "id": "chatcmpl-2b588a4734cff54d0d6977670f13f7fa_0",
+      "model": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b574-620d222",
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 271.5457,
+        "predicted_n": 1,
+        "predicted_per_second": 3.682621378279973,
+        "predicted_per_token_ms": 271.5457,
+        "prompt_ms": 11137.0134,
+        "prompt_n": 1007,
+        "prompt_per_second": 90.41921418537576,
+        "prompt_per_token_ms": 11.059596226415094
+      },
+      "usage": {
+        "completion_tokens": 1,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 1007,
+        "prompt_tokens": 1007,
+        "total_tokens": 1008
+      }
+    },
+    "http_status": 200,
+    "layout_failure_reproduced": false,
+    "follow": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "READY",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1792395288,
+      "id": "chatcmpl-2b588a4734cff54d0d6977670f13f7fa_1",
+      "model": "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b574-620d222",
+      "timings": {
+        "cache_n": 1008,
+        "predicted_ms": 220.9488,
+        "predicted_n": 1,
+        "predicted_per_second": 4.525935420332674,
+        "predicted_per_token_ms": 220.9488,
+        "prompt_ms": 2711.4729,
+        "prompt_n": 19,
+        "prompt_per_second": 7.007261625222217,
+        "prompt_per_token_ms": 142.7091
+      },
+      "usage": {
+        "completion_tokens": 1,
+        "prompt_cache_hit_tokens": 1008,
+        "prompt_cache_miss_tokens": 19,
+        "prompt_tokens": 1027,
+        "total_tokens": 1028
+      }
+    },
+    "pass": true,
+    "process_exit": 1
+  },
+  "unqualified_combinations": [
+    "all-GPU 27B IQ3 + Q4 C4 on the tested 16 GB card (capacity failure)",
+    "physical multi-GPU",
+    "wider concurrent drafts",
+    "parallel n-gram matrix",
+    "long-context performance"
+  ],
+  "_sanitization": {
+    "version": 1,
+    "original_sha256": "c5885fdbbd264029a447be3ff9687c86c5ccc5930207be91493e02fe4d14af7b",
+    "scope": "Device identities/private paths anonymized, credential fields redacted; measurements unchanged."
+  }
+}

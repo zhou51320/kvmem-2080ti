@@ -1,5 +1,8 @@
 # K8V4 KVMem 本地源码验收（2026-10-04）
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 结果：26/26 次真实模型实验及 8/8 项基础检查通过。真实模型进程内累计耗时 19.5 分钟，
 不包括源码接入、编译、基础检查和整理。没有真实模型失败重跑；一项 NVFP4 实验专门为磁盘格式隔离生成冷记录。
 因此真实实验为 25 个 K8V4 进程加 1 个 NVFP4 种子进程，服务只冷启动一次。
@@ -7,7 +10,7 @@
 ## 环境与实现
 
 - 分支：`feat/multi-backend-framework`；ninfer base 固定为 `6e9189c1089f6968e29fe2e1c51b4596e2346eed`。
-- GPU：RTX 5060 Ti 16GB，UUID `GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`；驱动 610.62，CUDA 13.2，sm_120a，Release，VS2022，8 个编译任务。
+- GPU：RTX 5060 Ti 16GB，UUID `GPU-B`；驱动 610.62，CUDA 13.2，sm_120a，Release，VS2022，8 个编译任务。
 - 制品：`Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`，12,790,639,360 字节；使用本地转换制品，无再次转换。
 - ngram 与 lookup 全部为 0。除输入回退和容量服务显式使用 FP16 GDN 外，Engine 用例保留默认 FP32 GDN。
 - 复用原生 `Fp8KeyNvfp4Value` 与 CUDA 编解码/Attention；生产改动集中于 Engine/CLI 格式准入、

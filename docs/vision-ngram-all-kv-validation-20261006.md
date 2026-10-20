@@ -1,5 +1,8 @@
 # 全部KV的图片＋ngram＋并发（2026-10-06）
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 本报告覆盖当时的五种 KV。其后 [新增 KV 准入](other-kv-admission-validation-20261006.md) 加入 fp8、rk4v4、rk4v4-e8、rk2v4-e8。当前边界见 [多后端运行](multi-backend.md)。
 
 按用户要求，Engine、服务端参数检查及统一 Windows 启动器在本轮允许 BF16、INT8、NVFP4、K8V4、RK8V4 的文本和 resident/CPU 图片＋MTP＋ngram，活动请求上限1–8。固定及自适应MTP1–15均可用。启动并发C2–8、请求ngram16–63时仍自动降至15，并记录原值与实际值；C1保留宽度，0保持关闭。
@@ -14,7 +17,7 @@
 
 ## 实图验证范围
 
-使用 RTX5060Ti（UUID `GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`），既有 `Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`。图片为512×512纯红/纯蓝PNG，每图实际256 merged tokens，上限1024；逻辑context8192、R128、prefill128、device profile off。图文复制用例每路B1536，全局H为512MiB×并发数。
+使用 RTX5060Ti（UUID `GPU-B`），既有 `Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`。图片为512×512纯红/纯蓝PNG，每图实际256 merged tokens，上限1024；逻辑context8192、R128、prefill128、device profile off。图文复制用例每路B1536，全局H为512MiB×并发数。
 
 每组完整测试含冷启动、恢复、取消一路、恢复同伴四阶段；包含独立Python源文件复制和普通神经草稿请求。检查复制严格匹配本路源文件前缀、正向ngram接受、复制冷/恢复/恢复同伴逐token一致、配置的并发重叠、取消隔离、Host上限及Main/MTP活动页归零，最后逐路检查红/蓝颜色。
 

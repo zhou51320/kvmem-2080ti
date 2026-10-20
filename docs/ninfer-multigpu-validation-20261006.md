@@ -1,5 +1,8 @@
 # NInfer 多卡文本与 Vision
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 ## 实现来源
 
 保持 NInfer 子模块基线 `6e9189c1089f6968e29fe2e1c51b4596e2346eed`，现有 KVMem 集成继续保存在 `backends/patches/ninfer-kvmem.patch`。不更换模型制品格式，不引入 TP/NCCL，也不复制 llama.cpp 的 ggml 搬运代码。
@@ -29,8 +32,8 @@ Vision 补丁的 startup hunk 按当前 KVMem 代码手工合并；CPU Vision �
 
 | 顺序 | 卡 | UUID |
 | --- | --- | --- |
-| 0 | RTX 5060 Ti 16GB | GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c |
-| 1 | RTX 5050 Laptop 8GB | GPU-14f08a8c-8d62-4338-8ae4-c669889cdb29 |
+| 0 | RTX 5060 Ti 16GB | GPU-B |
+| 1 | RTX 5050 Laptop 8GB | GPU-A |
 
 两卡均为 CC 12.0，互相没有 P2P。边界传输复用上游 portable pinned-host ring。早期独立 StageLink 探针已通过 20,480 bytes／1 MiB、eager／Graph／capture 后 eager 的逐字节检查；它不能代替模型验收。
 

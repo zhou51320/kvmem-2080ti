@@ -6,6 +6,8 @@ Expect KVMEM_TRACE prefill_pressure with stage_in only for new tail blocks
 """
 from __future__ import annotations
 
+import argparse
+
 import os
 import subprocess
 import sys
@@ -19,21 +21,20 @@ DEFAULT_MODEL = ROOT / "models/unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf"
 
 
 def find_cli() -> Path:
-    for p in (
-        ROOT / "build/bin/llama-kvmem-cli",
-        ROOT / "build/llama-kvmem-cli",
-    ):
-        if p.is_file():
-            return p
-    raise SystemExit("llama-kvmem-cli not found; run scripts/build-cuda.sh")
+    return gpu_env.find_binary("llama-kvmem-cli")
 
 
 def main() -> int:
-    model = DEFAULT_MODEL
+    ap = argparse.ArgumentParser()
+    gpu_env.add_gpu_argument(ap)
+    ap.add_argument("-m", "--model", type=Path, default=DEFAULT_MODEL)
+    args = ap.parse_args()
+    args.gpu = gpu_env.configure(args.gpu)
+    model = args.model
     if not model.is_file():
         raise SystemExit(f"missing {model}")
     cli = find_cli()
-    env = gpu_env.apply_gpu(os.environ.copy(), "small")
+    env = gpu_env.apply_gpu(os.environ.copy())
     env["KVMEM_TRACE"] = "1"
 
     filler = " alpha bravo charlie delta echo foxtrot" * 80
@@ -49,7 +50,7 @@ def main() -> int:
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
         raise SystemExit(f"decode failed rc={proc.returncode}")
-    gpu_env.require_device(proc.stderr, "RTX 5050")
+    gpu_env.require_device(proc.stderr, env)
     pressure = [ln for ln in proc.stderr.splitlines() if "prefill_pressure" in ln]
     if not pressure:
         print("FAIL: never hit prefill pressure; prompt too short?", file=sys.stderr)

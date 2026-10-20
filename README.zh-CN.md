@@ -178,6 +178,13 @@ NInfer 使用按层 pipeline，最多八张 GPU，要求相同 CUDA 计算能力
 
 ## API 与 Web UI
 
+**Windows 桌面控制台：**双击根目录的 `START-HERE-CN.bat`，自动打开本地控制台。
+英文用户可双击 `START-HERE-EN.bat`，使用英文启动提示并自动打开英文界面。
+离线控制台运行包内置独立 Python；源码目录使用已安装的 64 位 Python 3.9+。
+详见[一键启动与打包](docs/windows-one-click.md)。也可以运行 `python scripts/local-console.py`，打开
+`http://127.0.0.1:18199/monitor/`，即可配置、启动和停止 NInfer 或 llama.cpp，选择本地模型、
+保存模板并监控服务。需要 Python，推理程序和模型单独准备。详见[控制台配置与限制](ui/README.md#independent-local-console-windows)。
+
 | 接口 | 用途 |
 |---|---|
 | `GET /health` | 就绪状态 |
@@ -251,7 +258,7 @@ ctest --test-dir build-backends/core -C Release --output-on-failure
 
 统一入口默认 context=262144、B=32768、R=1024、prefill=128、输出上限1024；NInfer 默认 INT8、MTP/ngram/视觉关闭，LRFU 开启、sink=12288、recent=1024。需要视觉或 MTP 时显式传 `-Vision`、`-MtpDrafts` 等。llama.cpp 对应能力使用 `-WorkerArgs` 传原生参数。
 
-**源码树的 `start-ninfer.ps1` 是固定配方快捷脚本，默认从仓库根目录读取 `model.ninfer`，不接受包内扩展的 `-Model`、`-NoVision` 等选项。**需要自定义模型或完整参数时使用源码 `start-backend.ps1`；前面的包内快速开始仅用于解压后的正式运行包。
+源码树和新打包版本使用同一份 `start-ninfer.ps1`，保留 0.18 配方，并接受 `-Model`、`-NoVision`、思考设置和额外原生参数。PowerShell 数组、外部 `-File` 调用及精确保留参数的 JSON 文件用法见 [Windows 参数传递说明](scripts/windows/README.md#multi-backend-launchers--多后端启动入口)。已经发布的旧 ZIP 在更新前仍使用原脚本。
 
 ### Linux / ROCm
 

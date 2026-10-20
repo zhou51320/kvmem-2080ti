@@ -11,6 +11,39 @@ static void rejects(const std::function<void()> & fn) {
     throw std::runtime_error("expected invalid_argument");
 }
 int main() {
+    // Both EXEs use this resolver; omission, zero, disable conflicts and
+    // overrides are part of the public contract, independent of GPU geometry.
+    {
+        kvmem::CliOptions defaults;
+        defaults.resolve();
+        check(!defaults.enabled && defaults.budget == 0 && defaults.payload_host_bytes == 0);
+        auto parse_memory = [](kvmem::CliOptions & config, const char * flag, const char * value = "") {
+            check(config.parse(flag, [&](const char *) { return value; }));
+        };
+        parse_memory(defaults, "--kvmem"); defaults.resolve();
+        check(defaults.enabled && defaults.budget == 32768 && defaults.gen_reserve == 1024 &&
+              defaults.payload_host_bytes == (16384ULL << 20) && defaults.sessions == 4);
+        for (const char * flag : {"--kvmem-budget", "--kvmem-gen-reserve", "--kvmem-host-mib", "--kvmem-sessions"})
+            for (const char * value : {"0", "-1", "1.5", "1x", " 1", "9999999999999999999999999"})
+                rejects([&] { kvmem::CliOptions c; parse_memory(c, flag, value); });
+        kvmem::CliOptions old_budget;
+        parse_memory(old_budget, "--kvmem-budget", "384");
+        parse_memory(old_budget, "--kvmem-lrfu");
+        parse_memory(old_budget, "--no-kvmem-lrfu");
+        parse_memory(old_budget, "--kvmem-disk-mib", "0");
+        old_budget.resolve(); check(old_budget.enabled && !old_budget.lrfu && !old_budget.payload_disk_bytes);
+        parse_memory(old_budget, "--no-kvmem");
+        rejects([&] { old_budget.resolve(); });
+        kvmem::CliOptions off;
+        parse_memory(off, "--no-kvmem"); parse_memory(off, "--no-kvmem-lrfu");
+        parse_memory(off, "--kvmem-disk-mib", "0"); off.resolve(); check(!off.enabled);
+        kvmem::CliOptions spill;
+        parse_memory(spill, "--kvmem"); parse_memory(spill, "--kvmem-disk-path", "directory with spaces");
+        rejects([&] { spill.resolve(); });
+        parse_memory(spill, "--kvmem-disk-mib", "128"); spill.resolve();
+        check(spill.payload_disk_bytes == (128ULL << 20));
+        parse_memory(spill, "--kvmem-disk-mib", "0"); rejects([&] { spill.resolve(); });
+    }
     check(kvmem_cli_gpu_layers("-ngl", "all") == -2);
     check(kvmem_cli_gpu_layers("-ngl", "0") == 0);
     for (const char * value : {"auto", "-1", "1x", "999999999999", "-3", " 1"})
@@ -27,10 +60,12 @@ int main() {
     parse("--kvmem-disk-path", "spill directory");
     check(o.payload_host_bytes == (64ULL << 20) && o.payload_disk_bytes == (256ULL << 20));
     check(o.payload_disk_dir == "spill directory");
-    for (const char * bad : {"0", "-1", "1.5", "1x", "2147483648"}) {
+    for (const char * bad : {"-1", "1.5", "1x", "2147483648"}) {
         rejects([&] { parse("--kvmem-host-mib", bad); });
         rejects([&] { parse("--kvmem-disk-mib", bad); });
     }
+    rejects([&] { parse("--kvmem-host-mib", "0"); });
+    parse("--kvmem-disk-mib", "0"); check(o.payload_disk_bytes == 0);
     rejects([&] { parse("--kvmem-disk-path", ""); });
     for (const char * value : {"0", "1", "128", "129", "1024", "2147483647"}) {
         parse("--kvmem-sink-tokens", value);
@@ -58,7 +93,9 @@ int main() {
     rejects([&] { parse("-np", "0"); });
     parse("-np", "3"); check(o.parallel == 3);
     parse("-np", "4"); check(o.parallel == 4);
-    rejects([&] { parse("-np", "5"); });
+    parse("-np", "5"); check(o.parallel == 5);
+    parse("-np", "8"); check(o.parallel == 8);
+    rejects([&] { parse("-np", "9"); });
     rejects([&] { parse("-ub", "0"); });
     rejects([&] { parse("-fa", "invalid"); });
     parse("--load-mode", "mmap+mlock"); check(o.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK);
@@ -96,6 +133,9 @@ int main() {
     check(args.size() == 6 && args[0].value == "--model" && args[1].value == "model with spaces.gguf");
     check(args[0].source == "env:LLAMA_ARG_MODEL");
     check(std::any_of(args.begin(), args.end(), [](const kvmem_start_arg & a) { return a.value == "--no-ui"; }));
+    environment["LLAMA_ARG_ENDPOINT_METRICS"] = "true";
+    auto with_metrics = kvmem_environment_args(lookup);
+    check(std::any_of(with_metrics.begin(), with_metrics.end(), [](const kvmem_start_arg & a) { return a.value == "--metrics"; }));
     environment["LLAMA_ARG_UI"] = "sometimes";
     rejects([&] { kvmem_environment_args(lookup); });
     check(kvmem_config_key("-ngl") == "--n-gpu-layers");
@@ -107,11 +147,11 @@ int main() {
     check(kvmem_server_options{}.conversation_bytes == 0);
     check(o.conversations == 1 && o.conversation_bytes == 0);
     parse("--kvmem-session-ram-gb", "1.5"); check(o.conversation_bytes == 1610612736ull);
-    parse("--kvmem-session-nvme-gb", "2"); check(o.session_disk_bytes == 2147483648ull);
-    parse("--kvmem-session-cache-dir", "D:/session cache"); check(o.session_cache_dir == "D:/session cache");
-    for (const char * bad : {"nan", "inf", "-1", "2gb", "1048577"})
-        rejects([&] { parse("--kvmem-session-nvme-gb", bad); });
-    rejects([&] { parse("--kvmem-session-cache-dir", ""); });
+    for (const char * flag : {"--kvmem-nvme-gb", "--kvmem-nvme-dir", "--kvmem-raw-k-nvme",
+                              "--kvmem-session-nvme-gb", "--kvmem-session-cache-dir"}) {
+        rejects([&] { parse(flag, "1"); });
+        rejects([&] { parse((std::string(flag) + "=1").c_str(), ""); });
+    }
     for (const char * value : {"1", "2", "8", "64", "2147483647"}) {
         parse("--kvmem-conversations", value);
         check(o.conversations == std::stoi(value));
@@ -136,14 +176,17 @@ int main() {
     check(kvmem_config_key("--kvmem-conversations-gb") == "--kvmem-conversations-gb");
     // Both parallel aliases accept exactly the supported lane counts.
     for (const char * flag : {"-np", "--parallel"}) {
-        for (const char * value : {"2", "3", "4"}) {
+        for (const char * value : {"2", "3", "4", "5", "6", "7", "8"}) {
             parse(flag, value);
             check(o.parallel == std::stoi(value));
         }
         rejects([&] { parse(flag, "0"); });
-        rejects([&] { parse(flag, "5"); });
+        rejects([&] { parse(flag, "9"); });
         parse(flag, "1");
         check(o.parallel == 1);
     }
+    check(!o.metrics);
+    parse("--metrics", "");
+    check(o.metrics);
     std::puts("server options: passed");
 }

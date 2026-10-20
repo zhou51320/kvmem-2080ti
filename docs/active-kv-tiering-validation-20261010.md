@@ -1,5 +1,8 @@
 # 活跃 KV 分层验收记录（2026-10-10）
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 实现位于 `feat/active-kv-tiering`，基于 `eb98424e7654c5bdd054bf9ce46485d09a991f84`。
 两个后端共用原生字节、配额、文件 I/O 和有界任务队列，完整 K/V 可下沉到 SSD，
 mean-K 留在 RAM。原生历史在活动/闲置之间移动同一份所有权，附件另计且共用 D。
@@ -22,7 +25,7 @@ mean-K 留在 RAM。原生历史在活动/闲置之间移动同一份所有权�
 
 ## 性能方法与 RAM 结果
 
-全部性能使用 RTX 5060 Ti `GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`，逐对交替原引擎/候选顺序，固定请求、参数、
+全部性能使用 RTX 5060 Ti `GPU-B`，逐对交替原引擎/候选顺序，固定请求、参数、
 温度、seed、GPU、模型和预热。测试期间不编译；每次记录二进制 SHA、命令、token usage、
 GPU 遥测与原始请求。正值表示耗时增加。单侧 95% 上界针对配对对数耗时比均值，
 不等于逐次最大慢速；三对只用于高效筛查，证据不足时扩到七对。
@@ -156,7 +159,7 @@ ninfer 相关 thinking-control 专项通过；旧 frontend 总套件在已有 to
 不计为总套件通过。可用 Python 为 3.12.13，脚本记录实际版本。
 
 源码、不可变原引擎/最终 worker、原始日志与测量保留在任务目录
-`C:/Users/leyew/AppData/Local/KVMem/active-kv-tiering-20261009`。
+`$ARTIFACTS/active-kv-tiering-20261009`。
 `final-validation.json` 保存结构化证据，`package-p7-windows` 保存未压缩 Windows 包、
 `BUILD-INFO.json`、`provenance/validation.json` 和全文件 SHA256。
 SSD 是进程临时存储，不提供重启恢复或跨后端 KV 迁移；H/D 是原生字节与共享附件配额，

@@ -1,0 +1,392 @@
+{
+  "date": "2026-10-19",
+  "base": "c214f420",
+  "purpose": "retire obsolete disk implementations and migrate public SSD controls; no performance comparison",
+  "gpu_model": "RTX 5050 Laptop",
+  "gpu_uuid": "GPU-A",
+  "retired_options": [
+    "--kvmem-nvme-gb",
+    "--kvmem-nvme-dir",
+    "--kvmem-raw-k-nvme",
+    "--kvmem-session-nvme-gb",
+    "--kvmem-session-cache-dir"
+  ],
+  "retired_build_option": "KVMEM_ENABLE_NVME",
+  "preserved": [
+    "native KV and mean-K",
+    "accepted-prefix/truncation rules",
+    "public SpillFile and shared H/D",
+    "state attachment checksum/transfer",
+    "Flash Attention SSD requirement",
+    "independent optional CPU arena"
+  ],
+  "llamacpp_dflash2_ssd": {
+    "pass": true,
+    "scope": "0.8B Q8_0 target + untrained draft, state/protocol and secret-word output; no trained-head quality/performance claim",
+    "lanes": 8,
+    "peak_active": 8,
+    "draft_tokens": 5,
+    "budget": 512,
+    "reserve": 256,
+    "host_mib": 64,
+    "disk_mib": 1024,
+    "request_records": 25,
+    "checks": [
+      {
+        "name": "all requested slots exposed",
+        "pass": true
+      },
+      {
+        "name": "DFlash2 active",
+        "pass": true
+      },
+      {
+        "name": "common/native drafted_tokens",
+        "pass": true
+      },
+      {
+        "name": "common/native accepted_tokens",
+        "pass": true
+      },
+      {
+        "name": "common/native rounds",
+        "pass": true
+      },
+      {
+        "name": "common/native fallback_steps",
+        "pass": true
+      },
+      {
+        "name": "native DFlash2 label",
+        "pass": true
+      },
+      {
+        "name": "native Prometheus retained",
+        "pass": true
+      },
+      {
+        "name": "isolated secret oracle",
+        "pass": true
+      },
+      {
+        "name": "requested requests really overlap",
+        "pass": true
+      },
+      {
+        "name": "concurrent secret oracle",
+        "pass": true
+      },
+      {
+        "name": "synthetic rejection output equals isolated",
+        "pass": true
+      },
+      {
+        "name": "sustained decode",
+        "pass": true
+      },
+      {
+        "name": "history remains isolated",
+        "pass": true
+      },
+      {
+        "name": "history reuse observed",
+        "pass": true
+      },
+      {
+        "name": "cancel after an output token",
+        "pass": true
+      },
+      {
+        "name": "request after cancellation",
+        "pass": true
+      },
+      {
+        "name": "native verification counters",
+        "pass": true
+      },
+      {
+        "name": "fixture rejection path",
+        "pass": true
+      },
+      {
+        "name": "no native state or CUDA failure",
+        "pass": true
+      },
+      {
+        "name": "real SSD reads and writes",
+        "pass": true
+      },
+      {
+        "name": "public RAM quota",
+        "pass": true
+      },
+      {
+        "name": "public SSD quota",
+        "pass": true
+      },
+      {
+        "name": "no SSD I/O errors",
+        "pass": true
+      }
+    ],
+    "serial_concurrent_exact": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "follow_cache_hits": [
+      1524,
+      1523,
+      1524,
+      1524,
+      1523,
+      1523,
+      1525,
+      1524
+    ],
+    "storage_after": {
+      "disk_errors": 0,
+      "disk_payload_budget_bytes": 1073741824,
+      "disk_payload_bytes": 39342080,
+      "disk_read_bytes": 10027008,
+      "disk_reads": 144,
+      "disk_writes": 393,
+      "disk_written_bytes": 77778944,
+      "host_payload_budget_bytes": 67108864,
+      "host_payload_bytes": 54243328
+    }
+  },
+  "unpressured_probe": {
+    "pass": false,
+    "reason": "read/write assertion correctly rejected fixture that remained entirely in RAM",
+    "storage_after": {
+      "disk_errors": 0,
+      "disk_payload_budget_bytes": 1073741824,
+      "disk_payload_bytes": 0,
+      "disk_read_bytes": 0,
+      "disk_reads": 0,
+      "disk_writes": 0,
+      "disk_written_bytes": 0,
+      "host_payload_budget_bytes": 67108864,
+      "host_payload_bytes": 46792704
+    }
+  },
+  "cli_ram_ssd": {
+    "pass": true,
+    "output_equal": true,
+    "runs": [
+      {
+        "mode": "ram",
+        "output": "220\n19\n11\n220\n20\n11\n220\n21\n11\n220\n22\n11\n220\n23\n11\n220\n24\n11\n220\n16\n15\n11\n220\n16\n16\n11\n220\n16\n17\n11\n220\n16\n",
+        "storage": {
+          "host_bytes": 53477376,
+          "host_budget": 4294967296,
+          "disk_bytes": 0,
+          "disk_budget": 0,
+          "read_bytes": 0,
+          "written_bytes": 0,
+          "errors": 0
+        }
+      },
+      {
+        "mode": "ssd",
+        "output": "220\n19\n11\n220\n20\n11\n220\n21\n11\n220\n22\n11\n220\n23\n11\n220\n24\n11\n220\n16\n15\n11\n220\n16\n16\n11\n220\n16\n17\n11\n220\n16\n",
+        "storage": {
+          "host_bytes": 8042496,
+          "host_budget": 8388608,
+          "disk_bytes": 45434880,
+          "disk_budget": 268435456,
+          "read_bytes": 2506752,
+          "written_bytes": 45434880,
+          "errors": 0
+        }
+      }
+    ]
+  },
+  "windows_host_suites": {
+    "pass": true,
+    "count": 18
+  },
+  "process_exit_and_partial_write_termination": {
+    "pass": true
+  },
+  "wsl_gcc": {
+    "pass": true,
+    "compiler": "g++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+    "checks": [
+      {
+        "name": "raw_kv_store_test",
+        "pass": true
+      },
+      {
+        "name": "kvmem_runtime_test",
+        "pass": true
+      },
+      {
+        "name": "host_kv_storage_test",
+        "pass": true
+      },
+      {
+        "name": "tiered_kv_storage_test",
+        "pass": true
+      },
+      {
+        "name": "native_kv_payload_test",
+        "pass": true
+      },
+      {
+        "name": "snapshot",
+        "pass": true
+      },
+      {
+        "name": "transfer",
+        "pass": true
+      },
+      {
+        "name": "spill lifecycle",
+        "pass": true
+      }
+    ]
+  },
+  "native_cli_compatibility": {
+    "pass": true,
+    "checks": 108
+  },
+  "retired_option_binaries": {
+    "pass": true,
+    "checks": [
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-nvme-gb",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-nvme-gb=1",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-nvme-dir",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-nvme-dir=1",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-raw-k-nvme",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-raw-k-nvme=1",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-session-nvme-gb",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-session-nvme-gb=1",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-session-cache-dir",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-server.exe",
+        "option": "--kvmem-session-cache-dir=1",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-nvme-gb",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-nvme-gb=1",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-nvme-dir",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-nvme-dir=1",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-raw-k-nvme",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-raw-k-nvme=1",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-session-nvme-gb",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-session-nvme-gb=1",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-session-cache-dir",
+        "pass": true
+      },
+      {
+        "tool": "llama-kvmem-cli.exe",
+        "option": "--kvmem-session-cache-dir=1",
+        "pass": true
+      }
+    ]
+  },
+  "corrected_manual_test_expectation": "the previous eight-lane change left one manual CLI runner rejecting five lanes; updated to accept five/eight and reject nine, with the initial failed test retained privately",
+  "host_interface_checks": [
+    "37 console tests",
+    "7 child-argv tests",
+    "PowerShell backend launcher including both backends C2/C8 SSD",
+    "Windows package metadata and dependency scan",
+    "browser launcher including C8 SSD retention/preview",
+    "native options and retired equals-form rejection"
+  ],
+  "environment_corrections": [
+    "WSL CMake unavailable; used existing GCC directly with eight build jobs",
+    "package checker required existing MSVC dumpbin environment",
+    "first SSD probe did not exceed H and is not counted as SSD qualification"
+  ],
+  "native_inference_math_changed": false,
+  "unqualified": [
+    "full trained 27B C8",
+    "trained DFlash2 acceptance",
+    "new NInfer GPU matrix",
+    "full C8 vision/SSD/DFlash2 combinations",
+    "throughput or latency equivalence to legacy POSIX direct I/O"
+  ],
+  "_sanitization": {
+    "version": 1,
+    "original_sha256": "7292bda1299259551b536f31538afe20af73e6332be3c8311a41ba5660e6add8",
+    "scope": "Device identities/private paths anonymized, credential fields redacted; measurements unchanged."
+  }
+}

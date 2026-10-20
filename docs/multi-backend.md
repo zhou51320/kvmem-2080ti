@@ -6,6 +6,8 @@
 
 Windows 入口 `scripts/windows/start-backend.ps1` 在启动时选择 `llamacpp` 或 `ninfer`。两个 worker 分进程运行，各自拥有推理引擎和 GPU 内存；公共 KVMem 策略库直接链接在 worker 内。
 
+当前源码统一了 MTP/DFlash2 的启动配置、能力描述及 `/props` 统计，控制台按后端、并发和显卡数量启用选项。llama.cpp 的 DFlash2 使用上游原生草稿实现和独立 GGUF，NInfer 使用模型内置组件；详见 [公共推测解码接口](speculative-interface.md) 和 [本轮功能验证](speculative-validation-20261019.md)。已有发布包需更新 worker 后才能使用新增方式。
+
 切换后端时的参数、默认值和执行行为区别见 [两后端实现差异](multi-backend-differences.md)，包括 ninfer 固定 64-token block、recent 默认且至少保留一页（参数至少 64 tokens）、R 与输出上限，以及 Host 和磁盘预算的不同含义。
 
 ## 启动
@@ -28,7 +30,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninf
 
 `-Worker` 可指定本地构建的 `ninfer-serve.exe` 或 `llama-kvmem-server.exe`；省略时使用包内 `workers/<backend>/` 的程序。`-DryRun` 输出启动参数，`-Describe` 查询静态能力。默认监听 `127.0.0.1:18200`，前台运行，Ctrl+C 结束本次启动的 worker。安装 NVIDIA 驱动及 Microsoft Visual C++ 2015–2022 x64 Runtime；包内保留各引擎的 DLL，模型另行提供。
 
-当前源码的 Windows 统一入口、`start-ninfer.ps1` 及 llama.cpp 的 IQ3/IQ4 入口默认开启 LRFU，`lambda=0.5`、`top-frac=0.9`，GQA 聚合使用 `max`。sink 默认 12288 tokens（12K）、recent 默认 1024 tokens（1K，16页），两项计入 B；统一入口默认 B=32768，ninfer/IQ3/IQ4 快捷配方的 B/R 保持原值。可用 `-SinkTokens`、`-RecentTokens` 覆盖；自定义小预算时也要相应缩小这两个保留窗口。`top-frac` 控制本轮得分可累加到历史的命中范围，不是 KV 预算比例；同分块也可命中。可用 `-LrfuLambda`、`-LrfuTopFraction` 和 `-ScoreAggregation mean|max` 覆盖；`-NoLrfu -ScoreAggregation mean` 恢复无历史加权的 mean 检索。`start-ninfer.ps1 -DryRun` 可查看完整参数。直接运行 worker 时仍默认关闭 LRFU、使用 mean，sink/recent 也沿用 worker 原有默认值；需要包含 LRFU 实现的新 worker，已发布的旧 ZIP 不适用这些参数。
+当前源码的 Windows 统一入口、`start-ninfer.ps1` 及 llama.cpp 的 IQ3/IQ4 入口默认开启 LRFU，`lambda=0.5`、`top-frac=0.9`，GQA 聚合使用 `max`。sink 默认 12288 tokens（12K）、recent 默认 1024 tokens（1K，16页），两项计入 B；统一入口默认 B=32768，ninfer/IQ3/IQ4 快捷配方的 B/R 保持原值。可用 `-SinkTokens`、`-RecentTokens` 覆盖；自定义小预算时也要相应缩小这两个保留窗口。`top-frac` 控制本轮得分可累加到历史的命中范围，不是 KV 预算比例；同分块也可命中。可用 `-LrfuLambda`、`-LrfuTopFraction` 和 `-ScoreAggregation mean|max` 覆盖；`-NoLrfu -ScoreAggregation mean` 恢复无历史加权的 mean 检索。`start-ninfer.ps1 -DryRun` 可查看完整参数。直接运行 worker 时仍默认关闭 LRFU、使用 mean，sink/recent 的公共输入默认值为 0/64，再按本后端块粒度规范化；需要包含 LRFU 实现的新 worker，已发布的旧 ZIP 不适用这些参数。
+
+当前源码的 KVMem CLI v1 由两个 worker 共用解析和默认定义。两个 EXE 都支持 `--kvmem` / `--no-kvmem`，不传 KVMem 配置默认关闭；旧命令传正的 `--kvmem-budget` 仍会启用。启用后的默认 B/R/H 为 32768/1024/16384 MiB，sessions=4；B/R/H 显式 0 会报错，需配置能容纳 B+R 的原生上下文。`--kvmem-sessions` 和脚本 `-RetainedSessions` 在两个后端都只限制非活动历史，活动请求不计入；旧 llama `--kvmem-conversations` 是总数兼容模式，不是同值别名。SSD 额度 0 表示关闭且必须省略目录，关闭 LRFU 使用 `--no-kvmem-lrfu`。新脚本必须与本轮新编译的 worker 配套；已有发布包不会被自动更新。完整定义及 llama 当前 R 输出能力限制见 [参数规范](native-cli-configuration-spec.md)。
 
 ninfer 源码的多卡采用上游 layer pipeline。`-Gpu 'GPU-a,GPU-b'` 保留 UUID 顺序，第一张卡承担 embedding、head、MTP 和 resident Vision；CPU Vision 保留原生 Host 编码路径。可加 `-StageLayers 40,24` 指定连续层数，省略时按各卡空闲内存规划；层数总和由模型装载器验证。统一启动器禁止重复或空设备、超过八卡，以及经 `WorkerArgs` 重复传入设备参数。物理卡必须具有相同 compute capability，显存容量可不同。B/R 仍是每请求的完整逻辑窗口，H 是共享预算；各卡只持有自己的层，不按卡数拆分 B/R 或重复建立 Host 历史。
 
@@ -52,6 +56,10 @@ llama.cpp 示例：
 已有的 llama.cpp 可执行文件、`start-server.ps1`、IQ3/IQ4 启动脚本仍可使用。原生参数通过 `-WorkerArgs @('--flag', 'value')` 传入，例如 llama 的 MTP、mmproj 和会话配置。后端参数保留各自含义；`.gguf` 与 `.ninfer` 不互换，也不迁移跨引擎 KV。当前源码的 `-HostMiB` 对应两个后端共用的原生 KV payload RAM 预算；llama 仅在显式指定或启用 SSD 时传入，保持未配置时的行为。
 
 ## ninfer 功能与组合
+
+当前源码的召回传输保留 64 MiB 目标分批中转，并在批内合并连续物理页；可用默认关闭的
+`KVMEM_TRANSFER_TRACE=1` 查看拷贝规划、字节和分段计时。使用方法、计时边界及验证范围见
+[召回传输合并与诊断](ninfer-recall-transfer-validation-20261019.md)。
 
 当前源码支持固定 MTP1–15、多个 Host 会话、最多八条文本或 resident/CPU 图像请求，可在同一服务中混合图文；BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 沿用相同的请求预算规则。2026-10-10 起，磁盘入口接入公共进程内 RAM/SSD 分层，活动 KV 和非活动历史共享 D 配额；旧持久化快照已被替换。自适应 MTP 允许文本及 resident/CPU 图片 C1–8；ngram1–15 可用于九种 KV 的多路文本及 resident/CPU 图片，启动并发大于1时，配置的 ngram16–63 自动降至15并提示，单路保留原宽度。快速 prefill 允许 INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 的文本及 resident/CPU 图片。CPU 图片编码沿用原生串行编码器，八条活动请求不表示八张图片同时编码。冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
 
@@ -99,7 +107,7 @@ ngram 默认关闭。
 - NVFP4 的 D256 K/V 每 token 每 KV head 共 288 字节（两份 128 字节 codes 与 16 字节 scales）；K8V4 为 402 字节（256+128+2+16），INT8 为 528 字节，RK8V4 为 408 字节。换页按原始字节传输，不重新量化；权重、GDN state、workspace 与 CUDA Graph 不随 KV 格式同比缩小。格式布局身份和冷快照执行配置区分 NVFP4 与其他 KV 格式。
 - prefill 是 128 的倍数且不超过 R。追加压力触发选页，逻辑历史保留原始位置。生成上限由请求输出预算和逻辑上下文上限共同决定。
 - H 只限制原生 KV payload。统计索引、每会话最多四个检查点的 GDN StateImage、模型和临时缓冲另计，H 不等于进程总内存上限。
-- 长期历史保存在普通 Host 内存，CUDA 搬运复用一个不超过 B+R 原生页大小的 pinned 缓冲区；其用量单独通过 `transfer_staging_bytes` 报告。
+- 长期历史保存在普通 Host 内存。KV CUDA 搬运分批复用 Program 持有的 pinned 缓冲区，以 64 MiB 为目标按完整原生页对齐；单页超过该目标时至少容纳一页，小请求按需分配。D2H、H2D 与 KV 字节校验复用同一缓冲，扩容先释放旧 pin；GDN 检查点与状态校验缓冲另计。`transfer_staging_bytes` 报告搬运暂存总量，SSD 模式还包括普通 RAM scratch，并非进程全部锁页内存。验证范围见 [分批 pin 搬运验证](ninfer-pinned-transfer-validation-20261018.md)。
 - 请求在执行前检查整段合法历史的 H 需求，已知预算不足返回错误。编辑历史不匹配可信前缀时从头计算。
 - 如果单请求可容纳，但并发请求的全局 H 预留暂时不足，后续请求进入原生 FIFO 队列；不会让每个请求重复独占 H。服务入口默认排队时限 600 秒，Engine API 默认 30 秒，可显式配置。
 - 图像区域完整保留，连同 sink 和追加页必须能装入 B；不满足时在准入阶段拒绝，可增大 B 或降低 `VisionTokens`。换图按内容、位置和精确前缀使旧 checkpoint 失效，不依赖文件名。

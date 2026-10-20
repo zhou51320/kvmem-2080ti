@@ -34,10 +34,7 @@ PROMPT = "Hello my name is"
 
 
 def find_cli() -> Path:
-    for p in (ROOT / "build/bin/llama-kvmem-cli", ROOT / "build/llama-kvmem-cli"):
-        if p.is_file():
-            return p
-    raise SystemExit("llama-kvmem-cli not found; run scripts/build-cuda.sh")
+    return gpu_env.find_binary("llama-kvmem-cli")
 
 
 def find_mtp_model() -> Path:
@@ -67,10 +64,9 @@ def run(cli: Path, model: Path, extra: list[str], gpu: str, prompt: str = PROMPT
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("-m", "--model", type=Path, default=None, help="MTP-capable 0.8B GGUF")
-    ap.add_argument("--gpu", choices=("small", "27b", "5050", "5090"), default="small")
+    gpu_env.add_gpu_argument(ap)
     args = ap.parse_args()
-    if args.gpu not in ("small", "5050"):
-        raise SystemExit("P7-0 must run on RTX 5050 (--gpu small)")
+    args.gpu = gpu_env.configure(args.gpu)
 
     cli = find_cli()
     mtp_model = args.model if args.model else find_mtp_model()
@@ -96,7 +92,7 @@ def main() -> int:
 
     print("== no-kvmem + draft-mtp ==")
     rc, out, err = run(cli, mtp_model, ["--spec-type", "draft-mtp", "--spec-draft-n-max", "2"], args.gpu)
-    gpu_env.require_device(err, "RTX 5050")
+    gpu_env.require_device(err, os.environ)
     if rc != 0:
         sys.stderr.write(err)
         print("FAIL: no-kvmem MTP rc", rc)
@@ -119,7 +115,7 @@ def main() -> int:
         "--spec-type", "draft-mtp", "--spec-draft-n-max", "2", "--spec-draft-p-min", "0",
     ]
     rc, out, err = run(cli, mtp_model, extra, args.gpu)
-    gpu_env.require_device(err, "RTX 5050")
+    gpu_env.require_device(err, os.environ)
     if rc != 0:
         sys.stderr.write(err)
         print("FAIL: kvmem MTP rc", rc)
@@ -152,7 +148,7 @@ def main() -> int:
         "--temp", "0", "--no-prompt", *extra_pool, PROMPT,
     ]
     proc = subprocess.run(cmd, check=False, capture_output=True, text=True, env=env)
-    gpu_env.require_device(proc.stderr, "RTX 5050")
+    gpu_env.require_device(proc.stderr, os.environ)
     pool_lines = [ln for ln in proc.stderr.splitlines() if "mtp_pool" in ln]
     occupy_lines = [ln for ln in proc.stderr.splitlines() if "mtp_occupy" in ln]
     if proc.returncode != 0:
@@ -192,7 +188,7 @@ def main() -> int:
     cmd = [str(cli), "-m", str(mtp_model), "-n", "48", "-ngl", "99",
            "--temp", "0", "--no-prompt", *extra_rec, needle]
     proc = subprocess.run(cmd, check=False, capture_output=True, text=True, env=env)
-    gpu_env.require_device(proc.stderr, "RTX 5050")
+    gpu_env.require_device(proc.stderr, os.environ)
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr[-4000:])
         print("FAIL: recency+MTP needle rc", proc.returncode)
@@ -214,7 +210,7 @@ def main() -> int:
     cmd = [str(cli), "-m", str(mtp_model), "-n", "48", "-ngl", "99",
            "--temp", "0", "--no-prompt", *extra_ret, needle]
     proc = subprocess.run(cmd, check=False, capture_output=True, text=True, env=env)
-    gpu_env.require_device(proc.stderr, "RTX 5050")
+    gpu_env.require_device(proc.stderr, os.environ)
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr[-4000:])
         print("FAIL: retrieval+MTP rc", proc.returncode)

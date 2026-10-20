@@ -32,7 +32,6 @@ foreach ($entry in $manifest.files.PSObject.Properties) {
     }
 }
 $cache = Get-Content -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt') -Raw
-if ($cache -notmatch '(?m)^KVMEM_ENABLE_NVME:BOOL=OFF\r?$') { throw 'Expected an NVMe-disabled build' }
 if ($cache -notmatch '(?m)^CMAKE_BUILD_TYPE:STRING=Release\r?$') { throw 'Expected a Release build' }
 $cuda = $cache -match '(?m)^GGML_CUDA:BOOL=ON\r?$'
 if ($cuda) {
@@ -114,7 +113,7 @@ Copy-Item -LiteralPath $SourceManifest -Destination (Join-Path $OutputDir 'prove
 if ($ValidationReport) { Copy-Item -LiteralPath $ValidationReport -Destination (Join-Path $OutputDir 'VALIDATION.json') }
 $options = @{}
 foreach ($line in $cache.Split([char]10)) {
-    if ($line -match '^((?:CMAKE_(?:BUILD_TYPE|CUDA_ARCHITECTURES|CXX_COMPILER|CUDA_COMPILER)|BUILD_SHARED_LIBS|KVMEM_ENABLE_NVME|GGML_\w+)):[^=]+=(.*)') {
+    if ($line -match '^((?:CMAKE_(?:BUILD_TYPE|CUDA_ARCHITECTURES|CXX_COMPILER|CUDA_COMPILER)|BUILD_SHARED_LIBS|GGML_\w+)):[^=]+=(.*)') {
         $key = $Matches[1]
         $value = $Matches[2].TrimEnd([char]13)
         foreach ($pair in @(@($SourceDir, '<SOURCE_DIR>'), @($BuildDir, '<BUILD_DIR>'), @($CudaPath, '<CUDA_PATH>'))) {
@@ -126,7 +125,7 @@ foreach ($line in $cache.Split([char]10)) {
 $info = @{ component = $Component; status = 'experimental-windows-build'; version = (Get-Content (Join-Path $SourceDir 'VERSION') -Raw).Trim();
     source_archive_sha256 = (Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256).Hash.ToLowerInvariant();
     source_manifest_sha256 = (Get-FileHash -LiteralPath $SourceManifest -Algorithm SHA256).Hash.ToLowerInvariant();
-    build_options = $options; nvme_supported = $false; models_included = $false;
+    build_options = $options; active_kv_tiering = $true; ssd_persistence = 'process'; models_included = $false;
     msvc_toolset = $env:VCToolsVersion; os_version = [Environment]::OSVersion.VersionString;
     cpu_requirement = 'x86_64 with AVX2, FMA, F16C and BMI2';
     external_msvc_runtime_dlls = @($runtimeDlls); gpu_runtime_validation = 'not certified by packaging' }

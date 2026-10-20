@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cstring>
 #include <chrono>
+#include <random>
 
 static void check(bool ok, const char * message) { if (!ok) throw std::runtime_error(message); }
 template<class F> static void rejects(F f) {
@@ -48,7 +49,7 @@ struct fixture {
     uint64_t ram_cap, peak_ram = 0, peak_disk = 0;
     fixture(uint64_t unit, uint64_t ram_units = 15, uint64_t disk_units = 20, uint64_t group = 1)
         : a(1, 10, size_t(unit), group), b(2, 15, size_t(unit), group), ram_cap(ram_units * unit) {
-        files = std::make_unique<kvmem_session_files>(root, disk_units * unit);
+        files = std::make_unique<kvmem_session_files>(root, std::make_shared<kvmem::SpillFile>(root, disk_units * unit));
         for (uint32_t i = 0; i < b.payload->chunks.size(); ++i) b.payload->spill(*files, i);
         sample();
     }
@@ -144,8 +145,8 @@ static void failure_matrix() {
     // Every write/read/publication/deletion boundary, including failures after
     // several chunks have moved. After each failure reconstruct the ORIGINAL
     // A session first, then switch to B again, verifying exact data both ways.
-    for (const std::string phase : {"write", "rename", "read", "validated", "erase"}) {
-        const int operations = phase == "write" || phase == "rename" ? 10 : 15;
+    for (const std::string phase : {"write", "publish", "read", "validated", "erase"}) {
+        const int operations = phase == "write" || phase == "publish" ? 10 : 15;
         for (int fail_at = 1; fail_at <= operations; ++fail_at) {
             fixture f(4096);
             const auto p = f.plan();
@@ -210,15 +211,15 @@ static void partial_io_and_cleanup() {
             throw std::runtime_error("partial write and cleanup failure");
     };
     rejects([&] { f.execute(f.plan()); }); f.verify();
-    check(f.files->bytes() == before + f.a.payload->disk_bytes(), "failed temp cleanup lost quota charge");
-    check(!f.files->ready(1, 0) && f.a.payload->complete(), "failed write lost RAM source");
+    check(f.files->bytes() == before, "unpublished write leaked its extent reservation");
+    check(!f.files->contains(1) && f.a.payload->complete(), "failed write lost RAM source or published incomplete bytes");
     f.files->fault = {}; check(f.files->erase_chunk(1, 0), "retry temp cleanup");
     f.execute(f.plan()); f.verify();
     // Corrupt the checksum of cold A, after several other chunks have moved.
     {
-        std::fstream file(f.files->path(1), std::ios::binary|std::ios::in|std::ios::out);
-        file.seekg(-1, std::ios::end); char byte; file.read(&byte, 1); byte ^= 1;
-        file.seekp(-1, std::ios::end); file.write(&byte, 1);
+        const auto & extent = f.files->extent(1);
+        uint8_t byte; extent.read(extent.size()-1, &byte, 1); byte ^= 1;
+        extent.write(extent.size()-1, &byte, 1);
     }
     rejects([&] { f.execute(f.plan(true)); }); f.verify();
     check(!f.a.payload->complete(), "checksum failure exposed complete A");
@@ -238,7 +239,7 @@ static void raw_roundtrip() {
     kvmem_session_payload payload(7, 1, buffers, 4096);
     const auto root = std::filesystem::temp_directory_path() / ("kvmem-raw-transfer-" + std::to_string(std::random_device{}()));
     {
-        kvmem_session_files files(root, payload.disk_bytes());
+        kvmem_session_files files(root, std::make_shared<kvmem::SpillFile>(root, payload.disk_bytes()));
         const auto before = raw.allocated_bytes();
         for (uint32_t i = 0; i < payload.chunks.size(); ++i) payload.spill(files, i);
         check(raw.allocated_bytes() < before && payload.ram_bytes() == 0, "raw vectors not released");
@@ -249,7 +250,6 @@ static void raw_roundtrip() {
             check(raw.copy_v_gpu(block, l, got.data(), n) && !std::memcmp(got.data(), expected.data()+block*64*68, got.size()), "raw V mismatch");
         }
     }
-    std::filesystem::remove(root / kvmem_session_cache_dir::root_lock_name());
     std::filesystem::remove(root);
 }
 
@@ -272,7 +272,7 @@ static void shared_native_and_idle() {
         raw.snapshot_buffers(buffers);
         check(buffers.size() == 3, "idle serializer duplicated shared native K/V");
         kvmem_session_payload payload(7, 1, buffers);
-        kvmem_session_files files(root, 4096, {}, disk);
+        kvmem_session_files files(root, disk);
         const auto native_disk = raw.payload_bytes(true);
         files.fault = [](const char * point, int, uint32_t) {
             if (std::string(point) == "write_data") throw std::runtime_error("injected idle write failure");
@@ -313,7 +313,6 @@ static void shared_native_and_idle() {
         rejects([&] { payload.spill(files, 0); });
         check(payload.complete(), "shared D exhaustion released valid idle RAM");
     }
-    std::filesystem::remove(root / kvmem_session_cache_dir::root_lock_name());
     check(std::filesystem::is_empty(root), "shared spill file leaked");
     std::filesystem::remove(root);
 }

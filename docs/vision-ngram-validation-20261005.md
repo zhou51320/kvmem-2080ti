@@ -1,5 +1,8 @@
 # 图片＋MTP＋ngram 定向补测（2026-10-05）
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 本文记录 2026-10-05 的初次放行范围及诊断。当时未开放的 BF16/K8V4/RK8V4 图片 ngram，以及后来的 fp8/rk4v4/rk4v4-e8/rk2v4-e8，已由后续补测开放。当前源码边界见 [多后端运行](multi-backend.md)。以下初次测试结果和换行差异证据保留。
 
 放行固定/自适应 MTP 与 ngram1–63、单请求 INT8/NVFP4 resident/CPU 图片组合。
@@ -10,7 +13,7 @@
 
 ## 环境与实际执行证据
 
-RTX 5060 Ti `GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`，`Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`；
+RTX 5060 Ti `GPU-B`，`Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`；
 CUDA13.2/sm120a/VS2022 Release，8 路增量编译，沿用既有构建树和内嵌 UI。
 B768/R128、context8192、H512MiB、prefill128、图片上限256 merged tokens；
 min-match12、lookup0，逐字节 Main/MTP/GDN 搬运检查开启。

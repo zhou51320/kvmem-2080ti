@@ -31,7 +31,7 @@ def main():
     command = [args.server, '-m', args.model, '--host', '127.0.0.1', '--port', str(port),
                '-c', '8192', '--device', args.device, '--parallel', '2', '--threads-http', '8',
                '--kvmem', '--kvmem-budget', '2048', '--kvmem-gen-reserve', '1024',
-               '--kvmem-cpu-gb', '2', '--kvmem-nvme-gb', '0',
+               '--kvmem-cpu-gb', '2',
                '-fa', 'on', '--reasoning-effort', 'none', '--temp', '0',
                '--presence-penalty', '0', '--no-webui',
                '--spec-type', 'draft-mtp' if args.mtp else 'none']

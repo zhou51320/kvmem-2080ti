@@ -32,15 +32,24 @@ def main():
     p.add_argument('--model', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--device', default='CUDA0')
-    p.add_argument('--parallel', type=int, choices=(2, 3, 4), default=2)
+    p.add_argument('--parallel', type=int, choices=range(2, 9), default=2)
     p.add_argument('--cpu-gb', default='0.125')
     p.add_argument('--soft-gb', type=float, default=0)
     p.add_argument('--conversations', type=int, default=3)
     p.add_argument('--mmproj', type=Path)
     p.add_argument('--mmproj-device', default='none')
     p.add_argument('--mtp', action='store_true')
+    p.add_argument('--draft-model', type=Path, help='enable DFlash2 with this draft GGUF instead of MTP')
+    p.add_argument('--draft-tokens', type=int, choices=range(1,16), default=5)
+    p.add_argument('--host-mib', type=int, default=64)
+    p.add_argument('--disk-mib', type=int, default=0)
+    p.add_argument('--disk-path', type=Path)
     p.add_argument('--query-policy', choices=['user', 'legacy'], default='user')
     a = p.parse_args()
+    if a.mtp and a.draft_model:
+        p.error('choose MTP or DFlash2')
+    if a.host_mib < 1 or a.disk_mib < 0 or (a.disk_path and not a.disk_mib):
+        p.error('use positive H and a nonnegative D; a disk path requires D > 0')
     a.output.mkdir(parents=True, exist_ok=False)
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
@@ -48,10 +57,17 @@ def main():
     base = f'http://127.0.0.1:{port}'
     command = [str(a.server.resolve()), '-m', str(a.model.resolve()), '--device', a.device,
         '--host', '127.0.0.1', '--port', str(port), '-c', '8192', '--parallel', str(a.parallel),
-        '--threads-http', '8', '--kvmem-query-policy', a.query_policy, '--kvmem-conversations', str(a.conversations),
+        '--threads-http', str(max(8,2*a.parallel)), '--kvmem-query-policy', a.query_policy, '--kvmem-conversations', str(a.conversations),
         '--kvmem-cpu-gb', a.cpu_gb, '--kvmem-conversations-gb', str(a.soft_gb), '--kvmem-budget', '2048', '--kvmem-gen-reserve', '1024',
         '-fa', 'on', '--reasoning-effort', 'none', '--temp', '0', '--presence-penalty', '0',
-        '--spec-type', 'draft-mtp' if a.mtp else 'none', '--no-webui', '-t', '4', '-tb', '4']
+        '--spec-type', 'draft-dflash' if a.draft_model else 'draft-mtp' if a.mtp else 'none', '--no-webui', '-t', '4', '-tb', '4']
+    if a.disk_mib:
+        pos=command.index('--kvmem-cpu-gb');del command[pos:pos+2]
+        command += ['--kvmem-host-mib',str(a.host_mib),'--kvmem-disk-mib',str(a.disk_mib),
+                    '--kvmem-disk-path',str(a.disk_path or a.output/'cache')]
+    if a.draft_model:
+        command += ['--spec-draft-model',str(a.draft_model),'--spec-draft-n-max',str(a.draft_tokens),
+                    '--kvmem-mtp-state','snapshots']
     if a.mmproj:
         command += ['--mmproj', str(a.mmproj.resolve()), '--mmproj-device', a.mmproj_device,
                     '--image-min-tokens', '256', '--image-max-tokens', '512']
@@ -97,9 +113,10 @@ def main():
     def hit(record):
         return record['response']['usage']['prompt_cache_hit_tokens']
 
-    codes = dict(zip('ABCDE'[:a.parallel + 1], ('AMBER', 'VIOLET', 'GREEN', 'BLUE', 'RED')))
+    codes = dict(zip('ABCDEFGHI'[:a.parallel + 1], ('AMBER', 'VIOLET', 'GREEN', 'BLUE', 'RED', 'SILVER', 'GOLD', 'INDIGO', 'ORANGE')))
     colors = {'A': (255, 0, 0), 'B': (0, 0, 255), 'C': (0, 255, 0),
-              'D': (255, 255, 0), 'E': (255, 255, 255)}
+              'D': (255, 255, 0), 'E': (255, 255, 255), 'F': (255,0,255),
+              'G': (0,255,255), 'H': (128,128,128), 'I': (0,0,0)}
     histories = {}
     for name, code in codes.items():
         background = '\n'.join(f'Channel {name} routing note {i:03d}: this entry is stable.' for i in range(110))
@@ -240,6 +257,12 @@ def main():
             if a.soft_gb:
                 check('soft budget reclaims parked stores', stats()['evictions'] > 0)
             evidence['slots'] = get('/slots')
+            if a.disk_mib:
+                storage=evidence['slots'][0]['kvmem']['storage']
+                check('real public SSD read/write',storage['disk_read_bytes']>0 and storage['disk_written_bytes']>0)
+                check('public storage quota and errors',storage['disk_errors']==0 and
+                      storage['host_payload_bytes']<=storage['host_payload_budget_bytes'] and
+                      storage['disk_payload_bytes']<=storage['disk_payload_budget_bytes'])
         finally:
             if proc.poll() is None:
                 proc.terminate()

@@ -1,5 +1,8 @@
 # 自适应 MTP 组合定向补测（2026-10-05）
 
+> Device identifiers and private paths have been anonymized; reported measurements are unchanged.
+
+
 本报告记录 2026-10-05 的自适应 MTP 定向范围，包括当时的快速 prefill、并发和冷快照限制。当前源码边界见 [多后端运行](multi-backend.md)。
 
 10 个目标组合全部通过；真实模型启动 10 次，失败尝试 0 次。
@@ -18,7 +21,7 @@ NG31/63 仅用于 ngram 专项，其余实验 NG0；所有实验 lookup0。
 
 ## 环境与断言
 
-RTX 5060 Ti `GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c`；模型 `Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`，CUDA13.2/sm120a/VS2022 Release，8 路编译。
+RTX 5060 Ti `GPU-B`；模型 `Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer`，CUDA13.2/sm120a/VS2022 Release，8 路编译。
 history B384/R128/H2GiB；concurrency 每路B384/R128、H512MiB；vision B768/R128/H512MiB；
 disk B384/R128/H512MiB，1GiB磁盘限额；prefill128、device profile off、默认CUDA内存策略。
 保留逐字节 Main/MTP/状态搬运检查、Host预算及活动页退休断言。
