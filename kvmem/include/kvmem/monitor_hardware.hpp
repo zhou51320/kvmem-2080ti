@@ -13,6 +13,11 @@
 #endif
 #if __has_include(<nvml.h>)
 #include <nvml.h>
+// NVML defines this generic macro for its declarations. Keep it from
+// colliding with llama.cpp/mtmd.h, which uses a two-argument DEPRECATED.
+#ifdef DEPRECATED
+#undef DEPRECATED
+#endif
 #define KVMEM_MONITOR_NVML 1
 #endif
 
