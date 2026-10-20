@@ -12,12 +12,10 @@
 #include <dlfcn.h>
 #endif
 #if __has_include(<nvml.h>)
+#pragma push_macro("DEPRECATED")
 #include <nvml.h>
-// NVML defines this generic macro for its declarations. Keep it from
-// colliding with llama.cpp/mtmd.h, which uses a two-argument DEPRECATED.
-#ifdef DEPRECATED
-#undef DEPRECATED
-#endif
+// NVML and llama.cpp use incompatible DEPRECATED macro signatures.
+#pragma pop_macro("DEPRECATED")
 #define KVMEM_MONITOR_NVML 1
 #endif
 
