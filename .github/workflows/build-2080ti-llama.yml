@@ -33,7 +33,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             ca-certificates git python3 python3-pip ninja-build pkg-config \
-            libcurl4-openssl-dev patchelf binutils file
+            libcurl4-openssl-dev patchelf binutils file time
           python3 -m pip install --break-system-packages --ignore-installed 'cmake>=3.28,<4'
 
       - uses: actions/checkout@v4
