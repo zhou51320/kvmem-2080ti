@@ -39,6 +39,53 @@
     disconnected: "已断开",
     error: "失败",
   }, { get: (map, name) => t(map[name] || "处理中") });
+  function requestStatus(row) {
+    if (row.finish_reason === "length") return t(row.finish_phase === "thinking" ? "思考阶段达到输出上限" : "达到输出上限");
+    if (["cancel", "cancelled"].includes(row.finish_reason)) return t("已停止");
+    if (row.finish_reason === "disconnect") return t("连接中断");
+    if (row.finish_reason === "error" || row.status === "error") return t("生成失败");
+    if (row.finish_reason === "stop") return t("正常结束");
+    if (row.finish_reason === "tool_calls") return t("工具调用");
+    if (row.phase === "thinking") return t("思考中");
+    if (row.phase === "answering") return t("输出正文");
+    return statuses[row.status];
+  }
+  function meanSpeed(row) { return row?.decode_tps_mean ?? row?.decode_tps; }
+  // NInfer's operational log reports engine throughput for the preceding interval.
+  // The request's decode_tps is cumulative and must remain the request mean.
+  function parseNinferThroughput(log) {
+    if (!log?.running || log.backend !== 'ninfer' || typeof log.text !== 'string') return null;
+    let sample = null;
+    const clean = log.text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+    for (const line of clean.split('\n')) {
+      const match = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+INFO\s+throughput \| ([\d.]+)\s*(ms|s) \| (.*)$/);
+      if (!match) continue;
+      const at = new Date(match[1].replace(' ', 'T')).getTime();
+      const seconds = Number(match[2]) / (match[3] === 'ms' ? 1000 : 1);
+      const decode = match[4].match(/(?:^| \| )decode ([\d.]+)([kMGT]?) tok\/s \([\d,]+ tok\)(?: \| |$)/);
+      if (!/(?:^| \| )running \d+/.test(match[4])) continue;
+      if (!decode && /(?:^| \| )decode /.test(match[4])) { sample = null; continue; }
+      const rate = decode ? Number(decode[1]) * 1000 ** ['', 'k', 'M', 'G', 'T'].indexOf(decode[2]) : 0;
+      if (Number.isFinite(at) && Number.isFinite(rate) && rate >= 0 && seconds > 0 && at >= log.started_at)
+        sample = {at, seconds, rate};
+    }
+    return sample;
+  }
+  function ninferLiveSpeed(snapshot, row, active, sample) {
+    if (!active || row?.status !== 'generating' || !sample) return null;
+    const age = snapshot.sampled_at_ms - sample.at;
+    // Exclude old sessions/requests and stale reports, including after log failure.
+    return age >= -1000 && age <= sample.seconds * 2000 + 2000 && sample.at >= row.started_at_ms
+      ? sample.rate : null;
+  }
+  let throughputLog = null;
+  function requestLiveSpeed(snapshot, row, active) {
+    if (!active || row?.status !== 'generating' || !number(row.decode_tps_live) ||
+        !number(row.decode_tps_sampled_at_ms) || !number(row.decode_tps_window_ms)) return null;
+    const age = snapshot.sampled_at_ms - row.decode_tps_sampled_at_ms;
+    return row.decode_tps_live >= 0 && age >= -1000 && age <= Math.max(6000, row.decode_tps_window_ms * 2) + 1000
+      ? row.decode_tps_live : null;
+  }
   let theme = storage(localStorage, "kvmem-monitor-theme") || "dark";
   let key = storage(sessionStorage, "kvmem-monitor-key") || "";
   let selected = "",
@@ -56,7 +103,7 @@
     authNeeded = false,
     lastGood = 0,
     stopped = false;
-  let lastError = null, restartNotice = false, consoleRuntime = null;
+  let lastError = null, restartNotice = false, consoleRuntime = null, runtimePropsInstance = null;
   let series = {},
     previousDisk = null,
     speedRequest = null,
@@ -103,6 +150,7 @@
     window.dispatchEvent(new CustomEvent("kvmem-page-change", {detail: name}));
   }
   $$("[data-page]").forEach((el) => (el.onclick = () => page(el.dataset.page)));
+  window.addEventListener("kvmem-navigate", event => page(event.detail));
   function bar(name, value) {
     $(`[data-bar="${name}"]`).style.width =
       `${number(value) ? Math.max(0, Math.min(100, value)) : 0}%`;
@@ -192,13 +240,13 @@
       const badge = document.createElement("span");
       badge.className = "s-badge";
       badge.dataset.kind = row.status;
-      badge.textContent = statuses[row.status] || t("处理中");
+      badge.textContent = requestStatus(row);
       td.append(badge);
       tr.append(td);
       const values = [
         fmt(row.prompt_tokens),
         fmt(row.generated_tokens),
-        fmt(row.decode_tps, 1),
+        fmt(meanSpeed(row), 1),
         `${fmt(row.elapsed_ms / 1000, 1)}s`,
       ];
       for (const value of values) {
@@ -225,9 +273,17 @@
     $("[data-detail]").hidden = !row;
     if (!row) return;
     $("[data-detail-title]").textContent =
-      t("请求 #{0} · {1}", row.id, statuses[row.status] || t("处理中"));
+      t("请求 #{0} · {1}", row.id, requestStatus(row));
     $("[data-detail-body]").textContent =
-      t("入口：{0}\n输入 {1} tokens · 复用 {2} · 输出 {3}\n预填充 {4} tok/s · 输入复用率 {5}%\n输出上限 {6} · 耗时 {7} 秒", row.endpoint, fmt(row.prompt_tokens), fmt(row.cached_tokens), fmt(row.generated_tokens), fmt(row.prefill_tps, 1), fmt(ratio(row.cached_tokens, row.prompt_tokens), 1), fmt(row.limit), fmt(row.elapsed_ms / 1000, 2));
+      t("入口：{0}\n输入 {1} tokens · 复用 {2} · 输出 {3}\n预填充 {4} tok/s · 输入复用率 {5}%\n输出上限 {6} · 耗时 {7} 秒", row.endpoint, fmt(row.prompt_tokens), fmt(row.cached_tokens), fmt(row.generated_tokens), fmt(row.prefill_tps, 1), fmt(ratio(row.cached_tokens, row.prompt_tokens), 1), fmt(row.limit), fmt(row.elapsed_ms / 1000, 2)) + "\n" +
+      t("预填充 {0}s · 首 token {1}s",fmt(number(row.prefill_ms)?row.prefill_ms/1000:null,2),fmt(number(row.ttft_ms)?row.ttft_ms/1000:null,2));
+    const lines = [];
+    if (number(row.decode_ms)) lines.push(t("解码耗时 {0}s", fmt(row.decode_ms / 1000, 2)));
+    if (number(row.drafts_offered) && number(row.drafts_accepted))
+      lines.push(t("推测解码：提议 {0} / 接受 {1} · 接受率 {2}%", fmt(row.drafts_offered), fmt(row.drafts_accepted), fmt(ratio(row.drafts_accepted, row.drafts_offered), 1)));
+    if (number(row.expert_hit_rate) && row.expert_hit_rate >= 0 && row.expert_hit_rate <= 1)
+      lines.push(t("所选请求专家命中率 {0}%", fmt(row.expert_hit_rate * 100, 1)));
+    if (lines.length) $("[data-detail-body]").textContent += "\n" + lines.join("\n");
   }
   function gauge(element, percent, label) {
     let arc = element.querySelector("[data-dial-arc]");
@@ -306,6 +362,7 @@
     text("execution", !known ? t("推理设备待确认") : !bound.length ? t("CPU 推理") : bound.length === 1 ? t("单卡推理") : t("{0} 卡协同 · {1}", bound.length, modeLabel));
     text("gpu-count", known ? t("{0} 张设备参与当前服务", bound.length) : t("设备绑定信息未提供"));
     $("[data-device-note]").textContent = !known ? t("当前服务尚未提供设备绑定信息；不根据负载猜测推理显卡。") : !bound.length ? t("当前模型未使用显卡。") : t("只显示当前服务绑定的显卡 · 整卡读数包含其他进程");
+    $("[data-device-note]").hidden = known && bound.length > 0;
     const grid = $("[data-gpus]");
     grid.dataset.count = String(bound.length);
     const signature = JSON.stringify([i18n.language, bound]);
@@ -328,7 +385,7 @@
         load: fmt(g.utilization_percent),
         vram: fmt(number(g.used_bytes) ? g.used_bytes / GiB : null, 1),
         total: number(g.total_bytes) ? t("共 {0} GiB", fmt(g.total_bytes / GiB, 1)) : t("容量未采集"),
-        capacity: number(ratio(g.used_bytes, g.total_bytes)) ? t("已用 {0}% · 含其他进程", fmt(ratio(g.used_bytes, g.total_bytes))) : t("比例未采集"),
+        capacity: number(ratio(g.used_bytes, g.total_bytes)) ? t("已用 {0}%", fmt(ratio(g.used_bytes, g.total_bytes))) : t("比例未采集"),
         temp: fmt(g.temperature_c), power: fmt(g.power_w, 1),
         pcie: number(g.pcie_generation) ? `Gen${g.pcie_generation} ×${fmt(g.pcie_width)}` : "—",
         rx: fmt(number(g.pcie_rx_bytes_per_second) ? g.pcie_rx_bytes_per_second / MiB : null, 1),
@@ -353,6 +410,7 @@
       ? list.reduce((n, x) => n + x[field], 0)
       : null;
   function cacheData() {
+    if (state.backend === "polystrata") return state.kvmem || {};
     if (state.backend === "ninfer")
       return stats?.kvmem || props.kvmem?.usage || {};
     const storage = slots.map((s) => s.kvmem?.storage).filter(Boolean),
@@ -372,9 +430,344 @@
       "disk_payload_budget_bytes",
       "disk_read_bytes",
       "disk_written_bytes",
+      "disk_reads",
+      "disk_writes",
+      "disk_errors",
     ])
       data[name] = sum(storage, name);
     return data;
+  }
+  function renderActualSpec(request) {
+    const actual = $('[data-value="speculative-live"]');
+    if (actual) {
+      const mtp = number(request?.mtp_drafts_offered) && number(request?.mtp_drafts_accepted);
+      const offered = mtp ? request.mtp_drafts_offered : request?.drafts_offered;
+      const accepted = mtp ? request.mtp_drafts_accepted : request?.drafts_accepted;
+      actual.hidden = !number(offered) || !number(accepted);
+      actual.textContent = t(mtp ? "所选请求 MTP · 接受 {0} / 提议 {1}" : "所选请求推测 · 接受 {0} / 提议 {1}",fmt(accepted),fmt(offered));
+      const ng = request?.speculative;
+      if (number(ng?.ngram_drafted_tokens) && ng.ngram_drafted_tokens > 0)
+        actual.textContent += t(" · N-gram 接受 {0} / 提议 {1}",fmt(ng.ngram_accepted_tokens),fmt(ng.ngram_drafted_tokens));
+    }
+  }
+  const metricLabels = {
+    active_sessions:['活动会话','Active sessions'], retained_sessions_limit:['保留会话上限','Retained session limit'],
+    history_misses:['历史未命中','History misses'], history_swaps:['历史交换','History swaps'],
+    history_restored_bytes:['历史恢复量','History restored'], history_spilled_bytes:['历史转存量','History spilled'],
+    disk_read_bytes:['磁盘累计读取','Total disk reads'], disk_written_bytes:['磁盘累计写入','Total disk writes'],
+    disk_reads:['磁盘读取次数','Disk read operations'], disk_hits:['磁盘命中次数','Disk hits'],
+    disk_writes:['磁盘写入次数','Disk write operations'], disk_errors:['磁盘错误','Disk errors'],
+    checkpoint_bytes:['检查点容量','Checkpoint size'], checkpoint_tokens:['检查点 tokens','Checkpoint tokens'],
+    resident_pages:['驻留页','Resident pages'], mtp_resident_pages:['MTP 驻留页','MTP resident pages'],
+    statistics_bytes:['统计数据占用','Statistics memory'], statistics_staging_bytes:['统计暂存占用','Statistics staging'],
+    transfer_staging_bytes:['传输暂存占用','Transfer staging'], active_payload_reservation_bytes:['活动数据预留','Active payload reservation'],
+    retained_payload_budget_bytes:['保留数据预算','Retained payload budget'], evaluated_tokens:['已计算 tokens','Evaluated tokens'],
+    selected_tokens:['驻留 token 预算','Resident token budget'], reserve_tokens:['生成预留 tokens','Generation reserve tokens'],
+    host_payload_bytes:['RAM 数据占用','RAM payload'], host_payload_budget_bytes:['RAM 数据预算','RAM payload budget'],
+    disk_payload_bytes:['SSD 数据占用','SSD payload'], disk_payload_budget_bytes:['SSD 数据预算','SSD payload budget'],
+    retained_sessions:['保留会话','Retained sessions'], history_hits:['历史命中','History hits'], history_evictions:['历史淘汰','History evictions'],
+    max_context:['逻辑上下文上限','Context limit'], max_concurrency:['并发上限','Concurrency limit'],
+    max_pending_requests:['排队上限','Pending request limit'], max_admitted_requests:['接纳上限','Admission limit'],
+    kv_capacity_pages:['KV 容量页数','KV capacity pages'], kv_capacity_tokens:['KV 容量 tokens','KV capacity tokens'], kv_page_tokens:['每页 tokens','Tokens per page'],
+    device_state_slots:['设备状态槽','Device state slots'], host_state_slots:['主机状态槽','Host state slots'], host_kv_bytes:['主机 KV','Host KV'],
+    depth:['排队数','Queue depth'], entries:['排队请求','Queued requests'], request_id:['请求 ID','Request ID'],
+    admitted:['已接纳','Admitted'], decode_ready:['待解码','Decode ready'], materializing:['准备状态','Materializing'],
+    prefilling:['预填充中','Prefilling'], running:['执行中','Running'], waiting:['等待中','Waiting'], peak_admitted:['接纳峰值','Peak admitted'],
+    average_size:['平均批大小','Average batch size'], rounds:['执行轮数','Rounds'], row_rounds:['请求执行轮数','Row rounds'],
+    committed_decode_tokens:['已提交生成 tokens','Committed decode tokens'], computed_prefill_tokens:['新算输入 tokens','Computed prefill tokens'],
+    reused_prompt_tokens:['复用输入 tokens','Reused prompt tokens'], decode_rounds:['解码轮数','Decode rounds'], decode_row_rounds:['解码请求轮数','Decode row rounds'],
+    committed_decode:['已提交生成 tokens','Committed decode tokens'], computed_prefill:['新算输入 tokens','Computed prefill tokens'],
+    decode:['生成','Decode'], prefill:['预填充','Prefill'], bytes:['数据量','Bytes'], pages:['页数','Pages'], count:['次数','Count'], seconds:['耗时','Time'],
+    d2d:['设备间','Device to device'], d2h:['设备到主机','Device to host'], h2d:['主机到设备','Host to device'],
+    captures:['捕获','Captures'], selections:['选择','Selections'], state_operations:['状态操作','State operations'],
+    main_kv_transfers:['主 KV 传输','Main KV transfers'], backend_kv_transfers:['后端 KV 传输','Backend KV transfers'], state_transfers:['状态传输','State transfers'],
+    pressure:['压力处理','Pressure'], occupancy:['占用','Occupancy'], completed:['完成','Completed'], skipped:['跳过','Skipped'], aborted:['中止','Aborted'],
+    forks:['分叉','Forks'], moves:['移动','Moves'], restores:['恢复','Restores'], spills:['转存','Spills'],
+    active:['活动','Active'], resident:['驻留','Resident'], parked:['停放','Parked'], max:['上限','Limit'],
+    extends:['会话延续次数','Conversation extensions'], refusals:['拒绝','Refusals'], resets:['重置','Resets'], evictions:['淘汰','Evictions'], switches:['切换','Switches'],
+    enabled:['启用','Enabled'], verified:['已验证','Verified'], cuda_residency:['CUDA 驻留','CUDA residency'],
+    cuda_free_bytes:['CUDA 可用显存','CUDA free memory'], cuda_total_bytes:['CUDA 总显存','CUDA total memory'], dedicated_bytes:['专用显存','Dedicated memory'],
+    shared_bytes:['共享内存','Shared memory'], host_used_bytes:['主机已用','Host used'], host_pool_bytes:['主机池','Host pool'],
+    device_allocated_bytes:['设备已分配','Device allocated'], verified_reserve_bytes:['已验证预留','Verified reserve'], shared_baseline_bytes:['共享内存基线','Shared memory baseline'],
+    elapsed_seconds:['累计耗时','Cumulative time'], work_class_seconds:['工作分类耗时','Work class time'], device_wait_seconds:['设备等待时间','Device wait time'],
+    detail_invocations:['调用次数','Invocations'], detail_subset_seconds:['明细子集耗时','Detail subset time'],
+    detail_microseconds_per_invocation:['每次调用耗时','Time per invocation'], units:['工作单元','Work units'],
+    decode_device_wait_microseconds_per_round:['每轮解码设备等待','Device wait per decode round'],
+    decode_host_microseconds_per_round:['每轮解码主机耗时','Host time per decode round'],
+    decode_host_microseconds_per_row_round:['每请求轮解码主机耗时','Host time per decode row round'],
+  };
+  function metricName(name) {
+    return metricLabels[name]?.[i18n.language === 'en' ? 1 : 0] || name.replaceAll('_', ' ');
+  }
+  function metricValue(path, value) {
+    if (value === null) return '—';
+    if (typeof value === 'boolean') return t(value ? '是' : '否');
+    if (!number(value)) return typeof value === 'string' ? value.slice(0,256) : '—';
+    const leaf = path.at(-1);
+    if (leaf === 'bytes' || leaf.endsWith('_bytes') || leaf === 'bytes_max') return fmt(value / MiB, 2) + ' MiB';
+    if (path.some(p => p.includes('microseconds'))) return fmt(value, 2) + ' μs';
+    if (leaf.endsWith('_ms')) return fmt(value, 2) + ' ms';
+    if (path.some(p => p === 'seconds' || p.endsWith('_seconds'))) return fmt(value, 2) + ' s';
+    if (path.includes('throughput_tokens_per_second')) return fmt(value, 2) + ' tok/s';
+    return fmt(value, Number.isInteger(value) ? 0 : 3);
+  }
+  // Render only the selected native metric groups, never prompts or responses.
+  // Keep the details elements stable so polling does not collapse open sections.
+  function renderNativeMetrics() {
+    const root = $('[data-backend-sections]');
+    if (!root) return;
+    const groups = [];
+    if (state.backend === 'ninfer' && stats) {
+      for (const [key, label] of [
+        ['requests','请求状态'], ['queue','等待队列'], ['capacity','引擎容量'], ['occupancy','引擎驻留'],
+        ['memory','内存分配'], ['context_cache','上下文缓存'], ['scheduler','调度器'], ['decode_batch','解码批处理'],
+        ['counters','引擎累计计数'], ['tokens','引擎累计 tokens'], ['throughput_tokens_per_second','启动以来平均吞吐'],
+        ['host_work','主机与设备耗时'], ['experts','专家缓存'],
+      ]) if (stats[key] && typeof stats[key] === 'object') groups.push({id:key,label,value:stats[key]});
+      if (number(stats.uptime_seconds)) groups.push({id:'uptime',label:'运行时间',value:{uptime_seconds:stats.uptime_seconds}});
+    }
+    if (state.backend === 'llamacpp') slots.forEach((slot,index) => {
+      if (slot.kvmem?.conversations) groups.push({id:'lane-'+index,label:t('执行槽 {0} · 会话',fmt(slot.id ?? index)),value:slot.kvmem.conversations});
+    });
+    const keep = new Set();
+    for (const group of groups) {
+      const id = state.backend + '/' + group.id;
+      keep.add(id);
+      let section = [...root.children].find(el => el.dataset.metricGroup === id);
+      if (!section) {
+        section = document.createElement('details');section.dataset.metricGroup=id;
+        section.className='s-cache-details';section.append(document.createElement('summary'),document.createElement('dl'));
+        section.lastChild.className='s-facts';root.append(section);
+      }
+      section.firstChild.textContent=t(group.label);
+      const rows=[];
+      function visit(value,path=[]) {
+        if (rows.length >= 512 || path.length > 8) return;
+        if (value && typeof value === 'object') {
+          for (const [key,item] of Object.entries(value)) {
+            if (['prompt','messages','content','response','api_key','authorization'].includes(key)) continue;
+            visit(item,[...path,key]);
+          }
+        } else rows.push([path,metricValue([group.id,...path],value)]);
+      }
+      visit(group.value);
+      const signature=JSON.stringify([i18n.language,rows]);
+      if (section.dataset.signature !== signature) {
+        section.dataset.signature=signature;
+        const fragment=document.createDocumentFragment();
+        for (const [path,value] of rows) {
+          const dt=document.createElement('dt'),dd=document.createElement('dd');
+          dt.textContent=path.map(metricName).join(' / ');dt.title=group.id+'.'+path.join('.');dd.textContent=value;
+          fragment.append(dt,dd);
+        }
+        section.lastChild.replaceChildren(fragment);
+      }
+    }
+    for (const section of [...root.children]) if (!keep.has(section.dataset.metricGroup)) section.remove();
+    $('[data-backend-metrics]').hidden=!groups.length;
+  }
+  function renderCacheMetrics(cache) {
+    const root=$('[data-cache-metrics]');if (!root) return;
+    const fragment=document.createDocumentFragment();
+    for (const name of [
+      'disk_read_bytes','disk_written_bytes','disk_reads','disk_hits','disk_writes','disk_errors',
+      'history_misses','history_swaps','history_restored_bytes','history_spilled_bytes',
+      'active_sessions','retained_sessions_limit','active_payload_reservation_bytes','retained_payload_budget_bytes',
+      'checkpoint_bytes','checkpoint_tokens','resident_pages','mtp_resident_pages','evaluated_tokens',
+      'selected_tokens','reserve_tokens','statistics_bytes','statistics_staging_bytes','transfer_staging_bytes',
+    ]) if (Object.hasOwn(cache,name)) {
+      const dt=document.createElement('dt'),dd=document.createElement('dd');
+      dt.textContent=metricName(name);dt.title=name;dd.textContent=metricValue([name],cache[name]);
+      if (name==='disk_errors' && cache[name]>0) dd.className='s-metric-warning';
+      fragment.append(dt,dd);
+    }
+    root.replaceChildren(fragment);
+  }
+  function renderRuntimeConfiguration() {
+    const root = $('[data-runtime-config]');
+    if (!root) return;
+    const tr = (zh,en) => i18n.language === 'en' ? en : zh;
+    const running = ['starting','ready'].includes(consoleRuntime?.state);
+    const config = running ? consoleRuntime.active_config?.parameters || {} : {};
+    const backend = config.Backend || state?.backend;
+    // A new launch must never inherit the preceding worker's /props, even on the same backend.
+    const service = !consoleRuntime || (consoleRuntime.state === 'ready' &&
+      runtimePropsInstance === consoleRuntime.instance && state?.backend === backend) ? props || {} : {};
+    const plan = running ? consoleRuntime.token_settings || {} : {};
+    const scoring = running ? consoleRuntime.effective_scoring || {} : {};
+    const k = service.kvmem || {}, caps = k.capabilities || {}, spec = service.speculative || {};
+    const generation = service.default_generation_settings || {}, defaults = service.effective_settings?.effective || {};
+    const present = value => value !== undefined && value !== null && value !== '' &&
+      (typeof value !== 'number' || Number.isFinite(value));
+    const first = (...values) => values.find(present);
+    const boolean = value => typeof value === 'boolean' ? value : undefined;
+    const numeric = value => number(value) ? value : undefined;
+    const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
+    const format = value => typeof value === 'boolean' ? tr(value?'开启':'关闭',value?'On':'Off')
+      : number(value) ? value.toLocaleString(i18n.language,{maximumFractionDigits:3}) : String(value);
+    const tokens = value => `${fmt(value)} tokens`;
+    const memory = value => value === 0 ? tr('关闭','Off') : `${fmt(value / MiB)} MiB`;
+    const outputLimit = value => value <= 0 ? tr('随剩余上下文','Remaining context') : tokens(value);
+    const outputValue = value => number(value) && value <= 0 ? -1 : value;
+    const algorithm = value => ({mtp:'MTP',dflash:'DFlash',dflash2:'DFlash2',none:tr('关闭','Off')})[value] || String(value);
+    const policy = value => ({adaptive:tr('自适应','Adaptive'),fixed:tr('固定长度','Fixed length')})[value] || String(value);
+    const canonicalKv = value => typeof value === 'string' ? value.toLowerCase().replace(/^fp16$/,'f16') : undefined;
+    const kvPair = (a,b) => present(a) || present(b) ? [canonicalKv(a),canonicalKv(b)] : undefined;
+    const kvFormat = value => value[0] && value[0] === value[1] ? value[0] : `K ${value[0] || '—'} / V ${value[1] || '—'}`;
+    const rows = [];
+    function row(group,id,labels,reported,requested,options={}) {
+      const planned = options.planned;
+      const value = first(reported,planned,requested);
+      if (options.optional && !present(value)) return;
+      const source = present(reported) ? 'service' : present(planned) ? 'plan' : present(requested) ? 'launch' : 'unknown';
+      const display = options.format || format;
+      const notes = [];
+      const original = first(options.original,requested);
+      if (present(planned) && present(original) && !same(planned,original))
+        notes.push(tr('填写','Entered') + ` ${display(original)} → ` + tr('启动','Launch') + ` ${display(planned)}`);
+      const expected = first(planned,requested);
+      const differs = present(reported) && present(expected) && !same(reported,expected);
+      if (differs) notes.push(tr('启动值','Launch value') + ` ${display(expected)} · ` + tr('服务报告不同','Service differs'));
+      if (options.note) notes.push(options.note);
+      rows.push({group,id,label:tr(...labels),source,value:present(value)?display(value):tr('未报告','Not reported'),
+        note:notes.join(' · '),differs});
+    }
+    function token(group,key,labels,reported) {
+      row(group,key,labels,numeric(reported),numeric(config[key]),{format:tokens,
+        planned:numeric(plan.effective?.[key]),original:numeric(plan.requested?.[key])});
+    }
+    token('primary','Context',['上下文上限','Context limit'],generation.n_ctx);
+    token('primary','Budget',['历史 KV 预算 B','History KV budget B'],first(k.selected_tokens,k.budget_tokens));
+    token('primary','Reserve',['生成预留 R','Generation reserve R'],k.reserve_tokens);
+    row('primary','KvType',['KV 缓存格式','KV cache format'],kvPair(k.kv_type,k.kv_type),
+      kvPair(first(config.KvTypeK,config.KvType),first(config.KvTypeV,config.KvType)),{format:kvFormat});
+    token('primary','Prefill',['预填充块大小','Prefill chunk'],undefined);
+    const reportedAlgorithm = first(spec.algorithm,typeof k.mtp === 'boolean' ? k.mtp ? 'mtp' : 'none' : undefined);
+    const requestedAlgorithm = first(config.SpeculativeMode,typeof config.MtpEnabled === 'boolean' ? config.MtpEnabled ? 'mtp' : 'none' : undefined);
+    row('primary','SpeculativeMode',['推测解码','Speculative decoding'],reportedAlgorithm,requestedAlgorithm,{format:algorithm});
+    row('primary','Concurrency',['并发请求数','Concurrent requests'],first(service.total_slots,k.parallel,k.max_active_requests,caps.max_active_requests),config.Concurrency);
+    row('primary','MaxTokens',['默认输出上限','Default output limit'],outputValue(first(defaults.max_tokens,generation.params?.n_predict,k.generation_limit)),outputValue(config.MaxTokens),{format:outputLimit});
+
+    row('cache','KvmemEnabled',['KVMem','KVMem'],boolean(k.enabled),undefined,{optional:true});
+    row('cache','BlockTokens',['KV 管理块','KV block size'],first(numeric(scoring.block_tokens),numeric(k.block_tokens)),numeric(config.BlockTokens),{format:tokens,planned:numeric(plan.block_tokens)});
+    token('cache','SinkTokens',['保留开头','Retained prefix'],k.sink_tokens);
+    token('cache','RecentTokens',['保留最近','Retained suffix'],k.recent_tokens);
+    row('cache','HostMiB',['RAM 历史预算','RAM history budget'],first(k.host_payload_budget_bytes,number(k.host_mib)?k.host_mib*MiB:undefined),
+      number(config.HostMiB)?config.HostMiB*MiB:undefined,{format:memory});
+    const diskOff = k.ssd === false || caps.ssd_enabled === false;
+    row('cache','DiskMiB',['SSD 历史预算','SSD history budget'],diskOff?0:first(caps.disk_budget_bytes,number(k.disk_mib)?k.disk_mib*MiB:undefined),
+      config.DiskEnabled===false?0:number(config.DiskMiB)?config.DiskMiB*MiB:undefined,{format:memory});
+    if (config.DiskEnabled !== false) row('cache','DiskPath',['SSD 目录','SSD directory'],undefined,config.DiskPath,{optional:true});
+    const retained = backend === 'polystrata' ? number(k.retained_sessions)?Math.max(0,k.retained_sessions-1):undefined
+      : first(k.retained_sessions_limit,caps.retained_sessions_limit);
+    row('cache','RetainedSessions',['额外保留空闲会话','Idle sessions to retain'],retained,
+      backend==='polystrata'&&number(config.RetainedSessions)?Math.max(0,config.RetainedSessions-1):config.RetainedSessions,{optional:true});
+    row('cache','QueryScorer',['召回评分','Recall scorer'],first(scoring.scorer,k.query_scorer),config.QueryScorer);
+    row('cache','ScoreAggregation',['GQA 聚合','GQA aggregation'],scoring.agg,config.ScoreAggregation,{optional:true});
+    row('cache','GraphAlpha',['图传播强度 α','Graph strength α'],first(scoring.graph_alpha,k.graph_alpha),config.GraphAlpha,{optional:true});
+    row('cache','Lrfu',['历史累计 LRFU','LRFU history'],boolean(scoring.lrfu),boolean(config.Lrfu),{optional:true});
+    row('cache','LrfuLambda',['历史衰减系数','History decay'],scoring.lambda,config.LrfuLambda,{optional:true});
+    row('cache','LrfuTopFraction',['正向奖励候选比例','Positive reward fraction'],scoring.top_frac,config.LrfuTopFraction,{optional:true});
+    row('cache','QueryMaxTokens',['问题评分上限','Query scoring limit'],first(scoring.query_max_tokens,k.query_max_tokens),config.QueryMaxTokens,{format:tokens});
+    row('cache','QueryReplayMaxTokens',['完整回放上限','Full replay limit'],first(scoring.query_replay_max_tokens,k.query_replay_max_tokens),config.QueryReplayMaxTokens,{format:tokens});
+
+    const mode = first(reportedAlgorithm,requestedAlgorithm);
+    if (mode && mode !== 'none') {
+      row('engine','DraftTokens',['草稿长度上限','Draft token limit'],first(spec.draft_tokens,k.mtp_drafts),first(config.DraftTokens,config.MtpDrafts),{format:tokens});
+      row('engine','DraftPolicy',['草稿长度策略','Draft length policy'],typeof spec.adaptive==='boolean'?spec.adaptive?'adaptive':'fixed':undefined,
+        first(config.DraftPolicy,typeof config.AdaptiveMtp==='boolean'?config.AdaptiveMtp?'adaptive':'fixed':undefined),{format:policy});
+      if (mode.startsWith('dflash')) row('engine','DraftModel',['草稿模型','Draft model'],undefined,config.DraftModel,{optional:true});
+    }
+    if (backend === 'ninfer') {
+      row('engine','NgramDrafts',['N-gram 草稿上限','N-gram draft limit'],first(spec.ngram_draft_tokens,caps.ngram_drafts),config.NgramDrafts,
+        {format:value=>value===0?tr('关闭','Off'):tokens(value)});
+      row('engine','NgramMinMatch',['N-gram 最短匹配','N-gram minimum match'],caps.ngram_min_match,config.NgramMinMatch,{optional:true,format:tokens});
+      row('engine','FastPrefill',['快速预填充','Fast prefill'],undefined,boolean(config.FastPrefill),{optional:true});
+      row('engine','DeviceProfile',['设备性能配置','Device profile'],undefined,config.DeviceProfile,{optional:true});
+    }
+    row('engine','StageLayers',['多卡层数分配','Layers per device'],service.execution?.stage_layers?.length?service.execution.stage_layers:undefined,
+      config.StageLayers?.length?config.StageLayers:undefined,{optional:true,format:value=>Array.isArray(value)?value.join(' / '):String(value)});
+    row('engine','VramReserveMiB',['显存预留','VRAM reserve'],numeric(k.vram_reserve_mib),numeric(config.VramReserveMiB),{optional:true,format:value=>`${fmt(value)} MiB`});
+    row('engine','Vision',['图像输入','Image input'],first(boolean(service.modalities?.vision),boolean(k.vision?.enabled),boolean(k.vision)),boolean(config.Vision),{optional:true});
+    if (first(service.modalities?.vision,k.vision?.enabled,boolean(k.vision),config.Vision) === true) {
+      row('engine','VisionTokens',['图像 token 上限','Image token limit'],undefined,config.VisionTokens,{optional:true,format:tokens});
+      row('engine','VisionResidency',['图像编码器位置','Vision encoder placement'],typeof k.vision?.gpu==='boolean'?k.vision.gpu?'resident':'cpu':undefined,
+        config.VisionResidency,{optional:true,format:value=>({resident:'GPU',cpu:'CPU'})[value]||String(value)});
+    }
+    row('engine','ListenHost',['监听地址','Listen address'],undefined,config.ListenHost,{optional:true});
+    row('engine','Port',['服务端口','Service port'],undefined,config.Port,{optional:true,format:String});
+    row('engine','Worker',['后端程序','Backend executable'],undefined,config.Worker,{optional:true});
+
+    const thinkingMode = first(boolean(k.defaults?.enable_thinking),present(defaults.reasoning_effort)?defaults.reasoning_effort!=='none':undefined);
+    row('generation','ThinkingMode',['默认思考模式','Default thinking mode'],thinkingMode,
+      config.ThinkingMode==='on'?true:config.ThinkingMode==='off'?false:config.ThinkingMode,{format:value=>value==='default'?tr('跟随模型','Model default'):format(value)});
+    row('generation','ReasoningEffort',['默认思考强度','Default reasoning effort'],defaults.reasoning_effort,config.ReasoningEffort,{optional:true});
+    // Launcher 0 means no separate cap (llama.cpp translates it to -1); PolyStrata uses automatic answer reserve.
+    const thinkingBudget = value => value < 0 || (value===0 && backend!=='polystrata') ? -1 : value;
+    row('generation','ThinkingBudget',['默认思考预算','Default reasoning budget'],
+      first(defaults.reasoning_budget_tokens,k.defaults?.reasoning_budget_tokens),
+      number(config.ThinkingBudget)?thinkingBudget(config.ThinkingBudget):undefined,
+      {format:value=>value<0?tr('不单设上限','No separate cap'):value===0?backend==='polystrata'?tr('自动预留答案空间','Automatic answer reserve'):tr('立即结束思考','End reasoning immediately'):tokens(value)});
+    row('generation','PreserveThinking',['保留历史思考','Preserve previous reasoning'],boolean(defaults.preserve_thinking),
+      backend==='ninfer'&&config.PreserveThinking===false?'default':boolean(config.PreserveThinking),
+      {optional:true,format:value=>value==='default'?tr('跟随模型','Model default'):format(value)});
+    for (const [key,labels] of [['temperature',['温度','Temperature']],['top_p',['Top-p','Top-p']],['top_k',['Top-k','Top-k']],['min_p',['Min-p','Min-p']]])
+      row('generation',key,labels,first(defaults[key],generation.params?.[key]),undefined,{optional:true});
+
+    const compactLabels = {
+      Context:['上下文','Context'],Budget:['历史 KV','History KV'],Reserve:['预留','Reserve'],KvType:['KV','KV'],
+      Prefill:['Prefill','Prefill'],SpeculativeMode:['推测','Speculation'],Concurrency:['并发','Concurrency'],MaxTokens:['输出','Output'],
+    };
+    const toggle = $('[data-runtime-toggle]'), details = $('[data-runtime-config-details]');
+    const updateToggle = () => {
+      toggle.setAttribute('aria-expanded',String(!details.hidden));
+      toggle.textContent = details.hidden ? tr('详情 ▾','Details ▾') : tr('收起 ▴','Collapse ▴');
+    };
+    toggle.onclick = () => {details.hidden=!details.hidden;updateToggle();};
+    updateToggle();
+    const signature = JSON.stringify([i18n.language,consoleRuntime?.state,failures>0,rows]);
+    if (root.dataset.signature === signature) return;
+    root.dataset.signature = signature;
+    function fill(container,items,compact=false) {
+      const fragment = document.createDocumentFragment();
+      for (const item of items) {
+        const cell = document.createElement('div');cell.className='s-runtime-item';cell.dataset.runtimeKey=item.id;cell.dataset.source=item.source;
+        if (item.differs) cell.dataset.differs='true';
+        const dt = document.createElement('dt');dt.textContent=compact?tr(...compactLabels[item.id]):item.label;
+        const dd = document.createElement('dd'), value = document.createElement('span');
+        value.className='s-runtime-value';value.textContent=compact
+          ? item.source==='unknown'?'—':item.value.replace(/ tokens$/,'') : item.value;
+        if(compact) cell.title=`${item.label}: ${item.value}`;
+        dd.append(value);cell.append(dt,dd);
+        if (!compact && item.note) {const note=document.createElement('p');note.className='s-runtime-change';note.textContent=item.note;dd.append(note);}
+        fragment.append(cell);
+      }
+      container.replaceChildren(fragment);
+    }
+    fill($('[data-runtime-primary]'),rows.filter(row=>row.group==='primary'),true);
+    const adjustments=$('[data-runtime-adjustments]');
+    adjustments.replaceChildren();
+    for(const item of rows.filter(row=>row.group==='primary'&&row.note)) {
+      const note=document.createElement('p');note.className='s-runtime-change';note.textContent=`${item.label} · ${item.note}`;
+      adjustments.append(note);
+    }
+    adjustments.hidden=!adjustments.children.length;
+    for (const [id,labels] of [
+      ['cache',['缓存与召回','Cache & retrieval']],
+      ['engine',['推理与服务','Inference & service']],
+      ['generation',['默认生成设置','Generation defaults']],
+    ]) {
+      let section = root.querySelector(`[data-runtime-group="${id}"]`);
+      if (!section) {
+        section = document.createElement('section');section.dataset.runtimeGroup=id;
+        section.append(document.createElement('h3'),document.createElement('dl'));
+        section.querySelector('dl').className='s-runtime-grid';
+        $('[data-runtime-groups]').append(section);
+      }
+      section.querySelector('h3').textContent=tr(...labels);
+      fill(section.querySelector('dl'),rows.filter(row=>row.group===id));
+      section.hidden=!rows.some(row=>row.group===id);
+    }
   }
   function render(append) {
     if (!state || !props) return;
@@ -402,7 +795,7 @@
     const model = props.model_name || props.model_alias || t("本地模型");
     text(
       "model",
-      `${model} · ${state.backend === "ninfer" ? "NInfer" : "llama.cpp"}`,
+      `${model} · ${{ninfer: "NInfer", polystrata: "PolyStrata", llamacpp: "llama.cpp"}[state.backend] || state.backend}`,
     );
     const activeStates = new Set(state.active.map((r) => r.status));
     const serviceStatus = !state.active.length ? "idle" :
@@ -412,7 +805,7 @@
     serviceBadge.textContent = statuses[serviceStatus] + (state.active.length > 1 ? t(" · {0} 个请求", state.active.length) : "");
     const liveRequest = state.active.some((x) => x.id === r?.id);
     const requestScope = !r ? t("暂无请求") : liveRequest ? t("当前请求") : followLatest ? t("上次请求") : t("历史请求");
-    text("request-scope", r ? `${requestScope} #${r.id} · ${statuses[r.status] || t("处理中")}` : requestScope);
+    text("request-scope", r ? `${requestScope} #${r.id} · ${requestStatus(r)}` : requestScope);
     $$("[data-request-scope]").forEach((e) => e.textContent = requestScope);
     text(
       "output",
@@ -428,8 +821,33 @@
         String(Math.min(100, ratio(r.generated_tokens, r.limit))),
       );
     else meter.removeAttribute("aria-valuenow");
-    text("decode", fmt(r?.decode_tps, 1));
+    const nativeThroughput = throughputLog?.sample;
+    const requestSpeed = requestLiveSpeed(state, r, liveRequest);
+    const realtimeSpeed = state.backend === "ninfer"
+      ? requestSpeed ?? ninferLiveSpeed(state, r, liveRequest, nativeThroughput)
+      : state.backend === "llamacpp" ? requestLiveSpeed(state, r, liveRequest)
+      : liveRequest && state.backend === "polystrata" ? r?.decode_tps : null;
+    text("decode", fmt(realtimeSpeed, 1));
+    text("decode-label", state.backend === "ninfer" && requestSpeed !== null
+      ? t("实时 · {0}s", fmt(r.decode_tps_window_ms / 1000, 0))
+      : state.backend === "ninfer" && nativeThroughput
+      ? t("实时 · {0}s", fmt(nativeThroughput.seconds, nativeThroughput.seconds < 1 ? 2 : 0))
+      : state.backend === "llamacpp" && number(r?.decode_tps_window_ms)
+        ? t("实时 · {0}s", fmt(r.decode_tps_window_ms / 1000, 1)) : t("实时速度"));
+    $("[data-live-speed]").title = state.backend === "ninfer" && requestSpeed === null
+      ? t("引擎区间吞吐，包含同期所有请求；本轮平均仅统计所选请求。") : "";
+    $("[data-live-speed]").hidden = !liveRequest;
+    text("decode-mean", fmt(meanSpeed(r), 1));
     text("prefill", fmt(r?.prefill_tps, 0));
+    const fresh = r?.prompt_new_tokens ?? (number(r?.prompt_tokens)&&number(r?.cached_tokens)?Math.max(0,r.prompt_tokens-r.cached_tokens):null);
+    text("prefill-tokens", t("新算 {0} · 复用 {1} tokens", fmt(fresh), fmt(r?.cached_tokens)));
+    text("prefill-times", t("预填充 {0}s · 首 token {1}s", fmt(number(r?.prefill_ms)?r.prefill_ms/1000:null,2), fmt(number(r?.ttft_ms)?r.ttft_ms/1000:null,2)));
+    const queued = state.queued_count ?? (state.backend === "ninfer" ? stats?.queue?.depth
+      : state.backend === "llamacpp" && !state.dropped_records ? state.active.filter(x => x.status === "queued").length : null);
+    const pending=number(queued)?fmt(queued):"—";
+    text("queue", t("活动 {0} · 排队 {1}",fmt(state.active.length),pending));
+    renderActualSpec(r);
+    renderRuntimeConfiguration();
     const hardware = state.hardware || {},
       gpus = hardware.gpus || [];
     const hardwareFresh =
@@ -437,6 +855,14 @@
       state.sampled_at_ms - hardware.sampled_at_ms < 5000;
     renderGpus(gpus, hardwareFresh, append);
     text("cpu", fmt(hardwareFresh ? hardware.cpu_percent : null));
+    const available=hardware.ram_available_bytes ?? (number(hardware.ram_total_bytes)&&number(hardware.ram_used_bytes)?hardware.ram_total_bytes-hardware.ram_used_bytes:null);
+    text("ram-available",fmt(hardwareFresh&&number(available)?available/GiB:null,2));
+    // The console owns system I/O. Standalone/older servers retain native readings.
+    const systemDisk = state.system_hardware ?? hardware;
+    const diskAge = Date.now() - systemDisk.sampled_at_ms;
+    const diskFresh = number(systemDisk.sampled_at_ms) && diskAge >= -1000 && diskAge < 5000;
+    text("system-disk",fmt(diskFresh&&number(systemDisk.system_disk_read_bytes_per_second)?systemDisk.system_disk_read_bytes_per_second/MiB:null,1));
+    text("system-disk-write",fmt(diskFresh&&number(systemDisk.system_disk_write_bytes_per_second)?systemDisk.system_disk_write_bytes_per_second/MiB:null,1));
     const context = props.default_generation_settings?.n_ctx;
     const used =
       number(r?.prompt_tokens) && number(r?.generated_tokens)
@@ -456,6 +882,10 @@
       hardware.ram_total_bytes,
     );
     const cache = cacheData();
+    renderCacheMetrics(cache);
+    renderNativeMetrics();
+    text("history-label", t(state.backend === "polystrata" ? "停放会话恢复 / 淘汰" : "历史命中 / 淘汰"));
+    text("cache-age", state.backend === "polystrata" ? number(cache.sampled_at_ms)?t("请求结束时更新 · 读取于 {0}",new Date(cache.sampled_at_ms).toLocaleTimeString(i18n.language)):t("等待首个请求完成后的缓存统计") : "");
     capacity("host", cache.host_payload_bytes, cache.host_payload_budget_bytes);
     capacity("ssd", cache.disk_payload_bytes, cache.disk_payload_budget_bytes);
     text(
@@ -482,9 +912,10 @@
       previousDisk = number(cache.disk_read_bytes)
         ? { time: state.sampled_at_ms, bytes: cache.disk_read_bytes }
         : null;
-    if (append) text("disk", fmt(disk, 1));
+    text("cache-disk-label", t(state.backend === "polystrata" ? "缓存累计读取 · MiB" : "缓存读取 · MiB/s"));
+    if (append) text("disk", fmt(state.backend === "polystrata" ? number(cache.disk_read_bytes)?cache.disk_read_bytes/MiB:null : disk, 1));
     const values = {
-      speed: liveRequest ? r?.decode_tps : null,
+      speed: realtimeSpeed,
     };
     for (const [name, value] of Object.entries(values))
       chart(name, value, append);
@@ -545,19 +976,23 @@
   window.addEventListener("kvmem-runtime-status", (event) => {
     const old = consoleRuntime?.state;
     consoleRuntime = event.detail;
+    renderRuntimeConfiguration();
     renderConnection();
-    if (old !== consoleRuntime.state && consoleRuntime.state === "ready" && !busy) schedule(0);
+    if (old !== consoleRuntime?.state && consoleRuntime?.state === "ready" && !busy) schedule(0);
   });
   async function poll() {
     if (busy || stopped) return;
     busy = true;
     controller = new AbortController();
+    const launchInstance = consoleRuntime?.instance;
     const abort = setTimeout(() => controller.abort(), 8000);
     try {
-      const [snapshot, configuration, lanes] = await Promise.all([
+      const [snapshot, configuration, lanes, systemHardware] = await Promise.all([
         get("../api/monitor/snapshot", controller.signal),
         get("../props", controller.signal),
         get("../slots", controller.signal),
+        get("../api/launcher/hardware", controller.signal).catch(error =>
+          error.status === 404 ? null : {sampled_at_ms:null}),
       ]);
       if (
         snapshot.schema_version !== 1 ||
@@ -570,6 +1005,19 @@
         snapshot.backend === "ninfer"
           ? await get("../stats", controller.signal)
           : null;
+      if (snapshot.backend === "ninfer") {
+        if (throughputLog?.instance !== snapshot.server_instance) throughputLog = null;
+        // Read the same redacted, complete native log lines as the console tab.
+        // A missing log endpoint must not take down other monitor metrics.
+        const log = await get("../api/launcher/logs?revision=" + encodeURIComponent(throughputLog?.revision || ""), controller.signal).catch(() => null);
+        const sample = log?.running && log.backend === "ninfer"
+          ? log.text === null && log.session === throughputLog?.session
+            ? throughputLog.sample : parseNinferThroughput(log)
+          : null;
+        throughputLog = log ? {instance:snapshot.server_instance, session:log.session, revision:log.revision, sample} : null;
+      } else throughputLog = null;
+      if (consoleRuntime?.instance !== launchInstance) return;
+      runtimePropsInstance = launchInstance;
       const restarted =
         currentInstance !== null &&
         currentInstance !== snapshot.server_instance;
@@ -581,6 +1029,8 @@
         detail = "";
       }
       currentInstance = snapshot.server_instance;
+      snapshot.system_hardware = systemHardware?.schema_version === 1 && systemHardware.scope === "system"
+        ? systemHardware : systemHardware === null ? null : {sampled_at_ms:null};
       state = snapshot;
       props = configuration;
       slots = lanes;
@@ -599,9 +1049,10 @@
       failures++;
       authNeeded = error.status === 401 || error.status === 403;
       $("[data-auth]").hidden = !authNeeded;
-      if (authNeeded && !document.querySelector('[data-view="config"]:not([hidden])')) page("monitor");
+      if (authNeeded && !document.querySelector('[data-view="config"]:not([hidden]), [data-view="logs"]:not([hidden])')) page("monitor");
       lastError = error;
       renderConnection();
+      renderRuntimeConfiguration();
       $$(".s-state,.s-metrics,.s-gpus,.s-bottom,.s-cache")
         .filter((e) => e.closest('[data-view="monitor"]'))
         .forEach((e) => (e.dataset.stale = "true"));

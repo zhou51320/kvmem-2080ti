@@ -167,7 +167,7 @@ def main():
     info = dict(source_commit=git('rev-parse', 'HEAD'),
                 source_worktree_dirty=source_dirty,
                 llama_commit=git('rev-parse', 'HEAD:backends/llamacpp'),
-                patch_sha256=sha(ROOT / 'backends/patches/llamacpp-kvmem.patch'),
+                backend_sources=json.loads((ROOT / 'backends/versions.json').read_text(encoding='utf-8'))['llamacpp'],
                 platform='windows-x64' if windows else 'linux-x86_64',
                 build_options={k: options.get(k) for k in keys},
                 external_dependencies=external, models_included=False,

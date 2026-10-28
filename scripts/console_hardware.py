@@ -1,0 +1,74 @@
+"""Backend-independent system disk telemetry, sampled once for all UI clients.
+
+Uses PolyStrata's psutil cumulative-byte delta approach. Durations use a monotonic
+clock; wall time is only for snapshot freshness. Engine cache I/O stays separate.
+"""
+import threading
+import time
+from threading import Thread
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+
+class SystemDiskSampler:
+    def __init__(self, reader=None, clock=time.monotonic, wall=time.time):
+        self.reader = reader or (psutil.disk_io_counters if psutil else None)
+        self.clock, self.wall = clock, wall
+        self.previous = None
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.value = self._empty('warming_up')
+
+    def _empty(self, status):
+        return dict(schema_version=1, scope='system', source='psutil', status=status,
+                    sampled_at_ms=None, interval_ms=None,
+                    system_disk_read_bytes_per_second=None,
+                    system_disk_write_bytes_per_second=None)
+
+    def sample(self):
+        value = self._empty('unavailable' if self.reader else 'dependency_missing')
+        current = None
+        try:
+            counters = self.reader() if self.reader else None
+            if counters is not None:
+                current = (self.clock(), counters.read_bytes, counters.write_bytes)
+        except (OSError, RuntimeError, NotImplementedError):
+            pass
+        previous, self.previous = self.previous, current
+        value['sampled_at_ms'] = self.wall() * 1000
+        if current is not None:
+            value['status'] = 'warming_up'
+            if previous is not None:
+                dt = current[0] - previous[0]
+                read, write = current[1] - previous[1], current[2] - previous[2]
+                # A reset or invalid clock interval establishes a fresh baseline.
+                if dt > 0 and read >= 0 and write >= 0:
+                    value.update(status='ready', interval_ms=dt * 1000,
+                                 system_disk_read_bytes_per_second=read / dt,
+                                 system_disk_write_bytes_per_second=write / dt)
+        with self.lock:
+            self.value = value
+
+    def snapshot(self):
+        with self.lock:
+            return dict(self.value)
+
+    def start(self):
+        if self.thread is None:
+            self.thread = Thread(target=self._loop, name='console-system-disk', daemon=True)
+            self.thread.start()
+        return self
+
+    def _loop(self):
+        while not self.stop_event.is_set():
+            self.sample()
+            self.stop_event.wait(1.0)
+
+    def close(self):
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=2)

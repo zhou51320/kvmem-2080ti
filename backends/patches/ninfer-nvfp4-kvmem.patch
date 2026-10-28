@@ -1,0 +1,619 @@
+diff --git a/docs/cli.md b/docs/cli.md
+index bb54aea00d3727532e7b280932852fafc02284e0..edd58e9660d222c1da47a4587dad20f6971478e1 100644
+--- a/docs/cli.md
++++ b/docs/cli.md
+@@ -298,6 +298,8 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
+ | `--mtp-experts-q4` | Qwen3.6-35B-A3B: store the MTP layer's routed experts in the text layers' formats | off |
+ | `--gdn-state-fp16` | keep the GDN recurrent state in FP16 | FP32 |
+ | `--mlp-a8-decode` | integer-activation MLP gate_up at decode and verify widths | off |
++| `--nvfp4-w4a16` | use BF16 activations for the registered NVFP4 projections instead of native W4A4 | off |
++| `--nvfp4-w4a8-int` | admit G32 INT8 activations for the registered NVFP4 projections; independent of KV storage; W4A16 wins if both flags are set | off |
+ | `--no-prefill-a8` | return full prefill tiles to their A16 routes, which is how the integer routes are measured on a whole request | integer routes |
+ | `--vision` | enable image/video input and load Vision GPU allocations | off |
+ | `--vision-residency resident\|overlay\|cpu` | `overlay` keeps the Vision tower host-pinned and borrows device memory per image from the evictable text weight tail (no resident Vision cost; needs CUDA VMM); for Gemma 4 the tower's blocks stay pinned and stream through a two-block device window. `--vision-offload on\|off` is accepted as an alias for `overlay\|resident`. `cpu` encodes on CPU threads from host FP32 weights, with no device Vision memory and `--vision-max-merged` capped at 256 unless given. Qwen3.8-Flash-Next keeps its tower resident | `resident` |
+diff --git a/docs/device-profiles.md b/docs/device-profiles.md
+index 804c14422cb2e1aa48d862a5baeeea77f490b682..fa76ced5678cd8b94b2d2a3f4afb87af18b5ffd6 100644
+--- a/docs/device-profiles.md
++++ b/docs/device-profiles.md
+@@ -123,6 +123,11 @@ survives a second interleaved measurement, and its output matches the compiled r
+ turns the prompt key splits off and `N` forces N splits wherever a call may split; `NINFER_LINEAR_ROUTES`
+ (`legacy` or `unified`) takes one table for every Linear shape and every `unified/*` switch. `--fast-prefill-kernel` turns the fast prompt kernel on regardless.
+ 
++The scoped `int8:legacy|unified` forms affect only NVFP4 W4A8; the `a16:` forms
++affect only NVFP4 A16/A4. Plain NVFP4 W4A8 Linear defaults to Unified at every
++width, including MTP T=1, because Legacy has no implementation for that policy.
++An explicit Legacy override is rejected by both planning and execution.
++
+ ## Batch composition
+ 
+ A profile picks each width's fastest schedule, and schedules differ in the order in which they sum.
+diff --git a/docs/serving.md b/docs/serving.md
+index 94f795abd0f7a3a237076bac0cc41f1783a5c7b5..1e09ba3e12e8e7fdc4d7809213fe9d38a934c508 100644
+--- a/docs/serving.md
++++ b/docs/serving.md
+@@ -2214,6 +2214,8 @@ The table lists executable defaults. The startup example selects a long-context
+ | `--no-prefill-cublas-projections` | with `--prefill-cublas`, keep the attention and GDN input projections off that route | projections on |
+ | `--no-prefill-a8` | prefill every projection on the A16 routes instead of the integer-activation ones | integer routes |
+ | `--mlp-a8-decode` | integer-activation MLP gate_up at decode and verify widths | off |
++| `--nvfp4-w4a16` | use BF16 activations for the registered NVFP4 projections instead of native W4A4 | off |
++| `--nvfp4-w4a8-int` | admit G32 INT8 activations for the registered NVFP4 projections; independent of KV storage; W4A16 wins if both flags are set | off |
+ | `--lm-head-q4`, `--lm-head-q6` | store the output head as Q4 or Q6 while loading (Q4 costs +0.69% perplexity, Q6 +0.01%) | off |
+ | `--embedding-q4`, `--embedding-q6` | store the token embedding as Q4 or Q6 while loading | off |
+ | `--mtp-experts-q4` | Qwen3.6-35B-A3B: store the MTP layer's routed experts in the text layers' formats | off |
+diff --git a/src/models/qwen3_5/measurement.cpp b/src/models/qwen3_5/measurement.cpp
+index efcade9e992e8f1413e2aed5eb3b0a3c32b8184e..a3455f192ca74249c88b20acd481680f9c5f58cb 100644
+--- a/src/models/qwen3_5/measurement.cpp
++++ b/src/models/qwen3_5/measurement.cpp
+@@ -22,6 +22,11 @@ std::string prefill_signature(const Model& model) {
+                {"num_hidden_layers", t.num_hidden_layers},
+                {"rms_norm_eps", t.rms_norm_eps},
+                {"layer_types", t.layer_types}};
++    // Explicit NVFP4 weight modes alter represented activations. Bind cached state and
++    // measured prefill costs to that choice; leave the default signature unchanged.
++    if (model.options().nvfp4_w4a16 || model.options().nvfp4_w4a8_int) {
++        facts["nvfp4_weight_compute"] = model.options().nvfp4_w4a16 ? "a16" : "a8-int";
++    }
+     if (t.attention) {
+         const auto& a      = *t.attention;
+         facts["attention"] = {a.num_attention_heads, a.num_key_value_heads, a.head_dim};
+diff --git a/src/ops/kv_cache/fp8_e4m3_row_codec.cuh b/src/ops/kv_cache/fp8_e4m3_row_codec.cuh
+index 4b6f6cb3e25e9ea74e304b2bca3463a4d7b10a0f..b648aa276dab14a3aec6220bd605ac4edf1f9e02 100644
+--- a/src/ops/kv_cache/fp8_e4m3_row_codec.cuh
++++ b/src/ops/kv_cache/fp8_e4m3_row_codec.cuh
+@@ -88,6 +88,12 @@ __device__ __forceinline__ __half2 kv_cache_fp8_code2_to_half2_x2m8(unsigned cod
+ 
+ __device__ __forceinline__ __half2 kv_cache_fp8_dequant_code2_to_half2(std::uint16_t storage,
+                                                                        __half scale) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
++    // Blackwell keeps its native packed conversions; the software expansion below
++    // avoids outlined conversions on pre-Blackwell devices.
++    return __hmul2(kv_cache_fp8_code2_to_half2(storage), __halves2half2(scale, scale));
++
++#else
+     // The integer expansion above carries the code times 2^-8 exactly, so the 2^8 that the vendor
+     // conversion applies rides in a second half2 operand instead: scaling by a power of two is
+     // exact, and the final multiply rounds once, exactly where the converted code times the scale
+@@ -95,6 +101,8 @@ __device__ __forceinline__ __half2 kv_cache_fp8_dequant_code2_to_half2(std::uint
+     const __half2 bias = __float2half2_rn(256.0F);
+     return __hmul2(__hmul2(kv_cache_fp8_code2_to_half2_x2m8(storage), bias),
+                    __halves2half2(scale, scale));
++
++#endif
+ }
+ 
+ // Dequantizes 8 contiguous E4M3 codes (16 bytes) to FP16, for PV MMA operands on hardware with
+@@ -118,6 +126,26 @@ __device__ __forceinline__ int4 kv_cache_fp8_dequant_f16x8(const std::uint8_t* c
+ // Blackwell-only mma.sync...kind::f8f6f4, so K needs a real (not just reinterpreted) wide copy.
+ __device__ __forceinline__ int4 kv_cache_fp8_dequant_bf16x8(const std::uint8_t* codes,
+                                                              __half scale) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
++    // Blackwell keeps its native packed conversions; the software expansion below
++    // avoids outlined conversions on pre-Blackwell devices.
++    const int2 raw         = load_vec<int2>(codes);
++    const std::uint16_t* c = reinterpret_cast<const std::uint16_t*>(&raw);
++    const float scale_f    = __half2float(scale);
++    unsigned packed[4];
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++        __nv_fp8x2_e4m3 value;
++        value.__x                   = c[i];
++        const float2 decoded        = static_cast<float2>(value);
++        const __nv_bfloat162 value2 =
++            __floats2bfloat162_rn(decoded.x * scale_f, decoded.y * scale_f);
++        packed[i] = *reinterpret_cast<const unsigned*>(&value2);
++    }
++    return make_int4(static_cast<int>(packed[0]), static_cast<int>(packed[1]),
++                     static_cast<int>(packed[2]), static_cast<int>(packed[3]));
++
++#else
+     // The integer expansion carries the code times 2^-8 exactly, so the scale absorbs the 2^8
+     // (exact, a power of two) and the product is the same FP32 value the vendor conversion feeds
+     // the bf16 rounding. The K plane of k8v4 reads through here, and that path is issue-bound on
+@@ -135,6 +163,8 @@ __device__ __forceinline__ int4 kv_cache_fp8_dequant_bf16x8(const std::uint8_t*
+     }
+     return make_int4(static_cast<int>(packed[0]), static_cast<int>(packed[1]),
+                      static_cast<int>(packed[2]), static_cast<int>(packed[3]));
++
++#endif
+ }
+ 
+ } // namespace ninfer::ops
+diff --git a/src/ops/kv_cache/nvfp4_group16_codec.cuh b/src/ops/kv_cache/nvfp4_group16_codec.cuh
+index 10508005d40cf874e206bf265979a3e5eb143840..eb44f1f2a3fb8559c1a4ab3ef6bc1d8341600485 100644
+--- a/src/ops/kv_cache/nvfp4_group16_codec.cuh
++++ b/src/ops/kv_cache/nvfp4_group16_codec.cuh
+@@ -90,6 +90,30 @@ __device__ __forceinline__ __half2 kv_cache_e2m1x2_to_half2(unsigned codes) {
+ 
+ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t* codes,
+                                                              std::uint8_t scale_code) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
++    // Blackwell keeps its native packed conversions; the software expansion below
++    // avoids outlined conversions on pre-Blackwell devices.
++    // Every finite E2M1 value times a legal nonnegative E4M3 cache scale is exactly representable
++    // in FP16 (at most four product fraction bits and magnitude <= 2688). Half2 multiplication is
++    // therefore the exact FP16 expansion boundary, not an additional approximation.
++    const std::uint32_t packed = load_vec<std::uint32_t>(codes);
++    const std::uint8_t* bytes  = reinterpret_cast<const std::uint8_t*>(&packed);
++    __nv_fp8_e4m3 encoded_scale;
++    encoded_scale.__x    = scale_code;
++    const __half scale   = static_cast<__half>(encoded_scale);
++    const __half2 scale2 = __halves2half2(scale, scale);
++    unsigned half_bits[4];
++#pragma unroll
++    for (int pair = 0; pair < 4; ++pair) {
++        __nv_fp4x2_e2m1 encoded;
++        encoded.__x         = bytes[pair];
++        const __half2 value = __hmul2(static_cast<__half2>(encoded), scale2);
++        half_bits[pair]     = *reinterpret_cast<const unsigned*>(&value);
++    }
++    return make_int4(static_cast<int>(half_bits[0]), static_cast<int>(half_bits[1]),
++                     static_cast<int>(half_bits[2]), static_cast<int>(half_bits[3]));
++
++#else
+     // Every finite E2M1 value times a legal nonnegative E4M3 cache scale is exactly representable
+     // in FP16 (at most four product fraction bits and magnitude <= 2688). Half2 multiplication is
+     // therefore the exact FP16 expansion boundary, not an additional approximation.
+@@ -117,6 +141,8 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
+     }
+     return make_int4(static_cast<int>(half_bits[0]), static_cast<int>(half_bits[1]),
+                      static_cast<int>(half_bits[2]), static_cast<int>(half_bits[3]));
++
++#endif
+ }
+ 
+ // BF16 counterpart of kv_cache_nvfp4_dequant_f16x8, for QK MMA operands on hardware with no FP4
+@@ -124,6 +150,28 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t*
+ // Q's storage) instead of FP16.
+ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_bf16x8(const std::uint8_t* codes,
+                                                               std::uint8_t scale_code) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
++    // Blackwell keeps its native packed conversions; the software expansion below
++    // avoids outlined conversions on pre-Blackwell devices.
++    const std::uint32_t packed = load_vec<std::uint32_t>(codes);
++    const std::uint8_t* bytes  = reinterpret_cast<const std::uint8_t*>(&packed);
++    __nv_fp8_e4m3 encoded_scale;
++    encoded_scale.__x  = scale_code;
++    const float scale_f = static_cast<float>(encoded_scale);
++    unsigned bf16_bits[4];
++#pragma unroll
++    for (int pair = 0; pair < 4; ++pair) {
++        __nv_fp4x2_e2m1 encoded;
++        encoded.__x           = bytes[pair];
++        const float2 decoded  = static_cast<float2>(encoded);
++        const __nv_bfloat162 value =
++            __floats2bfloat162_rn(decoded.x * scale_f, decoded.y * scale_f);
++        bf16_bits[pair] = *reinterpret_cast<const unsigned*>(&value);
++    }
++    return make_int4(static_cast<int>(bf16_bits[0]), static_cast<int>(bf16_bits[1]),
++                     static_cast<int>(bf16_bits[2]), static_cast<int>(bf16_bits[3]));
++
++#else
+     // Same two substitutions as the FP16 form above, and the same reasoning: the E2M1 half2 the
+     // sm70 path builds carries the exact value, so widening it to FP32 and multiplying by the
+     // table-derived scale reproduces the vendor expression bit for bit.
+@@ -140,6 +188,8 @@ __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_bf16x8(const std::uint8_t
+     }
+     return make_int4(static_cast<int>(bf16_bits[0]), static_cast<int>(bf16_bits[1]),
+                      static_cast<int>(bf16_bits[2]), static_cast<int>(bf16_bits[3]));
++
++#endif
+ }
+ 
+ struct KVCacheNvfp4DequantizedF16x16 {
+@@ -149,6 +199,31 @@ struct KVCacheNvfp4DequantizedF16x16 {
+ 
+ __device__ __forceinline__ KVCacheNvfp4DequantizedF16x16
+ kv_cache_nvfp4_dequant_f16x16(const std::uint8_t* codes, std::uint8_t scale_code) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
++    // Blackwell keeps its native packed conversions; the software expansion below
++    // avoids outlined conversions on pre-Blackwell devices.
++    const int2 packed         = load_vec<int2>(codes);
++    const std::uint8_t* bytes = reinterpret_cast<const std::uint8_t*>(&packed);
++    __nv_fp8_e4m3 encoded_scale;
++    encoded_scale.__x    = scale_code;
++    const __half scale   = static_cast<__half>(encoded_scale);
++    const __half2 scale2 = __halves2half2(scale, scale);
++    unsigned half_bits[8];
++#pragma unroll
++    for (int pair = 0; pair < 8; ++pair) {
++        __nv_fp4x2_e2m1 encoded;
++        encoded.__x         = bytes[pair];
++        const __half2 value = __hmul2(static_cast<__half2>(encoded), scale2);
++        half_bits[pair]     = *reinterpret_cast<const unsigned*>(&value);
++    }
++    return {
++        make_int4(static_cast<int>(half_bits[0]), static_cast<int>(half_bits[1]),
++                  static_cast<int>(half_bits[2]), static_cast<int>(half_bits[3])),
++        make_int4(static_cast<int>(half_bits[4]), static_cast<int>(half_bits[5]),
++                  static_cast<int>(half_bits[6]), static_cast<int>(half_bits[7])),
++    };
++
++#else
+     const float scale_f  = detail::kNvfp4E4M3ScaleA16[scale_code] * 2.0F;
+     const __half2 scale2 = __float2half2_rn(scale_f);
+     const int2 packed         = load_vec<int2>(codes);
+@@ -165,6 +240,8 @@ kv_cache_nvfp4_dequant_f16x16(const std::uint8_t* codes, std::uint8_t scale_code
+         make_int4(static_cast<int>(half_bits[4]), static_cast<int>(half_bits[5]),
+                   static_cast<int>(half_bits[6]), static_cast<int>(half_bits[7])),
+     };
++
++#endif
+ }
+ 
+ } // namespace ninfer::ops
+diff --git a/src/ops/linear/common/route_table.cpp b/src/ops/linear/common/route_table.cpp
+index 27885e7a189213f7d01c0723e8c08c3611cdc50a..b50be998cd58d35087f83d810a66a02caf777383 100644
+--- a/src/ops/linear/common/route_table.cpp
++++ b/src/ops/linear/common/route_table.cpp
+@@ -102,6 +102,8 @@ std::span<const WidthBand> family_bands(const FamilyBands& bands, LinearRouteFam
+         return bands.fp8;
+     case LinearRouteFamily::Nvfp4:
+         return bands.nvfp4;
++    case LinearRouteFamily::Nvfp4Int8:
++        return {};
+     case LinearRouteFamily::Bf16:
+         return bands.bf16;
+     }
+@@ -172,36 +174,43 @@ std::optional<LinearRouteTable> forced_route_table() {
+ // `NINFER_LINEAR_ROUTES=<int8|a16>:<legacy|unified>` moves one NVFP4 family and no other: the
+ // plain `legacy|unified` forms above still take every shape. The two families own separate keys,
+ // so a scoped override lets an A/B hold the other family on its calibrated schedule.
+-std::optional<LinearRouteTable> scoped_nvfp4_table() {
+-    static const std::optional<LinearRouteTable> scoped = [] {
++std::optional<LinearRouteTable> scoped_nvfp4_table(bool int8) {
++    struct ScopedTable {
++        bool int8;
++        LinearRouteTable table;
++    };
++    static const std::optional<ScopedTable> scoped = []() -> std::optional<ScopedTable> {
+         const char* value = std::getenv("NINFER_LINEAR_ROUTES");
+-        if (value == nullptr) return std::optional<LinearRouteTable>{};
++        if (value == nullptr) return std::nullopt;
+         const std::string_view spec(value);
+         const auto colon = spec.find(':');
+-        if (colon == std::string_view::npos) return std::optional<LinearRouteTable>{};
++        if (colon == std::string_view::npos) return std::nullopt;
+         const auto scope = spec.substr(0, colon);
+-        if (scope != "int8" && scope != "a16") return std::optional<LinearRouteTable>{};
++        if (scope != "int8" && scope != "a16") return std::nullopt;
+         const auto table = spec.substr(colon + 1);
+-        if (table == "legacy") return std::optional<LinearRouteTable>{LinearRouteTable::Legacy};
++        if (table == "legacy") return ScopedTable{scope == "int8", LinearRouteTable::Legacy};
+         if (table == "unified") {
+             if (!kUnifiedLinearRoutesBuilt) {
+                 throw std::invalid_argument("NINFER_LINEAR_ROUTES=" + std::string(spec) +
+                                             ": this build selects the legacy Linear table only");
+             }
+-            return std::optional<LinearRouteTable>{LinearRouteTable::Unified};
++            return ScopedTable{scope == "int8", LinearRouteTable::Unified};
+         }
+-        return std::optional<LinearRouteTable>{};
++        return std::nullopt;
+     }();
+-    return scoped;
++    if (scoped && scoped->int8 == int8) return scoped->table;
++    return std::nullopt;
+ }
+ 
+-// True for every fused key this family owns: the A16 plans pass "unified/nvfp4_<op>", the int8
++// Classify each fused NVFP4 key: the A16 plans pass "unified/nvfp4_<op>", the int8
+ // plans pass "nvfp4_int8/<op>". Other families' keys must keep their calibrated schedule, so the
+ // optional "unified/" prefix is stripped before the match.
+-bool is_nvfp4_fused_key(std::string_view key) {
++std::optional<bool> nvfp4_fused_int8(std::string_view key) {
+     constexpr std::string_view kUnifiedPrefix = "unified/";
+     if (key.rfind(kUnifiedPrefix, 0) == 0) key.remove_prefix(kUnifiedPrefix.size());
+-    return key.rfind("nvfp4", 0) == 0;
++    if (key.rfind("nvfp4_int8/", 0) == 0) return true;
++    if (key.rfind("nvfp4_", 0) == 0) return false;
++    return std::nullopt;
+ }
+ 
+ } // namespace
+@@ -211,8 +220,11 @@ LinearRouteTable linear_route_table(LinearRouteFamily family, std::int32_t t,
+     const auto forced = forced_route_table();
+     if (!unified_linear_routes_here()) return LinearRouteTable::Legacy;
+     if (forced) return *forced;
+-    if (family == LinearRouteFamily::Nvfp4) {
+-        if (const auto scoped = scoped_nvfp4_table()) return *scoped;
++    if (family == LinearRouteFamily::Nvfp4 || family == LinearRouteFamily::Nvfp4Int8) {
++        if (const auto scoped = scoped_nvfp4_table(family == LinearRouteFamily::Nvfp4Int8)) {
++            return *scoped;
++        }
++        if (family == LinearRouteFamily::Nvfp4Int8) return LinearRouteTable::Unified;
+     }
+     for (const WidthBand band : family_bands(bands_for(current_device_class()), family)) {
+         if (t >= band.first && t <= band.last) return LinearRouteTable::Unified;
+@@ -225,8 +237,8 @@ LinearRouteTable fused_route_table(std::string_view key, std::int32_t width,
+     const auto forced = forced_route_table();
+     if (!unified_linear_routes_here()) return LinearRouteTable::Legacy;
+     if (forced) return *forced;
+-    if (is_nvfp4_fused_key(key)) {
+-        if (const auto scoped = scoped_nvfp4_table()) return *scoped;
++    if (const auto int8 = nvfp4_fused_int8(key)) {
++        if (const auto scoped = scoped_nvfp4_table(*int8)) return *scoped;
+     }
+     if (width > kRouteBandsMeasuredTo && !device_route_measured(key, width)) return wide;
+     return device_route_schedule(key, width) == "unified" ? LinearRouteTable::Unified
+diff --git a/src/ops/linear/common/route_table.h b/src/ops/linear/common/route_table.h
+index 84aa75646ab49ffa6905892fd256a4505d8aca6f..edea4f57387fbeba672d70a568efa7c86fc31162 100644
+--- a/src/ops/linear/common/route_table.h
++++ b/src/ops/linear/common/route_table.h
+@@ -44,6 +44,7 @@ enum class LinearRouteFamily : std::uint8_t {
+     Q8,
+     Fp8,
+     Nvfp4,
++    Nvfp4Int8,
+     Bf16,
+ };
+ 
+@@ -55,6 +56,8 @@ inline constexpr std::int32_t kRouteBandsMeasuredTo = 1024;
+ // The table for one call: by default the unified table only inside the width bands where it was
+ // measured faster on this device's class, `wide` past kRouteBandsMeasuredTo, and the legacy table
+ // everywhere else; NINFER_LINEAR_ROUTES=legacy|unified takes one table for every width.
++// Plain Nvfp4Int8 defaults to Unified at every width, its only implemented table.
++// Scoped int8:/a16: overrides affect only the matching NVFP4 family (A16 includes A4).
+ [[nodiscard]] LinearRouteTable linear_route_table(LinearRouteFamily family, std::int32_t t,
+                                                   LinearRouteTable wide = LinearRouteTable::Legacy);
+ 
+diff --git a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
+index b3519fafa2e2a135b0e53f5c1347d05f09773b29..51b1f59926f40d0a3c2a8f12d42479145cc46dbf 100644
+--- a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
++++ b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
+@@ -12,6 +12,12 @@ namespace {
+ const std::array kShapes{&kNvfp4N14336K5120, &kNvfp4N16384K5120, &kNvfp4N34816K5120,
+                          &kNvfp4N5120K6144, &kNvfp4N5120K17408};
+ 
++LinearRouteTable route_table(LinearPolicy policy, std::int32_t width) {
++    return linear_route_table(allows_nvfp4_int8(policy) ? LinearRouteFamily::Nvfp4Int8
++                                                       : LinearRouteFamily::Nvfp4,
++                              width);
++}
++
+ const Nvfp4LinearShape& resolve_shape(std::int32_t n, std::int32_t k, LinearPolicy policy) {
+     if (!valid_linear_policy(policy))
+         throw std::invalid_argument("nvfp4 linear: unsupported policy");
+@@ -27,6 +33,8 @@ static std::size_t nvfp4_linear_workspace_capacity_bytes_own(std::int32_t n, std
+                                                              std::int32_t max_tokens) {
+     if (min_tokens <= 0 || max_tokens < min_tokens)
+         throw std::invalid_argument("nvfp4 linear workspace: invalid token interval");
++    if (allows_nvfp4_int8(policy))
++        throw std::invalid_argument("nvfp4 linear workspace: plain-Linear int8 requires the unified route table");
+     const auto& shape = resolve_shape(n, k, policy);
+     return allows_a4(policy) && shape.uses_a4(min_tokens, max_tokens)
+                ? nvfp4_w4a4_workspace_capacity_bytes(max_tokens, k)
+@@ -38,7 +46,7 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k
+                                                   std::int32_t max_tokens) {
+     return capacity_by_table(
+         min_tokens, max_tokens,
+-        [](std::int32_t width) { return linear_route_table(LinearRouteFamily::Nvfp4, width); },
++        [policy](std::int32_t width) { return route_table(policy, width); },
+         [&](LinearRouteTable table, std::int32_t first, std::int32_t last) {
+             return table == LinearRouteTable::Unified
+                        ? unified::nvfp4_linear_workspace_capacity_bytes(n, k, policy, first, last)
+@@ -49,22 +57,18 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k
+ void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
+                     WorkspaceArena* workspace, cudaStream_t stream) {
+     if (x.ne[1] > 0 &&
+-        linear_route_table(LinearRouteFamily::Nvfp4, x.ne[1]) == LinearRouteTable::Unified) {
++        route_table(policy, x.ne[1]) == LinearRouteTable::Unified) {
+         unified::nvfp4_dispatch(x, weight, out, policy, workspace, stream);
+         return;
+     }
+-    // This table registers no plain-Linear int8 route at all: an int8 call here would answer by
+-    // running the A16 family, which is the hollow-green failure the family exists to avoid -- an
+-    // "int8" run that never touched an int8 kernel. Which table a width resolves to is a property
+-    // of the device profile's width bands (or NINFER_LINEAR_ROUTES), not of the flag, so the fix
+-    // is configuration and the message says so rather than pretending to fall back. The fused
+-    // NVFP4 ops are unaffected: each carries an int8 branch on both tables.
++    // Plain-Linear int8 defaults to Unified. An explicit Legacy override (or a device without
++    // Unified support) is rejected rather than silently changing activation precision.
+     if (allows_nvfp4_int8(policy))
+         throw std::invalid_argument(
+             "nvfp4 linear: T=" + std::to_string(x.ne[1]) +
+             " resolves to the own (non-unified) shape table, which registers no plain-Linear int8 "
+-            "route. Run with NINFER_LINEAR_ROUTES=unified, or widen the device profile's nvfp4 "
+-            "width band to cover it");
++            "route. Remove the Legacy override or use NINFER_LINEAR_ROUTES=int8:unified "
++            "on a device supporting the unified table");
+     validate_nvfp4_weight(weight, "nvfp4 linear");
+     if (x.ne[1] <= 0) throw std::invalid_argument("nvfp4 linear: T must be positive");
+     const auto& shape = resolve_shape(weight.n, weight.k, policy);
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 3d9cd3c12fd51eabcf56d6707f2b50bf6d93c302..803012e3b0c830e15ecd13c6571dea5f251048c4 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -190,6 +190,33 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_kvmem_nvfp4_tests_PROGRAMS
+ ninfer_finalize_bundle(ninfer_kvmem_nvfp4_tests)
+ ninfer_stage_runtime_dlls(ninfer_kvmem_nvfp4_tests)
+ 
++# NVFP4 integration checks use separate processes for startup-fixed scoped overrides.
++ninfer_add_op_test(ninfer_nvfp4_scope STANDALONE
++  SOURCES experimental/nvfp4_scope.cpp LIBRARIES ninfer_ops)
++ninfer_stage_runtime_dlls(ninfer_nvfp4_scope)
++foreach(route_scope IN ITEMS default int8:legacy int8:unified a16:legacy a16:unified)
++  string(REPLACE ":" "_" route_name "${route_scope}")
++  set(route_environment "${route_scope}")
++  if(route_scope STREQUAL "default")
++    set(route_environment "")
++  endif()
++  add_test(NAME ninfer_nvfp4_routing_${route_name} COMMAND ninfer_nvfp4_scope)
++  set_tests_properties(ninfer_nvfp4_routing_${route_name} PROPERTIES
++    SKIP_RETURN_CODE 77 ENVIRONMENT "NINFER_LINEAR_ROUTES=${route_environment}")
++endforeach()
++ninfer_add_test(ninfer_nvfp4_mode_binding STANDALONE
++  SOURCES experimental/nvfp4_mode_binding.cpp LIBRARIES ninfer::engine)
++set_tests_properties(ninfer_nvfp4_mode_binding PROPERTIES SKIP_RETURN_CODE 77)
++ninfer_stage_runtime_dlls(ninfer_nvfp4_mode_binding)
++
++# Reuse the five relevant oracle objects without building unrelated test families.
++set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_nvfp4_fork_tests_PROGRAMS
++  ninfer_linear_nvfp4_a16_test ninfer_linear_nvfp4_int8_test
++  ninfer_linear_nvfp4_int8_fused_norm_test ninfer_linear_swiglu_nvfp4_test
++  ninfer_linear_add_nvfp4_test)
++ninfer_finalize_bundle(ninfer_nvfp4_fork_tests)
++ninfer_stage_runtime_dlls(ninfer_nvfp4_fork_tests)
++
+ # Focused CPU Vision lifecycle and existing numerical/options/loading qualification.
+ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_cpu_vision_tests_PROGRAMS
+   ninfer_qwen3_5_vision_cpu_test ninfer_cli_options_test ninfer_serve_options_test
+diff --git a/tests/README.md b/tests/README.md
+index 6632e1eec1ec87ffbebf3e1c14114d120146eb43..f020ac4a47cdd7a392fe623f21191024d12ef264 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -1,5 +1,10 @@
+ # Tests
+ 
++The local `ninfer_nvfp4_routing_*` checks cover default W4A8 admission at the MTP
++projection shape and family isolation under four scoped overrides. Each override
++runs in a separate process. `ninfer_nvfp4_mode_binding` additionally checks native
++snapshot isolation for explicit W4A16/W4A8 modes, and skips without a model fixture.
++
+ The retained tests protect current `.ninfer`, numerical operator, model, runtime-transaction,
+ benchmark-report, and external protocol behavior. Repository verification principles are defined in
+ [`../AGENTS.md`](../AGENTS.md); Op contract and CUDA implementation guidance is in
+diff --git a/tests/experimental/nvfp4_mode_binding.cpp b/tests/experimental/nvfp4_mode_binding.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..2733b86d844d767763b90d21e9f0952e8d771010
+--- /dev/null
++++ b/tests/experimental/nvfp4_mode_binding.cpp
+@@ -0,0 +1,61 @@
++#include "ninfer/engine.h"
++#include <filesystem>
++#include <iostream>
++#include <stdexcept>
++
++namespace {
++void require(bool condition,const char* message) {if(!condition) throw std::runtime_error(message);}
++ninfer::EngineOptions options(const char* artifact) {
++    ninfer::EngineOptions out;
++    out.artifact_path=artifact;out.device_profile="off";out.max_context=1024;
++    out.kv_capacity=ninfer::KvCapacityPolicy::explicit_capacity(1024);out.prefill_chunk=128;
++    out.use_cuda_graph=false;out.speculative.backend=ninfer::SpeculativeBackend::None;
++    out.speculative.ngram_draft_tokens=0;out.max_concurrency=1;
++    out.context_cache.device_state_slots=1;out.context_cache.host_state_slots=0;
++    out.context_cache.host_kv_capacity_bytes=0;out.context_cache.max_private_continuations=1;
++    out.context_cache.max_shared_prefixes=0;
++    return out;
++}
++void save(ninfer::Engine& engine,const std::string& path) {
++    ninfer::PromptInput prompt;prompt.options.enable_thinking=false;
++    ninfer::ChatMessage message;message.role=ninfer::ChatRole::User;
++    message.parts.push_back({.kind=ninfer::MessagePartKind::Text,.text="Return one word."});
++    prompt.messages.push_back(std::move(message));
++    ninfer::RequestOptions request;request.execution.requested_output_tokens=2;
++    request.execution.sampling.temperature=0;request.stop.include_model_defaults=false;
++    const auto result=engine.generate(engine.prepare(prompt),request);
++    require(result.slot>=0,"fixture did not retain a native slot");
++    require(engine.save_slot(static_cast<std::uint32_t>(result.slot),path).bytes>0,"empty snapshot");
++}
++void reject(ninfer::Engine& engine,const std::string& path) {
++    bool refused=false;
++    try {(void)engine.restore_slot(0,path);} catch(const std::invalid_argument& error) {
++        refused=std::string(error.what()).find("different model")!=std::string::npos;
++    }
++    require(refused,"snapshot from another weight mode was accepted");
++}
++}
++int main(int argc,char** argv) {
++    if (argc!=3) {
++        std::cout<<"SKIP: provide artifact and output-directory for native snapshot mode binding\n";
++        return 77;
++    }
++    try {
++        const auto directory=std::filesystem::absolute(argv[2]);std::filesystem::create_directories(directory);
++        const auto base_file=(directory/"default.bin").string(),a16_file=(directory/"a16.bin").string();
++        std::string base,a16;
++        {ninfer::Engine engine(options(argv[1]));base=engine.load_summary().prefill_signature;save(engine,base_file);}
++        {auto o=options(argv[1]);o.nvfp4_w4a16=true;ninfer::Engine engine(o);
++         a16=engine.load_summary().prefill_signature;require(a16!=base,"W4A16 signature equals default");
++         reject(engine,base_file);save(engine,a16_file);}
++        {auto o=options(argv[1]);o.nvfp4_w4a8_int=true;ninfer::Engine engine(o);
++         const auto signature=engine.load_summary().prefill_signature;
++         require(signature!=base && signature!=a16,"W4A8 signature collides with another mode");
++         reject(engine,base_file);reject(engine,a16_file);}
++        {auto o=options(argv[1]);o.nvfp4_w4a16=true;o.nvfp4_w4a8_int=true;ninfer::Engine engine(o);
++         require(engine.load_summary().prefill_signature==a16,"W4A16 precedence changes signature");
++         require(engine.restore_slot(0,a16_file).tokens>0,"same effective mode restore failed");}
++        std::cout<<"NVFP4 mode signatures and native snapshot isolation passed; non-NVFP4 fixture qualifies binding only\n";
++        return 0;
++    } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
++}
+diff --git a/tests/experimental/nvfp4_scope.cpp b/tests/experimental/nvfp4_scope.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..837a5c446a9b8be4b5eec67dd3013c2bfaa15a98
+--- /dev/null
++++ b/tests/experimental/nvfp4_scope.cpp
+@@ -0,0 +1,72 @@
++#include "ninfer/ops/linear.h"
++#include "ops/linear/common/route_table.h"
++#include "ops/common/device_route.h"
++#include <cuda_runtime.h>
++#include <cstdlib>
++#include <exception>
++#include <iostream>
++#include <stdexcept>
++#include <string_view>
++#include <utility>
++
++void check_route_selection() {
++    using namespace ninfer;
++    using namespace ops::detail;
++    if (!unified_linear_routes_here()) return;
++    const char* value = std::getenv("NINFER_LINEAR_ROUTES");
++    const std::string_view spec = value == nullptr ? "" : value;
++    const bool int8_scope = spec.starts_with("int8:");
++    const bool a16_scope = spec.starts_with("a16:");
++    if (!spec.empty() && !int8_scope && !a16_scope) {
++        throw std::invalid_argument("routing check requires default or scoped NVFP4 environment");
++    }
++    const auto forced = spec.ends_with(":unified") ? LinearRouteTable::Unified
++                                                  : LinearRouteTable::Legacy;
++    const auto int8_table = int8_scope ? forced : LinearRouteTable::Unified;
++    const auto a16_table = a16_scope ? forced : LinearRouteTable::Legacy;
++    for (int width : {1, 2, 8, 9, 32, 129, 2048}) {
++        if (linear_route_table(LinearRouteFamily::Nvfp4Int8, width) != int8_table) {
++            throw std::runtime_error("plain W4A8 selected an unexpected route");
++        }
++    }
++    if (linear_route_table(LinearRouteFamily::Nvfp4, 2048) != a16_table ||
++        linear_route_table(LinearRouteFamily::Q4, 2048) != LinearRouteTable::Legacy) {
++        throw std::runtime_error("NVFP4 override changed a different plain Linear family");
++    }
++    // Give both fused families the opposite profile schedule so a leaked scope is observable.
++    const auto baseline = forced == LinearRouteTable::Unified ? LinearRouteTable::Legacy
++                                                             : LinearRouteTable::Unified;
++    const char* schedule = baseline == LinearRouteTable::Unified ? "unified" : "";
++    for (const auto& [key, expected] : {
++             std::pair{"unified/nvfp4_linear_add", a16_scope ? forced : baseline},
++             std::pair{"nvfp4_int8/linear_add", int8_scope ? forced : baseline},
++             std::pair{"unified/fp8_linear_add", baseline}}) {
++        const ops::DeviceRouteForce route(key, schedule);
++        if (fused_route_table(key, 1) != expected) {
++            throw std::runtime_error("NVFP4 override crossed fused family boundaries");
++        }
++    }
++    bool rejected = false;
++    try {
++        const auto bytes = ops::linear_workspace_capacity_bytes(
++            QType::NVFP4, 14336, 5120, ops::LinearPolicy::AllowNvfp4Int8, 1, 129);
++        if (bytes == 0) throw std::runtime_error("W4A8 projection needs activation workspace");
++    } catch (const std::invalid_argument&) { rejected = true; }
++    if (rejected != (int8_table == LinearRouteTable::Legacy)) {
++        throw std::runtime_error("MTP-shaped W4A8 workspace admission disagrees with selected route");
++    }
++}
++
++int main() {
++    int count = 0;
++    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) return 77;
++    if (!ninfer::ops::detail::unified_linear_routes_here()) return 77;
++    try {
++        check_route_selection();
++        std::cout << "NVFP4 default/scoped routing passed\n";
++        return 0;
++    } catch (const std::exception& error) {
++        std::cerr << error.what() << '\n';
++        return 1;
++    }
++}

@@ -49,9 +49,10 @@ static Result run(llama_model * model, bool sync) {
     for (size_t i = 0; i < prompt.size(); ++i) prompt[i] = 100 + i;
     require(llama_decode(context.get(), llama_batch_get_one(prompt.data(), prompt.size())) == 0, "prefill failed");
     llama_kvmem_end_prefill_capture();
+    llama_kvmem_attention_begin(prompt.data(), prompt.size());
     int past = prompt.size();
     Result result;
-    for (int keep : {0, 1, 3, 4, 0, 4}) {
+    for (int keep : {0, 1, 3, 4, 0, 4, 4}) {
         llama_token ids[] = {200, 201, 202, 203};
         llama_pos positions[] = {past, past + 1, past + 2, past + 3};
         int8_t outputs[] = {1, 1, 1, 1};
@@ -79,6 +80,29 @@ static Result run(llama_model * model, bool sync) {
         require(logits != nullptr, "logits missing after checkpoint");
         result.logits.insert(result.logits.end(), logits, logits + count);
     }
+    llama_kvmem_tail_mean_state accepted;
+    require(llama_kvmem_get_tail_mean(past, accepted), "accepted-prefix statistics checkpoint failed");
+    require(accepted.scope.eligible_tokens == 16 && accepted.feedback.output_samples == 1,
+            "accepted output sampling crossed a rejected boundary");
+
+    // Complete public sequence removal starts a fresh logical history, including
+    // feedback and output sampling. A shorter new prompt must be checkpointable.
+    require(llama_memory_seq_rm(llama_get_memory(context.get()), 0, 0, -1), "full sequence removal failed");
+    llama_kvmem_tail_mean_state empty;
+    require(llama_kvmem_get_tail_mean(0, empty), "empty history retained an old graph frontier");
+    require(empty.graph.accepted_through == 0 && empty.graph.chunks.empty() &&
+            empty.graph.partial.samples == 0 && empty.graph.partial.mass.empty() &&
+            empty.feedback.output.empty() && empty.feedback.pending_output.empty() &&
+            empty.feedback.prefill.empty() && empty.feedback.output_samples == 0 &&
+            empty.scope.eligible_tokens == 0 && !empty.scope.thinking && empty.output_begin == UINT64_MAX,
+            "full sequence removal retained old attention statistics");
+    std::vector<llama_token> replacement(16, 250);
+    require(llama_decode(context.get(), llama_batch_get_one(replacement.data(), replacement.size())) == 0,
+            "replacement prefill failed");
+    llama_kvmem_tail_mean_state fresh;
+    require(llama_kvmem_get_tail_mean(replacement.size(), fresh), "replacement statistics checkpoint failed");
+    require(fresh.graph.accepted_through == replacement.size() && fresh.scope.eligible_tokens == 0 &&
+            fresh.feedback.output_samples == 0, "new prefill inherited old output state");
     return result;
 }
 
@@ -95,7 +119,7 @@ int main(int argc, char ** argv) {
         const auto after = run(model.get(), false);
         require(before.checkpoints == after.checkpoints, "queued Fold changed checkpoint bytes");
         require(before.logits == after.logits, "queued Fold changed logits");
-        std::puts("PASS zero/partial/full acceptance, immediate checkpoint/restore, continued verification: sync == queued");
+        std::puts("PASS zero/partial/full acceptance, checkpoint/restore, full removal and shorter prefill: sync == queued");
         return 0;
     } catch (const std::exception & error) {
         std::fprintf(stderr, "%s\n", error.what());

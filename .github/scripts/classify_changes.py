@@ -7,12 +7,37 @@ import subprocess
 
 DOC_SUFFIXES = {'.md', '.rst', '.txt', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.pdf'}
 WORKFLOW = '.github/workflows/server-compat.yml'
+CUDA_JOBS = ('cuda-build-linux', 'polystrata-cuda-build-linux')
 NON_CUDA_PATHS = {
     WORKFLOW, '.github/scripts/classify_changes.py', 'tests/test_ci_changes.py',
     'scripts/windows/start-backend.ps1', 'scripts/windows/start-ninfer.ps1',
     'scripts/windows/start-server.ps1', 'scripts/windows/test-backend-launcher.ps1',
     'scripts/windows/test-launcher.ps1',
 }
+CONSOLE_PATHS = {
+    'START-HERE-CN.sh', 'START-HERE-EN.sh', 'START-HERE-CN.bat', 'START-HERE-EN.bat',
+    'scripts/local-console.py', 'scripts/launcher-cli.py', 'scripts/launcher-capabilities.json',
+    'scripts/console_chat.py', 'scripts/console_hardware.py', 'scripts/model_health.py',
+    'scripts/requirements-console.txt', 'scripts/speculative-capabilities.json',
+    'scripts/linux/start-ui.sh', 'scripts/linux/package-console.py',
+    'scripts/windows/start-ui.ps1', 'scripts/windows/package-console.ps1',
+    'scripts/windows/describe-launch-json.ps1', 'scripts/install-console-dependency.py',
+    'ui/package.json', 'ui/package-lock.json',
+}
+
+
+def is_console_path(path):
+    if '..' in PurePosixPath(path).parts or path.startswith('/'):
+        return False
+    return (path in CONSOLE_PATHS or path.startswith(('scripts/launcher/', 'scripts/model_health_ninfer/', 'ui/monitor/'))
+            or bool(re.fullmatch(r'tests/test_(launcher[^/]*|local_console|console_[^/]+|one_click|model_health)\.py', path))
+            or bool(re.fullmatch(r'ui/test-[^/]+\.cjs', path)))
+
+
+def requires_native(paths):
+    # Unknown paths and CI recipe changes stay conservative. Pure UI changes
+    # still run Python/browser checks, without configuring or building engines.
+    return not paths or any(not is_documentation(path) and not is_console_path(path) for path in paths)
 
 
 def is_documentation(path):
@@ -37,24 +62,27 @@ def git(*args, cwd=None):
 
 
 def cuda_build_definition(text):
-    """Keep global settings and the CUDA recipe; ignore only job eligibility."""
+    """Keep globals and every native CUDA recipe; ignore only job eligibility."""
     text = text.replace('\r\n', '\n')
     jobs = re.search(r'^jobs:[ \t]*$', text, re.MULTILINE)
     sections = list(re.finditer(r'^  ([a-zA-Z0-9_-]+):[ \t]*$', text, re.MULTILINE))
     if jobs is None:
         return None
+    recipes = {}
     for index, section in enumerate(sections):
-        if section.group(1) == 'cuda-build-linux':
+        if section.group(1) in CUDA_JOBS:
             end = sections[index + 1].start() if index + 1 < len(sections) else len(text)
             body = text[section.start():end]
             body = '\n'.join(line for line in body.splitlines()
                              if not re.match(r'^    (needs|if):', line))
-            return text[:jobs.start()], body
-    return None
+            recipes[section.group(1)] = body
+    if any(name not in recipes for name in CUDA_JOBS):
+        return None
+    return text[:jobs.start()], tuple(recipes[name] for name in CUDA_JOBS)
 
 
 def requires_cuda(paths, before, after, cwd=None):
-    if not paths or any(not is_documentation(path) and path not in NON_CUDA_PATHS for path in paths):
+    if not paths or any(not is_documentation(path) and path not in NON_CUDA_PATHS and not is_console_path(path) for path in paths):
         return True
     if WORKFLOW in paths:
         try:
@@ -99,7 +127,8 @@ def main():
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
         output.write('run_ci=' + str(full).lower() + '\n')
         output.write('run_cuda=' + str(cuda).lower() + '\n')
-    print(json.dumps({'run_ci': full, 'run_cuda': cuda, 'reason': reason, 'paths': paths}, ensure_ascii=True))
+        output.write('run_native=' + str(full and requires_native(paths)).lower() + '\n')
+    print(json.dumps({'run_ci': full, 'run_cuda': cuda, 'run_native': full and requires_native(paths), 'reason': reason, 'paths': paths}, ensure_ascii=True))
 
 
 if __name__ == '__main__':

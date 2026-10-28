@@ -1,0 +1,181 @@
+{
+  "date": "2026-10-22",
+  "scope": "Diagnosis only; existing binary, source and scoring policy unchanged",
+  "gpu": "RTX 5060 Ti",
+  "gpu_uuid": "GPU-A",
+  "workload": "Qwen3.8-27B IQ3_S, NVFP4 KV, pp36864/tg256, KV capacity53248, MTP4, default C",
+  "profiler": "Nsight Systems 2025.6.3; CUDA/NVTX, graph-level tracing; warmup0,reps1; internal graph-prime generation excluded from phase totals",
+  "limitations": [
+    "Initial sandboxed profiler launch timed out without data; retry outside sandbox succeeded",
+    "Profiling materially increases runtime; GPU hotspot ranking is diagnostic, not a measured speedup or precise attribution of the unprofiled native/KVMem difference",
+    "Transfer figures include all copies in each phase, not only feedback copies",
+    "No NVFP4 specialization or batched-copy prototype was implemented; attainable speedup remains unmeasured"
+  ],
+  "same_tokens_and_speculative_work": true,
+  "profile_wall_seconds": {
+    "prompt_wall_seconds": 82.9296773,
+    "generation_wall_seconds": 7.1438992
+  },
+  "unprofiled_wall_seconds_median": {
+    "prompt_wall_seconds": 54.852145,
+    "generation_wall_seconds": 3.4814985
+  },
+  "phases": {
+    "prefill": {
+      "feedback_kernels": [
+        {
+          "name": "ninfer::ops::<unnamed>::average_heads(const float *, const float *, int, int, float *)",
+          "launches": 108,
+          "gpu_ms": 0.272921,
+          "mean_gpu_us": 2.5270462962962963,
+          "registers_per_thread": 40,
+          "local_memory_per_thread": 0
+        },
+        {
+          "name": "ninfer::ops::<unnamed>::normalize_lse(const float *, int, float *)",
+          "launches": 108,
+          "gpu_ms": 0.370931,
+          "mean_gpu_us": 3.434546296296296,
+          "registers_per_thread": 38,
+          "local_memory_per_thread": 0
+        },
+        {
+          "name": "void ninfer::ops::<unnamed>::page_lse<(bool)0>(const __nv_bfloat16 *, const int *, const int *, const int *, const void *, const void *, ninfer::KvCacheStorage, int, int, int, int, float *)",
+          "launches": 108,
+          "gpu_ms": 966.464907,
+          "mean_gpu_us": 8948.749138888888,
+          "registers_per_thread": 90,
+          "local_memory_per_thread": 0
+        }
+      ],
+      "all_phase_transfers": [
+        {
+          "direction": "Device-to-Device",
+          "count": 583,
+          "bytes": 1359163396,
+          "gpu_ms": 2.162922
+        },
+        {
+          "direction": "Device-to-Host",
+          "count": 254,
+          "bytes": 50061332,
+          "gpu_ms": 11.918687
+        },
+        {
+          "direction": "Host-to-Device",
+          "count": 1376,
+          "bytes": 310552,
+          "gpu_ms": 1.833198
+        }
+      ]
+    },
+    "decode": {
+      "feedback_kernels": [
+        {
+          "name": "ninfer::ops::<unnamed>::average_heads(const float *, const float *, int, int, float *)",
+          "launches": 48,
+          "gpu_ms": 0.118013,
+          "mean_gpu_us": 2.4586041666666665,
+          "registers_per_thread": 40,
+          "local_memory_per_thread": 0
+        },
+        {
+          "name": "ninfer::ops::<unnamed>::normalize_lse(const float *, int, float *)",
+          "launches": 48,
+          "gpu_ms": 0.120925,
+          "mean_gpu_us": 2.5192708333333336,
+          "registers_per_thread": 38,
+          "local_memory_per_thread": 0
+        },
+        {
+          "name": "void ninfer::ops::<unnamed>::page_lse<(bool)0>(const __nv_bfloat16 *, const int *, const int *, const int *, const void *, const void *, ninfer::KvCacheStorage, int, int, int, int, float *)",
+          "launches": 48,
+          "gpu_ms": 115.415682,
+          "mean_gpu_us": 2404.493375,
+          "registers_per_thread": 90,
+          "local_memory_per_thread": 0
+        }
+      ],
+      "all_phase_transfers": [
+        {
+          "direction": "Device-to-Host",
+          "count": 160,
+          "bytes": 18510848,
+          "gpu_ms": 4.622533
+        },
+        {
+          "direction": "Host-to-Device",
+          "count": 112,
+          "bytes": 448,
+          "gpu_ms": 0.162076
+        }
+      ]
+    }
+  },
+  "command": [
+    "C:\\Program Files\\NVIDIA Corporation\\Nsight Systems 2025.6.3\\target-windows-x64\\nsys.exe",
+    "profile",
+    "--trace=cuda,nvtx",
+    "--sample=none",
+    "--cpuctxsw=none",
+    "--cuda-graph-trace=graph:host-only",
+    "--export=sqlite",
+    "--output=$ARTIFACTS\\ninfer-upstream-20261022\\profile-nvfp4\\trace",
+    "$ARTIFACTS\\ninfer-upstream-20261022\\build-kvmem\\bench\\ninfer_bench.exe",
+    "--weights",
+    "$ARTIFACTS\\models\\ninfer\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+    "--corpus",
+    "$ARTIFACTS\\ninfer-upstream-20261022\\native\\bench\\fixtures\\bench_corpus.ids",
+    "-pg",
+    "36864,256",
+    "--max-ctx",
+    "53248",
+    "--prefill-chunk",
+    "256",
+    "--kv-dtype",
+    "nvfp4",
+    "--device",
+    "0",
+    "--ngram-draft-tokens",
+    "0",
+    "--warmup",
+    "0",
+    "-r",
+    "1",
+    "-o",
+    "json",
+    "--output-file",
+    "$ARTIFACTS\\ninfer-upstream-20261022\\profile-nvfp4\\report.json",
+    "--spec",
+    "mtp",
+    "--draft-tokens",
+    "4",
+    "--ngram-draft-tokens",
+    "0",
+    "--kvmem-budget",
+    "36864",
+    "--kvmem-gen-reserve",
+    "16384",
+    "--kvmem-host-mib",
+    "12288",
+    "--kvmem-sessions",
+    "1",
+    "--no-kvmem-lrfu",
+    "--kvmem-query-scorer",
+    "page-softmax",
+    "--kvmem-score-agg",
+    "mean",
+    "--kvmem-graph-alpha",
+    "0.2",
+    "--kvmem-sink-tokens",
+    "12288",
+    "--kvmem-recent-tokens",
+    "1024"
+  ],
+  "raw_evidence_directory": "$ARTIFACTS\\ninfer-upstream-20261022\\profile-nvfp4",
+  "_sanitization": {
+    "version": 1,
+    "original_sha256": "1e90f4e397406a2ea5e90976271abdbdf6646ff4e915503dd9aaed2da6dd9948",
+    "scope": "Device identities/private paths anonymized, credential fields redacted; measurements unchanged."
+  }
+}

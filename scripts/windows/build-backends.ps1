@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('core', 'llamacpp', 'ninfer', 'all')][string]$Backend = 'core',
+    [ValidateSet('core', 'llamacpp', 'ninfer', 'polystrata', 'all')][string]$Backend = 'core',
     [string]$BuildRoot,
     [string]$Python = 'python',
     [string]$CudaPath = $env:CUDA_PATH,
@@ -18,10 +18,10 @@ if ($ConfigureOnly -and $BuildOnly) { throw 'Choose ConfigureOnly or BuildOnly, 
 $source = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 if (!$BuildRoot) { $BuildRoot = Join-Path $source 'build-backends' }
 $BuildRoot = [IO.Path]::GetFullPath($BuildRoot)
-$backends = if ($Backend -eq 'all') { @('llamacpp', 'ninfer') } else { @($Backend) }
+$backends = if ($Backend -eq 'all') { @('llamacpp', 'ninfer', 'polystrata') } else { @($Backend) }
 $plans = foreach ($name in $backends) {
     $build = Join-Path $BuildRoot $name
-    $tree = if ($name -eq 'ninfer') { Join-Path $source 'backends/ninfer' } else { $source }
+    $tree = if ($name -in @('ninfer','polystrata')) { Join-Path $source "backends/$name" } else { $source }
     $configure = @('-S', $tree, '-B', $build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release')
     $target = @()
     if ($name -eq 'core') {
@@ -31,6 +31,9 @@ $plans = foreach ($name in $backends) {
             '-DGGML_CUDA_FA_QUANTS=all', '-DBUILD_SHARED_LIBS=OFF',
             "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures")
         $target = @('--target', 'llama-kvmem-server')
+    } elseif ($name -eq 'polystrata') {
+        $configure += @("-DSTRATA_KVMEM_SOURCE_DIR=$source/kvmem",'-DSTRATA_ENABLE_CUDA=ON','-DSTRATA_BUILD_TESTS=OFF',"-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures")
+        $target = @('--target','strata-poly')
     } else {
         $configure += @("-DNINFER_KVMEM_SOURCE_DIR=$source/kvmem", '-DNINFER_BUILD_APPS=ON',
             '-DNINFER_BUILD_BENCHMARKS=OFF', "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures")

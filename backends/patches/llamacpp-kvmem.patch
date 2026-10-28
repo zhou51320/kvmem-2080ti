@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 12f4555..2c6dd9b 100644
+index 12f45558f5bef071555e0e47d9e66158e5737228..2c6dd9bea91a5c3d26621fd77d11b709c7dc7a1f 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -128,6 +128,11 @@ option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
@@ -15,7 +15,7 @@ index 12f4555..2c6dd9b 100644
  option(LLAMA_BUILD_TESTS     "llama: build tests"                                                                ${LLAMA_STANDALONE})
  option(LLAMA_BUILD_TOOLS     "llama: build tools"                                                                ${LLAMA_STANDALONE})
 diff --git a/common/common.cpp b/common/common.cpp
-index c5db228..4b2e354 100644
+index c5db228329f5506de623217304bcb3980887c0f5..4b2e354f81954fa0823659172b24b6cece18c51f 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -2259,6 +2259,7 @@ llama_batch_ext * common_batch::get_sub_batch(int32_t off, int32_t n) {
@@ -27,7 +27,7 @@ index c5db228..4b2e354 100644
          for (const llama_seq_id seq_id : t.seq_ids_extra) {
              if (!llama_batch_ext_add_seq(res, idx, seq_id)) {
 diff --git a/common/common.h b/common/common.h
-index 2cd6e2e..7945b26 100644
+index 2cd6e2ec9858a91837746b8c392d59fbd2e18829..7945b26da88762a1cac66b6ec73594e7d504f723 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -1082,6 +1082,7 @@ struct common_batch {
@@ -39,7 +39,7 @@ index 2cd6e2e..7945b26 100644
  
      std::vector<token> tokens; // mirror of the entries, tokens[i] describes batch index i
 diff --git a/common/reasoning-budget.cpp b/common/reasoning-budget.cpp
-index 4884299..e2a68da 100644
+index 4884299f3011fa9ecf99d684bb332fbe7d223ee9..e2a68dad10915fbf015aeba4ea00050d5f506a6b 100644
 --- a/common/reasoning-budget.cpp
 +++ b/common/reasoning-budget.cpp
 @@ -185,6 +185,21 @@ static void common_reasoning_budget_apply(struct llama_sampler * smpl, llama_tok
@@ -65,7 +65,7 @@ index 4884299..e2a68da 100644
      auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
      ctx->state = REASONING_BUDGET_IDLE;
 diff --git a/common/reasoning-budget.h b/common/reasoning-budget.h
-index 1b89a04..87584c8 100644
+index 1b89a04c42e8056d6450d3266e4f0c1e2a561d2e..87584c8154d770d85551ee263b41dd77a5b03d4e 100644
 --- a/common/reasoning-budget.h
 +++ b/common/reasoning-budget.h
 @@ -43,6 +43,9 @@ struct llama_sampler * common_reasoning_budget_init(
@@ -79,7 +79,7 @@ index 1b89a04..87584c8 100644
  // was recorded. Cleared when a new start sequence re-arms the sampler.
  const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl);
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index 564fa9c..50e0731 100644
+index 564fa9c4dbf4aac5a4d3dcc68a9259e804ac7f4b..50e0731be53570c13a29942bc53ea1beecb5f7d4 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
 @@ -321,7 +321,7 @@ struct common_sampler * common_sampler_init(
@@ -92,7 +92,7 @@ index 564fa9c..50e0731 100644
          }
      }
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index d8afd40..7cdfadf 100644
+index d8afd4095498ecc14f0f6e53d5f2e46015533dea..7cdfadf5903b461b0304b19acc7155b36e629f44 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -984,6 +984,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
@@ -357,7 +357,7 @@ index d8afd40..7cdfadf 100644
  
  common_speculative_output_limits common_speculative_get_output_limits(
 diff --git a/common/speculative.h b/common/speculative.h
-index a598468..28718a0 100644
+index a59846829683b96296b22285aab72c35b75cce5b..28718a01599c134b08f94174991ae8276553100d 100644
 --- a/common/speculative.h
 +++ b/common/speculative.h
 @@ -79,6 +79,7 @@ struct common_speculative_draft_params {
@@ -391,7 +391,7 @@ index a598468..28718a0 100644
 +common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt,
 +                                                                      std::shared_ptr<llama_model> model_dft = {});
 diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
-index 7a65d81..9c4fd6c 100644
+index 7a65d8121b1c1f135bef3586058b83c07ce0cb73..9c4fd6c2aefb9452dba2691f36fbd0b7d837df57 100644
 --- a/ggml/include/ggml-backend.h
 +++ b/ggml/include/ggml-backend.h
 @@ -369,6 +369,10 @@ extern "C" {
@@ -415,14 +415,14 @@ index 7a65d81..9c4fd6c 100644
      //
      // Utils
 diff --git a/ggml/include/ggml-cuda.h b/ggml/include/ggml-cuda.h
-index 1cd81ee..4665d07 100644
+index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..649d9713339e0ab9887d61b7ad0ec4c357bc1c7f 100644
 --- a/ggml/include/ggml-cuda.h
 +++ b/ggml/include/ggml-cuda.h
 @@ -42,6 +42,23 @@ GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
  
  GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
  
-+// FP32 Qwen GDN layout: 128-wide heads, 16 key heads, 48 value heads, conv width 4.
++// FP32 Qwen GDN layout: 128-wide heads, model-defined key/value head counts, conv width 4.
 +struct ggml_cuda_gdn_replay_layer {
 +    float * state;
 +    float * conv;
@@ -437,13 +437,13 @@ index 1cd81ee..4665d07 100644
 +// n_keep == 0 is a no-op; records outside the accepted prefix are never read.
 +GGML_BACKEND_API bool ggml_backend_cuda_gdn_fold(
 +        const struct ggml_cuda_gdn_replay_layer * layers,
-+        int n_layers, int n_keep, int capacity, void * stream);
++        int n_layers, int n_keep, int capacity, int key_heads, int value_heads, void * stream);
 +
  #ifdef  __cplusplus
  }
  #endif
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index c37ba94..3444ace 100644
+index c37ba947140e1b84c67440632691323b05e96329..3444ace39d12b40454a7747588b079057b89ba45 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
 @@ -601,6 +601,8 @@ extern "C" {
@@ -464,7 +464,7 @@ index c37ba94..3444ace 100644
              struct ggml_context * ctx,
              struct ggml_tensor  * q,
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
-index 679d521..831769f 100644
+index 679d5216d255b94673aa12ae9dcadadb5bc6e032..831769f6bdfeb58fc39dfe2691aa80512718f3bb 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
 @@ -64,13 +64,13 @@ struct ggml_backend_meta_device_context {
@@ -532,7 +532,7 @@ index 679d521..831769f 100644
                  name += ",";
              }
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index ffbcba3..f62ee79 100644
+index ffbcba3661cfbafac5d658fae157dcaf71f502bf..f62ee799034b295ff1f76618370a3d5636775bf6 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
 @@ -986,6 +986,18 @@ struct ggml_backend_sched {
@@ -630,7 +630,7 @@ index ffbcba3..f62ee79 100644
          memset(sched->hv_tensor_backend_ids, -1, sched->hash_set.size * sizeof(sched->hv_tensor_backend_ids[0]));
          memset(sched->hv_tensor_copies,       0, sched->hash_set.size * sched->n_backends * sched->n_copies * sizeof(struct ggml_tensor *));
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index ab82e3d..bc5a6e7 100644
+index ab82e3d6c04395b702ccbf3a9ac3e954d8d8cfcf..bc5a6e70031fbdd8cf526f0af0626065603beed0 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
 @@ -2086,6 +2086,7 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
@@ -663,7 +663,7 @@ index ab82e3d..bc5a6e7 100644
                      } break;
                  case GGML_OP_COUNT:
 diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
-index 7a73e13..6d6a8fa 100644
+index 7a73e138ef1fc3040ef00a2280c0344e2b4ae5f1..6d6a8fa1b82402d5334815316df31bd0debfb925 100644
 --- a/ggml/src/ggml-cpu/ops.cpp
 +++ b/ggml/src/ggml-cpu/ops.cpp
 @@ -11240,15 +11240,15 @@ static void ggml_compute_forward_gated_delta_net_one_chunk(
@@ -695,7 +695,7 @@ index 7a73e13..6d6a8fa 100644
              : state_out_base + (iv3 * H + iv1) * S_v * S_v;
  
 diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_delta_net.cu
-index ae2374c..703528d 100644
+index ae2374cbcdd79b3383d622b85d3d6a086c8d5e5e..4dc05e805362290b1739cb0f87e5f13ef8873e3c 100644
 --- a/ggml/src/ggml-cuda/gated_delta_net.cu
 +++ b/ggml/src/ggml-cuda/gated_delta_net.cu
 @@ -1,5 +1,6 @@
@@ -760,12 +760,12 @@ index ae2374c..703528d 100644
          ggml_cuda_gdn_mma_args args = ggml_cuda_gdn_mma_args_from_tensor(dst);
          args.state_out = state_d;
          if (ggml_cuda_gdn_mma_launch(ctx.device, args, stream)) {
-@@ -391,3 +385,73 @@ void ggml_cuda_op_gated_delta_net_fused_cache(
+@@ -391,3 +385,77 @@ void ggml_cuda_op_gated_delta_net_fused_cache(
          ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_cuda_gated_delta_net_fused_cache cache) {
      ggml_cuda_op_gated_delta_net_impl(ctx, dst, &cache);
  }
 +
-+static __global__ void gdn_fold_f32(const ggml_cuda_gdn_replay_layer * layers, int n_keep) {
++static __global__ void gdn_fold_f32(const ggml_cuda_gdn_replay_layer * layers, int n_keep, int key_heads, int value_heads) {
 +    constexpr int width = ggml_cuda_get_physical_warp_size();
 +    constexpr int lanes_per_col = width / gdn_cols_per_warp;
 +    constexpr int rows = 128 / lanes_per_col;
@@ -781,15 +781,15 @@ index ae2374c..703528d 100644
 +        s[r] = state[r * lanes_per_col + lane];
 +    }
 +    for (int t = 0; t < n_keep; ++t) {
-+        const float * key = layer.key + (t * 16 + head % 16) * 128;
++        const float * key = layer.key + (t * key_heads + head % key_heads) * 128;
 +        float k[rows];
 +#pragma unroll
 +        for (int r = 0; r < rows; ++r) {
 +            k[r] = key[r * lanes_per_col + lane];
 +        }
-+        const float decay = expf(layer.gate[t * 48 + head]);
++        const float decay = expf(layer.gate[t * value_heads + head]);
 +        const float delta = gdn_delta_f32<rows, lanes_per_col>(s, k, decay,
-+                layer.value[(t * 48 + head) * 128 + col], layer.beta[t * 48 + head]);
++                layer.value[(t * value_heads + head) * 128 + col], layer.beta[t * value_heads + head]);
 +#pragma unroll
 +        for (int r = 0; r < rows; ++r) {
 +            s[r] = gdn_update_f32(s[r], k[r], decay, delta);
@@ -801,16 +801,16 @@ index ae2374c..703528d 100644
 +    }
 +}
 +
-+static __global__ void gdn_conv_fold_f32(const ggml_cuda_gdn_replay_layer * layers, int n_keep) {
++static __global__ void gdn_conv_fold_f32(const ggml_cuda_gdn_replay_layer * layers, int n_keep, int channels) {
 +    const int channel = blockIdx.x * blockDim.x + threadIdx.x;
-+    if (channel >= 10240) return;
++    if (channel >= channels) return;
 +    const auto layer = layers[blockIdx.y];
 +    float history[3];
 +#pragma unroll
 +    for (int i = 0; i < 3; ++i) {
 +        const int source = n_keep + i;
 +        history[i] = source < 3 ? layer.conv[channel * 3 + source]
-+                                : layer.conv_input[(source - 3) * 10240 + channel];
++                                : layer.conv_input[(source - 3) * channels + channel];
 +    }
 +#pragma unroll
 +    for (int i = 0; i < 3; ++i) {
@@ -819,23 +819,27 @@ index ae2374c..703528d 100644
 +}
 +
 +bool ggml_backend_cuda_gdn_fold(const ggml_cuda_gdn_replay_layer * layers,
-+        int n_layers, int n_keep, int capacity, void * stream_ptr) {
++        int n_layers, int n_keep, int capacity, int key_heads, int value_heads, void * stream_ptr) {
 +    if (n_keep == 0) return true;
-+    if (!layers || n_layers <= 0 || n_keep < 0 || n_keep > capacity || capacity > 6) return false;
++    if (key_heads <= 0 || value_heads <= 0 || value_heads % key_heads != 0 ||
++            int64_t(2) * key_heads + value_heads > INT_MAX / 128 ||
++            n_keep < 0 || n_keep > capacity || capacity < 1 || capacity > 6) return false;
++    if (!layers || n_layers <= 0) return false;
++    const int channels = (2 * key_heads + value_heads) * 128;
 +    const auto stream = static_cast<cudaStream_t>(stream_ptr);
 +#if defined(GGML_USE_HIP)
 +    const int width = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
 +    if (width != 32 && width != 64) return false;
-+    gdn_fold_f32<<<dim3(48, n_layers, 8), dim3(width, 4), 0, stream>>>(layers, n_keep);
++    gdn_fold_f32<<<dim3(value_heads, n_layers, 8), dim3(width, 4), 0, stream>>>(layers, n_keep, key_heads, value_heads);
 +#else
-+    gdn_fold_f32<<<dim3(48, n_layers, 8), dim3(32, 4), 0, stream>>>(layers, n_keep);
++    gdn_fold_f32<<<dim3(value_heads, n_layers, 8), dim3(32, 4), 0, stream>>>(layers, n_keep, key_heads, value_heads);
 +#endif
 +    if (cudaGetLastError() != cudaSuccess) return false;
-+    gdn_conv_fold_f32<<<dim3(40, n_layers), 256, 0, stream>>>(layers, n_keep);
++    gdn_conv_fold_f32<<<dim3((channels + 255) / 256, n_layers), 256, 0, stream>>>(layers, n_keep, channels);
 +    return cudaGetLastError() == cudaSuccess;
 +}
 diff --git a/ggml/src/ggml-cuda/gated_delta_net.cuh b/ggml/src/ggml-cuda/gated_delta_net.cuh
-index f9bf437..05adbb4 100644
+index f9bf437067896a97485e21c2907bb7c3bc4df2cf..05adbb46c48d630d5ffdb4006fcc336ea891ac9b 100644
 --- a/ggml/src/ggml-cuda/gated_delta_net.cuh
 +++ b/ggml/src/ggml-cuda/gated_delta_net.cuh
 @@ -1,6 +1,22 @@
@@ -862,7 +866,7 @@ index f9bf437..05adbb4 100644
  struct ggml_cuda_gated_delta_net_fused_cache {
      float * data;        // rollback slot 0
 diff --git a/ggml/src/ggml-cuda/getrows.cu b/ggml/src/ggml-cuda/getrows.cu
-index d97e8fd..b084d87 100644
+index d97e8fdb0f401a9f68394c915aa564e1cee321ac..b084d87e2b64186ff6ead0d99c5667a0655e3c34 100644
 --- a/ggml/src/ggml-cuda/getrows.cu
 +++ b/ggml/src/ggml-cuda/getrows.cu
 @@ -452,6 +452,11 @@ void ggml_cuda_op_get_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -878,7 +882,7 @@ index d97e8fd..b084d87 100644
          ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
  }
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 7c45d0d..7aee29c 100644
+index 7c45d0d1fb2359d8d6c0e9b0b515ca48c5eddea5..7aee29c0c0be6be4ce2c3dc5e810b5a8f29faf2f 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -99,6 +99,8 @@ static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
@@ -1095,7 +1099,7 @@ index 7c45d0d..7aee29c 100644
          case GGML_OP_DSV4_HC_COMB:
              return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
 diff --git a/ggml/src/ggml-cuda/norm.cu b/ggml/src/ggml-cuda/norm.cu
-index d804b93..439ef7e 100644
+index d804b933bbb563c8732b966e92efb348b6ed4e67..439ef7e712f28dbffcc0038ea1c604b03577e04b 100644
 --- a/ggml/src/ggml-cuda/norm.cu
 +++ b/ggml/src/ggml-cuda/norm.cu
 @@ -1,4 +1,5 @@
@@ -1154,7 +1158,7 @@ index d804b93..439ef7e 100644
                                       ggml_tensor *               dst,
                                       ggml_tensor *               mul_tensor,
 diff --git a/ggml/src/ggml-cuda/norm.cuh b/ggml/src/ggml-cuda/norm.cuh
-index 95618df..65d5179 100644
+index 95618df5fd4d505fc1d171dc5e3bc404afac7d58..65d5179cbdc24764116ca0905a4456f1dd8e6b94 100644
 --- a/ggml/src/ggml-cuda/norm.cuh
 +++ b/ggml/src/ggml-cuda/norm.cuh
 @@ -9,6 +9,8 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
@@ -1166,8 +1170,20 @@ index 95618df..65d5179 100644
  
  void ggml_cuda_op_rms_norm_fused_add(ggml_backend_cuda_context & ctx,
                                       ggml_tensor *               dst,
+diff --git a/ggml/src/ggml-cuda/vendors/hip.h b/ggml/src/ggml-cuda/vendors/hip.h
+--- a/ggml/src/ggml-cuda/vendors/hip.h
++++ b/ggml/src/ggml-cuda/vendors/hip.h
+@@ -99,6 +99,7 @@
+ #define cudaMemsetAsync hipMemsetAsync
+ #define cudaMemGetInfo hipMemGetInfo
+ #define cudaOccupancyMaxPotentialBlockSize hipOccupancyMaxPotentialBlockSize
++#define cudaPeekAtLastError hipPeekAtLastError
+ #define cudaSetDevice hipSetDevice
+ #define cuDeviceGet hipDeviceGet
+ #define CUdevice hipDevice_t
+
 diff --git a/ggml/src/ggml-hip/CMakeLists.txt b/ggml/src/ggml-hip/CMakeLists.txt
-index 75d4d60..c34b71a 100644
+index 75d4d60e87989f9d79062f55d4942023807f1459..c34b71a2820d69ef0fb4e044b889303f505a5c61 100644
 --- a/ggml/src/ggml-hip/CMakeLists.txt
 +++ b/ggml/src/ggml-hip/CMakeLists.txt
 @@ -133,6 +133,37 @@ else()
@@ -1209,7 +1225,7 @@ index 75d4d60..c34b71a 100644
      message(FATAL_ERROR "Static linking not supported for HIP/ROCm")
  endif()
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index 01dc8d0..72ab5b4 100644
+index 01dc8d05c3168ea9075f12687d95bee02a25e9c9..72ab5b4036da02b30ab65207bccc5ddab33aea8e 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
 @@ -1110,9 +1110,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
@@ -1254,7 +1270,7 @@ index 01dc8d0..72ab5b4 100644
      result->src[1] = k;
      result->src[2] = v;
 diff --git a/include/llama.h b/include/llama.h
-index 3af6e22..5f3ad69 100644
+index 3af6e22233efe53bff96ee5857af26fb886c9a04..5f3ad69741e30efecf7127df2ae4f6852c13936d 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -270,6 +270,9 @@ extern "C" {
@@ -1277,10 +1293,10 @@ index 3af6e22..5f3ad69 100644
                                  struct llama_batch_ext * batch,
                                                 int32_t   idx,
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 97250c2..3ebbf66 100644
+index 97250c2e885645386702f516d1f00ff2c9b121f2..10cc2e092c7a2f96e13d6e1ef1c9a9c8090c3eeb 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -71,6 +71,43 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+@@ -71,6 +71,45 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
  
  target_link_libraries(llama PUBLIC ggml)
  
@@ -1290,6 +1306,7 @@ index 97250c2..3ebbf66 100644
 +    endif()
 +    target_sources(llama PRIVATE
 +        ${LLAMA_KVMEM_ROOT}/src/adapter/llama-memory-kvmem.cpp
++        ${LLAMA_KVMEM_ROOT}/src/adapter/llama-kvmem-attention.cpp
 +        ${LLAMA_KVMEM_ROOT}/src/adapter/llama-memory-kvmem-hybrid.cpp
 +        ${LLAMA_KVMEM_ROOT}/src/adapter/llama-memory-kvmem-mtp.cpp
 +        ${LLAMA_KVMEM_ROOT}/src/adapter/llama-kvmem-batch.cpp
@@ -1298,6 +1315,7 @@ index 97250c2..3ebbf66 100644
 +    if (GGML_CUDA)
 +        enable_language(CUDA)
 +        target_sources(llama PRIVATE
++            ${LLAMA_KVMEM_ROOT}/src/adapter/llama-kvmem-attention-cuda.cu
 +            ${LLAMA_KVMEM_ROOT}/src/adapter/llama-kvmem-stagein.cu)
 +        if (DEFINED CMAKE_CUDA_ARCHITECTURES)
 +            set_property(TARGET llama PROPERTY CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES})
@@ -1325,7 +1343,7 @@ index 97250c2..3ebbf66 100644
      set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
      target_compile_definitions(llama PRIVATE LLAMA_BUILD)
 diff --git a/src/llama-batch.cpp b/src/llama-batch.cpp
-index 321aa9d..bacbe37 100644
+index 321aa9d2364791f81c3349403b0cf22225dba91d..bacbe374fab0c5b36432f7f199ee3cd8e0a82d4e 100644
 --- a/src/llama-batch.cpp
 +++ b/src/llama-batch.cpp
 @@ -234,6 +234,16 @@ bool llama_batch_allocr::init(
@@ -1417,7 +1435,7 @@ index 321aa9d..bacbe37 100644
          // seq_ids
          for (int32_t s = 0; s < n_sid; ++s) {
 diff --git a/src/llama-batch.h b/src/llama-batch.h
-index e1e4397..c772dda 100644
+index e1e43979b54018ab2a3a482d0986a7fd9b7153c4..c772dda91c96ed608e6e9669b2da4419253f9061 100644
 --- a/src/llama-batch.h
 +++ b/src/llama-batch.h
 @@ -65,6 +65,7 @@ struct llama_ubatch {
@@ -1463,7 +1481,7 @@ index e1e4397..c772dda 100644
      std::vector<int32_t>        n_seq_id;
      std::vector<llama_seq_id *> seq_id;
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 9ee64b5..8996e71 100644
+index 9ee64b566779ea42af3ce4d4589d170ad1923fdf..8996e719bcd67950974204d41399963b8a78c9b5 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -13,6 +13,9 @@
@@ -1650,7 +1668,7 @@ index 9ee64b5..8996e71 100644
  
              auto * gf = model.build_graph(gparams);
 diff --git a/src/llama-context.h b/src/llama-context.h
-index 6938fb1..c006dcf 100644
+index 6938fb103cdefc5f742c5672bb2627e48fd11740..c006dcfdbcd8dc9af81bb33b3b71eabf34223e2d 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -13,6 +13,7 @@
@@ -1685,7 +1703,7 @@ index 6938fb1..c006dcf 100644
      ggml_backend_buffer_ptr buf_output;
  
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 6cadda9..051bd35 100644
+index 6cadda9716ffa84e56ce1b7732f0873d8b86b37d..3b0b6f5bab37f2655d1eacc133b3a7177801e1c9 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -16,6 +16,9 @@
@@ -1787,8 +1805,33 @@ index 6cadda9..051bd35 100644
  
  
  ggml_tensor * llm_graph_context::build_cvec(
+@@ -2897,6 +2982,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
+         }
+ 
++#if defined(LLAMA_KVMEM)
++        if(arch!=LLM_ARCH_DFLASH)
++            llama_kvmem_capture_attention(ctx0,gf,q,k,kq_mask,kq_scale,hparams.f_max_alibi_bias,
++                hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.f,il);
++#endif
++
+         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
+                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+         res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
+@@ -2926,6 +3017,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
+     } else {
+         ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
++#if defined(LLAMA_KVMEM)
++        if(arch!=LLM_ARCH_DFLASH)
++            llama_kvmem_capture_attention(ctx0,gf,q,k,kq_mask,kq_scale,hparams.f_max_alibi_bias,
++                hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.f,il);
++#endif
+         cb(kq, "kq", il);
+ 
+         // note: this op tends to require high floating point range
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index e853a02..d6093a5 100644
+index e853a026955f80e2253bf1eb51f117cabf3e88b9..d6093a5cef56369d2e22bac4f546cc15a6ccc2c0 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -840,6 +840,7 @@ struct llm_graph_params {
@@ -1815,7 +1858,7 @@ index e853a02..d6093a5 100644
      //
      // common
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index b7dfade..6c939e0 100644
+index b7dfadef4638f6221608f48aff0a1f83df281063..6c939e0067af84fcd97db9364b481205a89f6484 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -401,6 +401,31 @@ void llama_kv_cache::clear(bool data) {
@@ -1964,7 +2007,7 @@ index b7dfade..6c939e0 100644
      }
  }
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 9bfb8f2..6c669cc 100644
+index 9bfb8f231fe6626df5053208b119ce525c3a7b66..6c669cc116c06b91139e5cec1b1f1269e9308572 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
 @@ -166,8 +166,10 @@ public:
@@ -1979,7 +2022,7 @@ index 9bfb8f2..6c669cc 100644
      // The stream holding seq_id's cells.
      uint32_t get_stream(llama_seq_id seq_id) const;
 diff --git a/src/llama-kv-cells.h b/src/llama-kv-cells.h
-index 9c0d51e..67cc96e 100644
+index 9c0d51e4e066f277d7523f03d56e85b4d1e50c2a..67cc96ee21eed1211846c5a5d5af7747f7fc56b2 100644
 --- a/src/llama-kv-cells.h
 +++ b/src/llama-kv-cells.h
 @@ -18,6 +18,7 @@ struct llama_kv_cell_ext {
@@ -1992,7 +2035,7 @@ index 9c0d51e..67cc96e 100644
      bool is_2d_gt(llama_pos ox, llama_pos oy) const {
 diff --git a/src/llama-kvmem-factory.h b/src/llama-kvmem-factory.h
 new file mode 100644
-index 0000000..ee86f8c
+index 0000000000000000000000000000000000000000..8493b3ea6cc8d749d198a003a3d75eded94e85cc
 --- /dev/null
 +++ b/src/llama-kvmem-factory.h
 @@ -0,0 +1,16 @@
@@ -2013,7 +2056,7 @@ index 0000000..ee86f8c
 +        const llama_cparams & cparams);
 +#endif
 diff --git a/src/llama-memory-hybrid.cpp b/src/llama-memory-hybrid.cpp
-index bbd4bee..13147d6 100644
+index bbd4bee0b5a2f27c301ed1855b6d1fb695d4438e..13147d61357448a98880248d8fafddc19db031e6 100644
 --- a/src/llama-memory-hybrid.cpp
 +++ b/src/llama-memory-hybrid.cpp
 @@ -29,7 +29,8 @@ llama_memory_hybrid::llama_memory_hybrid(
@@ -2037,7 +2080,7 @@ index bbd4bee..13147d6 100644
  
  llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
 diff --git a/src/llama-memory-hybrid.h b/src/llama-memory-hybrid.h
-index 484eafb..488c7a1 100644
+index 484eafb749910567b8c50ec36d46bdb678c75426..488c7a15e3ed1714f058a693347768eb78b66897 100644
 --- a/src/llama-memory-hybrid.h
 +++ b/src/llama-memory-hybrid.h
 @@ -39,7 +39,8 @@ public:
@@ -2051,10 +2094,10 @@ index 484eafb..488c7a1 100644
      ~llama_memory_hybrid() = default;
  
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index 2893d81..5566e54 100644
+index 2893d819e5079de63e7ab39b45afc90fc6dd9165..c05f36aaecb46dd834fefa541e027ff8f10241ac 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
-@@ -25,14 +25,19 @@ llama_memory_recurrent::llama_memory_recurrent(
+@@ -25,14 +25,22 @@ llama_memory_recurrent::llama_memory_recurrent(
                   uint32_t   mem_size,
                   uint32_t   n_seq_max,
                   uint32_t   n_rs_seq,
@@ -2071,12 +2114,15 @@ index 2893d81..5566e54 100644
 +    this->n_rs_seq = replay ? 0 : n_rs_seq;
 +    replay_capacity = replay ? n_rs_seq + 1 : 0;
 +    GGML_ASSERT(!replay || (mem_size == 1 && n_seq_max == 1 && n_rs_seq > 0 && n_rs_seq <= 5 &&
-+                type_r == GGML_TYPE_F32 && type_s == GGML_TYPE_F32 && hparams.ssm_d_inner == 6144 &&
-+                hparams.ssm_d_state == 128 && hparams.ssm_n_group == 16 && hparams.ssm_dt_rank == 48 && hparams.ssm_d_conv == 4));
++                type_r == GGML_TYPE_F32 && type_s == GGML_TYPE_F32 &&
++                hparams.ssm_d_state == 128 && hparams.ssm_d_conv == 4 &&
++                hparams.ssm_n_group > 0 && hparams.ssm_dt_rank > 0 &&
++                hparams.ssm_dt_rank % hparams.ssm_n_group == 0 &&
++                hparams.ssm_d_inner == hparams.ssm_dt_rank * hparams.ssm_d_state));
      rs_idx.assign(n_seq_max, 0);
  
      cells.clear();
-@@ -52,7 +57,7 @@ llama_memory_recurrent::llama_memory_recurrent(
+@@ -52,7 +60,7 @@ llama_memory_recurrent::llama_memory_recurrent(
          if (it == ctx_map.end()) {
              ggml_init_params params = {
                  // r and s per layer, plus the separate PLE conv row where the model has one
@@ -2085,7 +2131,7 @@ index 2893d81..5566e54 100644
                  /*.mem_buffer =*/ NULL,
                  /*.no_alloc   =*/ true,
              };
-@@ -73,6 +78,7 @@ llama_memory_recurrent::llama_memory_recurrent(
+@@ -73,6 +81,7 @@ llama_memory_recurrent::llama_memory_recurrent(
      r_l.resize(n_layer);
      s_l.resize(n_layer);
      p_l.resize(n_layer);
@@ -2093,7 +2139,7 @@ index 2893d81..5566e54 100644
  
      for (int i = 0; i < n_layer; i++) {
          if (filter && !filter(i)) {
-@@ -98,7 +104,7 @@ llama_memory_recurrent::llama_memory_recurrent(
+@@ -98,7 +107,7 @@ llama_memory_recurrent::llama_memory_recurrent(
              throw std::runtime_error("failed to create ggml context for rs cache");
          }
  
@@ -2102,12 +2148,14 @@ index 2893d81..5566e54 100644
          ggml_tensor * r = ggml_new_tensor_2d(ctx, type_r, hparams.n_embd_r(), n_rows);
          ggml_tensor * s = ggml_new_tensor_2d(ctx, type_s, hparams.n_embd_s(), n_rows);
          ggml_format_name(r, "cache_r_l%d", i);
-@@ -106,6 +112,15 @@ llama_memory_recurrent::llama_memory_recurrent(
+@@ -106,6 +115,17 @@ llama_memory_recurrent::llama_memory_recurrent(
          r_l[i] = r;
          s_l[i] = s;
  
 +        if (replay) {
-+            const int64_t widths[REPLAY_COUNT] = {2048, 6144, 48, 48, 10240};
++            const int64_t key_width = int64_t(hparams.ssm_n_group) * hparams.ssm_d_state;
++            const int64_t widths[REPLAY_COUNT] = {key_width, hparams.ssm_d_inner,
++                hparams.ssm_dt_rank, hparams.ssm_dt_rank, 2 * key_width + hparams.ssm_d_inner};
 +            for (int j = 0; j < REPLAY_COUNT; ++j) {
 +                auto * record = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, widths[j], replay_capacity);
 +                ggml_format_name(record, "gdn_record_%d_l%d", j, i);
@@ -2118,7 +2166,7 @@ index 2893d81..5566e54 100644
          // the PLE history needs its own row: Meta must mirror it while the delta-net conv state next door stays split
          if (hparams.ple_conv_state() > 0 && hparams.is_ple(i)) {
              ggml_tensor * p = ggml_new_tensor_2d(ctx, type_r, hparams.ple_conv_state(), n_rows);
-@@ -138,7 +153,7 @@ llama_memory_recurrent::llama_memory_recurrent(
+@@ -138,7 +158,7 @@ llama_memory_recurrent::llama_memory_recurrent(
          const size_t memory_size_p = size_p_bytes();
  
          LLAMA_LOG_INFO("%s: size = %7.2f MiB (%6u cells, %3d layers, %2u seqs %2u rs_seq), R (%s): %7.2f MiB, S (%s): %7.2f MiB, P (%s): %7.2f MiB\n", __func__,
@@ -2127,7 +2175,7 @@ index 2893d81..5566e54 100644
                  ggml_type_name(type_r), (float)memory_size_r / (1024.0f * 1024.0f),
                  ggml_type_name(type_s), (float)memory_size_s / (1024.0f * 1024.0f),
                  ggml_type_name(type_r), (float)memory_size_p / (1024.0f * 1024.0f));
-@@ -146,6 +161,9 @@ llama_memory_recurrent::llama_memory_recurrent(
+@@ -146,6 +166,9 @@ llama_memory_recurrent::llama_memory_recurrent(
  }
  
  void llama_memory_recurrent::clear(bool data) {
@@ -2137,7 +2185,7 @@ index 2893d81..5566e54 100644
      for (int32_t i = 0; i < (int32_t) size; ++i) {
          cells[i].pos = -1;
          cells[i].seq_id.clear();
-@@ -495,6 +513,12 @@ llama_memory_context_ptr llama_memory_recurrent::init_update(llama_context * lct
+@@ -495,6 +518,12 @@ llama_memory_context_ptr llama_memory_recurrent::init_update(llama_context * lct
  }
  
  bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches) {
@@ -2150,7 +2198,7 @@ index 2893d81..5566e54 100644
      // simply remember the full state because it is very small for this type of cache
      // TODO: optimize
      auto org_cells = cells;
-@@ -787,6 +811,9 @@ size_t llama_memory_recurrent::size_p_bytes() const {
+@@ -787,6 +816,9 @@ size_t llama_memory_recurrent::size_p_bytes() const {
  
  void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
      GGML_UNUSED(flags);
@@ -2160,7 +2208,7 @@ index 2893d81..5566e54 100644
  
      std::vector<std::pair<uint32_t, uint32_t>> cell_ranges; // ranges, from inclusive, to exclusive
      std::vector<std::pair<uint32_t, uint32_t>> cell_ranges_data; // logical source row ranges
-@@ -868,6 +895,9 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
+@@ -868,6 +900,9 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
  
  void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
      GGML_UNUSED(flags);
@@ -2170,7 +2218,7 @@ index 2893d81..5566e54 100644
  
      uint32_t cell_count;
      io.read(&cell_count, sizeof(cell_count));
-@@ -895,6 +925,7 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
+@@ -895,6 +930,7 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
      if (n_rs_seq != 0) {
          set_rs_idx(seq_id, 0);
      }
@@ -2178,7 +2226,7 @@ index 2893d81..5566e54 100644
  }
  
  void llama_memory_recurrent::state_write_meta(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges, llama_seq_id seq_id) const {
-@@ -1353,6 +1384,48 @@ uint32_t llama_memory_recurrent_context::get_size() const {
+@@ -1353,6 +1389,48 @@ uint32_t llama_memory_recurrent_context::get_size() const {
      return mem->size;
  }
  
@@ -2228,7 +2276,7 @@ index 2893d81..5566e54 100644
      return mem->r_l[il];
  }
 diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
-index 08489a4..de07497 100644
+index 08489a4bee4c660589e1b84a195547e4329e4250..de0749769d58603fc08b3eaa331b3fe0cf993286 100644
 --- a/src/llama-memory-recurrent.h
 +++ b/src/llama-memory-recurrent.h
 @@ -5,6 +5,7 @@
@@ -2287,7 +2335,7 @@ index 08489a4..de07497 100644
      ggml_tensor * get_r_l(int32_t il) const;
      ggml_tensor * get_s_l(int32_t il) const;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index ded790b..8d01018 100644
+index ded790b2b86d9a437600d6554a0e202f9e43a1a3..8d01018803279dddae3f06c4f76900786fba6610 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -18,6 +18,7 @@
@@ -2311,7 +2359,7 @@ index ded790b..8d01018 100644
      switch (arch) {
          // Models that need specific instantiation should be handled in the
 diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
-index 2e15777..e316fe9 100644
+index 2e15777ee1566032e1eb421b2b036eacc413fcd4..e316fe97021f24d2236c9419320cada2d7db3436 100644
 --- a/src/models/delta-net-base.cpp
 +++ b/src/models/delta-net-base.cpp
 @@ -457,6 +457,13 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
@@ -2387,7 +2435,7 @@ index 2e15777..e316fe9 100644
  
      // op writes the last min(n_seq_tokens, K) snapshots; trailing slots are left unwritten
 diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
-index bf7e622..662a72d 100644
+index bf7e622fb9d456c2a782ebff0b45e86fe79d5aff..662a72df2751eaf8809d6a55e2abc23e9f22c4dc 100644
 --- a/src/models/qwen3.cpp
 +++ b/src/models/qwen3.cpp
 @@ -98,6 +98,7 @@ ggml_tensor * llama_model_qwen3::graph::build_backbone(const llama_model & model
@@ -2415,7 +2463,7 @@ index bf7e622..662a72d 100644
              cur = build_attn(inp_attn,
                      model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
 diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
-index 802f2e2..864bda0 100644
+index 802f2e2f13e9111472daff00bf367aa9e77eb5af..864bda0a2af56b44ddd79235e14f8f73ceebb0a3 100644
 --- a/src/models/qwen35.cpp
 +++ b/src/models/qwen35.cpp
 @@ -1,5 +1,6 @@
@@ -2473,7 +2521,7 @@ index 802f2e2..864bda0 100644
      Qcur = ggml_rope_multi(ctx0, Qcur, inp_pos, nullptr,
              n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index ba7f7eb..d8a5d43 100644
+index ba7f7eb4e56caa7379b8f801cad09c3a3c74f765..d8a5d43fd5b188cd3c60208895d4957a841452bb 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -12505,6 +12505,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
@@ -2487,7 +2535,7 @@ index ba7f7eb..d8a5d43 100644
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 1, 1));   // Qwen3.5-like: 32 heads, d=128
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 64,  1, 1));   // smaller model
 diff --git a/tools/mtmd/mtmd-helper.cpp b/tools/mtmd/mtmd-helper.cpp
-index eba034f..68ac7e4 100644
+index eba034f79ed14bb044a8c6f1db1eaeb6dcb90d08..68ac7e4e5f8d9f1ca46304ff29a2c165924026c0 100644
 --- a/tools/mtmd/mtmd-helper.cpp
 +++ b/tools/mtmd/mtmd-helper.cpp
 @@ -115,7 +115,7 @@ private:
@@ -2549,7 +2597,7 @@ index eba034f..68ac7e4 100644
          struct llama_context * lctx,
          const mtmd_input_chunk * chunk,
 diff --git a/tools/mtmd/mtmd-helper.h b/tools/mtmd/mtmd-helper.h
-index 7436230..f1e3b50 100644
+index 7436230f0dca873c67c64045eed3da60cc69d02d..f1e3b5035cb49941110cbcb269a361e54777cfe2 100644
 --- a/tools/mtmd/mtmd-helper.h
 +++ b/tools/mtmd/mtmd-helper.h
 @@ -143,6 +143,14 @@ MTMD_API int32_t mtmd_helper_decode_image_chunk(mtmd_context * ctx,
@@ -2568,7 +2616,7 @@ index 7436230..f1e3b50 100644
  // video input helpers (requires ffmpeg/ffprobe installed on the system)
  // the notion of video only exists at the helper level, it is not visible to the core mtmd library
 diff --git a/tools/server/server-common.cpp b/tools/server/server-common.cpp
-index c32c0d1..7fc5d5a 100644
+index c32c0d1a5aa7b09e0afe4655a305c6d73f8e27d7..7fc5d5ae20e3407ed2e751df4b592a577a15f395 100644
 --- a/tools/server/server-common.cpp
 +++ b/tools/server/server-common.cpp
 @@ -1266,6 +1266,43 @@ server_tokens tokenize_oai_content_array(const llama_vocab * vocab, mtmd_context
@@ -2656,7 +2704,7 @@ index c32c0d1..7fc5d5a 100644
      auto caps = common_chat_templates_get_caps(opt.tmpls.get());
  
 diff --git a/tools/server/server-common.h b/tools/server/server-common.h
-index 5bd2ed5..8bde61d 100644
+index 5bd2ed57ab8948c2d9384d139634f61b315890ce..8bde61d8ddecf18113c1de2bc4860c31d97fc9f7 100644
 --- a/tools/server/server-common.h
 +++ b/tools/server/server-common.h
 @@ -354,6 +354,9 @@ struct server_chat_params {

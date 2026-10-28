@@ -1,0 +1,559 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8cc209ff..3335fcbb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2138,6 +2138,15 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
+     add_test(NAME poly_kvmem_kernel_test COMMAND poly_kvmem_kernel_test)
+     add_test(NAME poly_kvmem_history_test COMMAND poly_kvmem_history_test)
+     add_test(NAME poly_kvmem_sessions_test COMMAND poly_kvmem_sessions_test)
++    # Workspace lifetime, native-state and failed-admission tests; needs a real model and a free CUDA GPU.
++    add_executable(poly_elastic_test tools/poly_elastic_test.cpp
++      src/poly/engine.cpp src/poly/qwen35.cpp src/poly/glm5next.cpp src/poly/gemma4.cpp
++      src/poly/deepseek4.cpp src/poly/lfm2moe.cpp src/poly/flint.cpp
++      src/poly/cpu_experts.cpp src/poly/kernels.cu src/poly/kernels_dsv4.cu src/poly/kvmem.cpp src/poly/kvmem_capture.cu)
++    target_compile_definitions(poly_elastic_test PRIVATE STRATA_KVMEM=1 STRATA_ELASTIC_TESTING=1)
++    target_include_directories(poly_elastic_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
++    target_link_libraries(poly_elastic_test PRIVATE kvmem strata_poly_mmq strata_kernels ggml-cpu ggml-base
++      ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target} CUDA::cuda_driver Threads::Threads)
+     # Requires a real qwen35moe model; deliberately excluded from automatic ctest.
+     add_executable(poly_kvmem_mtp_test tools/poly_kvmem_mtp_test.cpp
+       src/poly/engine.cpp src/poly/qwen35.cpp src/poly/glm5next.cpp src/poly/gemma4.cpp
+diff --git a/docs/BACKENDS.md b/docs/BACKENDS.md
+index b5f9d58e..ba183039 100644
+--- a/docs/BACKENDS.md
++++ b/docs/BACKENDS.md
+@@ -142,6 +142,24 @@ and 31.4 with Ornith's and 22.6, 24.6 and 28.6 with Gemma 4's, of its 31.8. Tiel
+ with the engine of 1212621baadf, took it to 21.8, 24.9 and 29.9 GiB. Setup does not stop a PC below the 32 GB that
+ Qwen3.8 needs when one of these families is named.
+ 
++## Elastic experts (opt-in, CUDA)
++
++`strata-poly --elastic-experts` lends audited prompt scratch and expert staging pages to the expert cache
++while a single Qwen35 MoE sequence decodes. It retains stable virtual addresses and the decode prefixes;
++KV, recurrent state, persistent KVMem statistics and attention score scratch stay resident. Before a larger
++evaluation or pipelined prompt read, it reclaims expert pages and restores the full workspace before launching
++dependent kernels. Cache growth is limited to 64 MiB per 16 decode calls and retains the configured VRAM reserve.
++
++The initial scope is CUDA VMM, one sequence, no draft/MTP, no frozen expert placement, and no `--stage-read-mib`
++override. Unsupported configurations log that the feature is inactive. It is off by default. In KVMem's local
++console, the native argument array is `["--elastic-experts"]`; remove it to restore static workspace allocation.
++Live INFO facts expose expert slots/cache MiB and mapped/full elastic workspace MiB. `STRATA_ELASTIC_TRACE=1`
++also records periodic native CUDA free-memory and CPU/GPU expert counters for controlled comparisons.
++
++Qualification uses `poly_elastic_test MODEL.gguf [--no-graphs]`: exact native KV/state/statistics preservation
++across map cycles, full versus narrow workspace logits with fixed expert placement, partial-admission rollback,
++real cache growth/reclaim, Pressure and bounded Query/replay. These are functional tests, not recall-quality tests.
++
+ ## How a backend works
+ 
+ There are two levels.
+diff --git a/serve/server.py b/serve/server.py
+index 2f803ac1..22bd4750 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -1009,6 +1009,16 @@ class StrataEngine:
+         slot_q = self.slot_q
+         line = None
+         for line in proc.stdout:
++            # Dynamic expert/workspace facts arrive during generation as well as at startup.
++            if line.startswith("INFO "):
++                facts = {}
++                for item in line.split()[1:]:
++                    key, separator, value = item.partition("=")
++                    if separator:
++                        facts[key] = int(value) if value.lstrip("-").isdigit() else value
++                if self.proc is proc:
++                    self.info.update(facts)
++                continue
+             # checked before batch routing: a fatal line is never a slot's own
+             if line.startswith(FATAL_PREFIXES):
+                 # release_gpu_waits invalidates the verifier, even if the native
+diff --git a/src/poly/engine.cpp b/src/poly/engine.cpp
+index cd06962d..f30aa2c2 100644
+--- a/src/poly/engine.cpp
++++ b/src/poly/engine.cpp
+@@ -440,6 +440,7 @@ Engine::~Engine() {
+     }
+     vmm_free(arena_);
+     vmm_free(stage_map_);
++    for (auto& w : elastic_workspaces_) vmm_free(w);
+     for (void* p : host_allocs_) cudaFreeHost(p);
+     for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_in_[0], ev_in_[1], ev_out_[0], ev_out_[1], ev_hr_})
+         if (e) cudaEventDestroy((cudaEvent_t) e);
+@@ -951,6 +952,112 @@ float* Engine::fbuf(size_t n) {
+     return p;
+ }
+ 
++
++// Only buffers with an audited row-prefix lifetime use these allocations. Persistent KVMem statistics,
++// attention score scratch, KV and recurrent state remain resident. Addresses never change, including the
++// prefixes captured in decode graphs; a prompt cannot launch until its complete ranges are mapped again.
++void* Engine::elastic_alloc(size_t bytes, size_t decode_bytes, const char* what) {
++    if (!elastic_enabled_ || decode_bytes >= bytes) return dmalloc(bytes, what);
++    elastic_workspaces_.emplace_back();
++    Workspace& w = elastic_workspaces_.back();
++    w.full = up_to(std::max<size_t>(bytes, 256), grain_);
++    w.keep = std::min(w.full, up_to(std::max<size_t>(decode_bytes, 256), grain_));
++    w.name = what;
++    vmm_reserve(w, w.full);
++    // A separate first piece makes the retained prefix an exact unmap boundary.
++    vmm_map(w, w.keep, SIZE_MAX, what);
++    vmm_map(w, w.full, kArenaPiece, what);
++    return reinterpret_cast<void*>(w.base);
++}
++
++float* Engine::elastic_fbuf(size_t n, size_t decode_n) {
++    if (!elastic_enabled_ || decode_n >= n) return fbuf(n);
++    // alloc() counts the ordinary scratch first, then assigns both sorts of pointers.
++    if (!scratch_) return nullptr;
++    return static_cast<float*>(elastic_alloc(n * sizeof(float), decode_n * sizeof(float), "elastic scratch"));
++}
++
++void Engine::elastic_info() const {
++    if (!elastic_enabled_) return;
++    size_t mapped=0, full=0;
++    for (const auto& w : elastic_workspaces_) { mapped+=w.mapped; full+=w.full; }
++    std::printf("INFO elastic_experts=1 expert_slots=%d expert_cache_mib=%lld expert_cache_mapped_mib=%zu "
++                "elastic_workspace_mib=%zu elastic_workspace_full_mib=%zu vram_free_mib=%lld\n", cached_,
++                (long long)(exp_at_ >> 20), arena_.mapped >> 20, mapped >> 20, full >> 20, (long long)vram_free_mib());
++}
++
++void Engine::elastic_report(const char* phase, double ms) {
++    if (!opt_.elastic_experts && !std::getenv("STRATA_ELASTIC_TRACE")) return;
++    size_t full = 0, mapped = 0, keep = 0, free_b = 0, total_b = 0;
++    for (const auto& w : elastic_workspaces_) { full += w.full; mapped += w.mapped; keep += w.keep; }
++    ck(cudaMemGetInfo(&free_b, &total_b), "elastic memory sample");
++    std::fprintf(stderr, "ELASTIC phase=%s enabled=%d token=%lld cache_bytes=%zu expert_bytes=%zu experts=%d "
++                 "workspace_bytes=%zu workspace_full=%zu workspace_keep=%zu free_bytes=%zu ms=%.3f "
++                 "clock_ms=%.3f cpu_ms=%.3f gpu_experts=%lld cpu_experts=%lld\n",
++                 phase, int(elastic_enabled_), (long long)pos_, arena_.mapped, exp_at_, cached_, mapped,
++                 full, keep, free_b, ms, std::chrono::duration<double, std::milli>(Clock::now().time_since_epoch()).count(),
++                 stats_.cpu_ms, (long long)stats_.gpu_experts, (long long)stats_.cpu_experts);
++}
++
++void Engine::elastic_workspace(bool full) {
++    if (!elastic_enabled_ || elastic_full_ == full) return;
++    const auto started = Clock::now();
++    // The prompt pipeline uses up_ and rs_ as well as st_. No unmap may race its copies or kernels.
++    settle_swaps();
++    if (up_) ck(cudaStreamSynchronize(cs(up_)), "elastic workspace uploads");
++    if (rs_) ck(cudaStreamSynchronize(cs(rs_)), "elastic workspace reads");
++    ck(cudaStreamSynchronize(cs(st_)), "elastic workspace compute");
++    if (full) {
++        size_t need = 0, free_b = 0, total_b = 0;
++        for (const auto& w : elastic_workspaces_) need += w.full - w.mapped;
++        ck(cudaMemGetInfo(&free_b, &total_b), "elastic workspace admission");
++        const size_t guard = size_t(std::max(reserve_mib_, 256)) << 20;
++        if (need + guard > free_b) shrink_cache(need + guard - free_b);
++        held_is_budget();
++        try {
++            for (auto& w : elastic_workspaces_) {
++#ifdef STRATA_ELASTIC_TESTING
++                if (elastic_fail_after_ == 0) throw std::runtime_error("injected elastic admission failure");
++                if (elastic_fail_after_ > 0) --elastic_fail_after_;
++#endif
++                vmm_map(w, w.full, kArenaPiece, w.name);
++            }
++        } catch (...) {
++            // No dependent work has been submitted. Undo a partially completed admission and fail this
++            // request safely; the next request may retry after external pressure has subsided.
++            for (auto& w : elastic_workspaces_) vmm_unmap(w, w.keep);
++            elastic_report("admission_failed", ms_since(started));
++            throw;
++        }
++    } else {
++        for (auto& w : elastic_workspaces_) vmm_unmap(w, w.keep);
++    }
++    staged_il_ = -1;
++    elastic_full_ = full;
++    elastic_ticks_ = 0;
++    elastic_report(full ? "prefill" : "decode", ms_since(started));
++}
++
++void Engine::elastic_tick() {
++    if (!elastic_enabled_ || elastic_full_ || freeze_experts_) return;
++    // A bounded upload every 16 decode calls. The idle gap amortizes both driver calls and expert reads.
++    if (elastic_ticks_++ % 16 != 0) return;
++    size_t free_b = 0, total_b = 0;
++    ck(cudaMemGetInfo(&free_b, &total_b), "elastic cache budget");
++    const size_t guard = size_t(std::max(reserve_mib_, 256)) << 20;
++    const auto started = Clock::now();
++    if (free_b < guard / 2) {
++        shrink_cache(guard - free_b);
++        held_is_budget();
++        elastic_report("shrink", ms_since(started));
++    } else if (free_b >= guard + kArenaPiece && arena_.mapped < arena_.reserved) {
++        const int added = grow_cache(kArenaPiece);
++        elastic_report(added ? "grow" : "grow_empty", ms_since(started));
++    } else if (elastic_ticks_ % 128 == 1) {
++        elastic_report("steady");
++    }
++}
++
+ int64_t Engine::meta_u(const char* key, int64_t fallback) const {
+     const MetaValue* v = gg_ ? gg_->get(key) : nullptr;
+     return v && v->is_num() ? (int64_t) v->u : fallback;
+@@ -1435,6 +1542,9 @@ bool Engine::mind_vram() {
+ }
+ 
+ bool Engine::mind_card_vram() {
++    // Elastic decode owns cache admission. Filling its idle workspace here would upload experts only
++    // to evict them again when the next prompt acquires the same workspace in run()/read().
++    if (elastic_enabled_) return false;
+     if (!exp_ || reserve_mib_ <= 0) return false;
+     // As shrink_cache(): a frozen answer's cache is the one its first token saw.
+     if (freeze_experts_) return false;
+@@ -1955,29 +2065,39 @@ void Engine::shared_scratch() {
+     const size_t n = (size_t) rows_, e = n * n_embd_;
+     const size_t ff = n * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_});
+     // the draft block works in it too (draft_input()); read() keeps two calls' rows in it
+-    r_ = fbuf(std::max(streams(), draft_ ? 3 : 1) * (size_t) (read_rows_ > rows_ ? 2 : 1) * rows_ * n_embd_);
+-    cur_ = fbuf(e);
+-    xn_ = fbuf(e);
+-    ao_ = fbuf(e);
+-    fo_ = fbuf(e);
+-    g_ = fbuf(ff);   // a routed expert's gate and up rows come out of one launch, back to back
+-    u_ = fbuf(ff);
+-    h_ = fbuf(ff);
++    r_ = elastic_fbuf(std::max(streams(), draft_ ? 3 : 1) * (size_t) (read_rows_ > rows_ ? 2 : 1) * rows_ * n_embd_,
++                      size_t(2 * kStageRows) * streams() * n_embd_);
++    cur_ = elastic_fbuf(e, size_t(kStageRows) * n_embd_);
++    xn_ = elastic_fbuf(e, size_t(kStageRows) * n_embd_);
++    ao_ = elastic_fbuf(e, size_t(kStageRows) * n_embd_);
++    fo_ = elastic_fbuf(e, size_t(kStageRows) * n_embd_);
++    g_ = elastic_fbuf(ff, size_t(kStageRows) * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_}));   // a routed expert's gate and up rows come out of one launch, back to back
++    u_ = elastic_fbuf(ff, size_t(kStageRows) * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_}));
++    h_ = elastic_fbuf(ff, size_t(kStageRows) * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_}));
+     d_ = fbuf((size_t) kSumRows * n_embd_);   // the routed experts of a few tokens, until they are added up
+-    rl_ = fbuf(n * n_expert_);
++    rl_ = elastic_fbuf(n * n_expert_, size_t(kStageRows) * n_expert_);
+     logits_ = fbuf((size_t) n_vocab_);
+     if (rows_ >= kStageRows && bf16_max_ > 0) wf_ = fbuf(bf16_max_);   // a BF16 matrix as floats, for lin()
+     if (mmq_) {
+         const size_t rr = n * n_used_;
+-        gu_ = fbuf(rr * 2 * n_ff_exp_);
+-        hx_ = fbuf(rr * n_ff_exp_);
+-        dx_ = fbuf(rr * n_embd_);
++        gu_ = elastic_fbuf(rr * 2 * n_ff_exp_, size_t(kStageRows) * n_used_ * 2 * n_ff_exp_);
++        hx_ = elastic_fbuf(rr * n_ff_exp_, size_t(kStageRows) * n_used_ * n_ff_exp_);
++        dx_ = elastic_fbuf(rr * n_embd_, size_t(kStageRows) * n_used_ * n_embd_);
+         hf_ = fbuf(rr);
+     }
+ }
+ 
+ // The sequence's state, the caches and every buffer, once the weights are known.
+ void Engine::alloc() {
++    // This opt-in implementation is qualified for CUDA, solo text decode, without speculative state.
++#if !defined(__HIP_PLATFORM_AMD__)
++    elastic_enabled_ = opt_.elastic_experts && vmm_ && !split_ && opt_.batch == 0 && opt_.window <= 1 &&
++                       !draft_ && !freeze_experts_ && opt_.gpu_experts && opt_.stage_read_mib == 0 &&
++                       gg_->get("general.architecture")->s == "qwen35moe";
++#endif
++    if (opt_.elastic_experts)
++        std::fprintf(stderr, "strata-poly: elastic experts %s\n", elastic_enabled_ ? "enabled" :
++                     "inactive (requires CUDA VMM, solo Qwen35 MoE, no draft/freeze/stage-read override)");
+     // --dump-layers prints one token's stages
+     rows_ = opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context);
+     const size_t most = std::min<size_t>(kReadBytes / ((size_t) streams() * n_embd_ * sizeof(float)), opt_.max_context);
+@@ -2087,7 +2207,8 @@ void Engine::alloc() {
+             vmm_map(stage_map_, stage_narrow_ + 256 + kTail, SIZE_MAX, "the expert staging buffer");
+             stage_ = (uint8_t*) stage_map_.base;
+         } else {
+-            stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256 + kTail, "the expert staging buffer");
++            stage_ = (uint8_t*) elastic_alloc(stage_bytes_ + 256 + kTail,
++                std::max(one_expert + 256 + kTail, size_t(32) << 20), "the expert staging buffer");
+         }
+         for (int b = 0; b < 2; ++b) h_stage_[b] = (uint8_t*) hmalloc(chunk_bytes_, "pinned memory");
+         for (void** e : {&ev_stage_[0], &ev_stage_[1], &ev_ahead_, &ev_free_}) {
+@@ -2883,7 +3004,10 @@ void Engine::run(const int32_t* tokens, int n) {
+     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
+     if (pos_ + n > opt_.max_context)
+         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
++    elastic_workspace(n != 1 || !images_.empty());
+     cover(cache_position() + n);
++    elastic_tick();
++    if (std::getenv("STRATA_ELASTIC_TRACE") && n == 1 && pos_ % 128 == 0) elastic_report(elastic_enabled_ ? "sample" : "static");
+ #ifdef STRATA_KVMEM
+     if(memory_ && !memory_drafting_) memory_capture_call(pos_,n);
+ #endif
+@@ -3456,6 +3580,7 @@ bool Engine::read_native(const int32_t* tokens, int n, const Mark* marks, int n_
+     }
+     const int n_calls = (int) calls_.size();
+     OnCard here(device_, split_);
++    elastic_workspace(true);
+     cover(cache_position() + n);
+     // On several cards, each reads through its own layers and hands the rows on, and `turn` hears of a card's
+     // turns as its share of the model's layers: [lo_, to).
+diff --git a/src/poly/engine.hpp b/src/poly/engine.hpp
+index 477b563d..218fd16c 100644
+--- a/src/poly/engine.hpp
++++ b/src/poly/engine.hpp
+@@ -57,6 +57,7 @@ struct Options {
+     int vram_reserve_mib = -1;    ///< left free after the expert cache is filled; below 0: by the card's size
+     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
+     bool gpu_experts = true;
++    bool elastic_experts = false; ///< lend idle prompt workspace to experts during solo Qwen35 MoE decode
+     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
+     // A prompt batch.  More tokens a call and a larger staging buffer read a prompt faster, and both take VRAM
+     // that the expert cache, and so decoding, does without.
+@@ -214,6 +215,7 @@ public:
+ 
+     /// Forget the sequence.
+     void reset();
++    void elastic_info() const; ///< live INFO facts, emitted only when the opt-in feature is active
+     /// STRATA_FREEZE_EXPERTS: lift the freeze for the caller's own cache change (the serve VRAM
+     /// resize); refreeze_experts() puts it back, and the resized cache is what every request reads.
+     void unfreeze_experts();
+@@ -528,6 +530,11 @@ protected:
+     void embed(int32_t token, float* dst) const;
+     void dbg(const char* name, int il, const float* dev, int n);
+     float* fbuf(size_t n);
++    float* elastic_fbuf(size_t n, size_t decode_n);
++    void* elastic_alloc(size_t bytes, size_t decode_bytes, const char* what);
++    void elastic_workspace(bool full);
++    void elastic_tick();
++    void elastic_report(const char* phase, double ms = 0);
+     int room(int n) const;
+     int room_key(int n) const;
+     void* dmalloc(size_t bytes, const char* what);
+@@ -555,6 +562,17 @@ protected:
+         size_t bytes = 0;   ///< for every `per` rows
+         int per = 1;
+     };
++    struct Workspace : Mapped {
++        size_t full = 0, keep = 0;
++        const char* name = nullptr;
++    };
++    friend struct ElasticTestAccess;
++#ifdef STRATA_ELASTIC_TESTING
++    int elastic_fail_after_ = -1;
++#endif
++    std::vector<Workspace> elastic_workspaces_;
++    bool elastic_enabled_ = false, elastic_full_ = true;
++    uint64_t elastic_ticks_ = 0;
+     void vmm_reserve(Mapped& m, size_t bytes);
+     void vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what);
+     void vmm_unmap(Mapped& m, size_t bytes);
+diff --git a/src/poly/main.cpp b/src/poly/main.cpp
+index e1db5440..55e3c2c8 100644
+--- a/src/poly/main.cpp
++++ b/src/poly/main.cpp
+@@ -1111,6 +1111,7 @@ int serve(Session& ss) {
+                 ids, pictures, pad, turn_at, max_new, s, lines.stop,
+                 [&](int32_t t) {
+                     first = t;
++                    if (engine.pos() % 64 == 0) engine.elastic_info();
+                     std::printf("T %d\n", (int) t);
+                     std::fflush(stdout);
+                 },
+@@ -1167,6 +1168,7 @@ int serve(Session& ss) {
+             std::fprintf(stderr, "\n");
+         // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused>
+         //      <experts from VRAM> <experts> <RAM blobs> <file blobs> <file MB> <prompt tokens read> <offloaded>
++        engine.elastic_info();
+         const strata::poly::Stats& now = engine.stats();
+ #ifdef STRATA_KVMEM
+         if (engine.kvmem_enabled() && engine.memory_options().sessions > 1)
+@@ -1361,6 +1363,7 @@ void usage() {
+                  "  --expert-profile FILE  expert use counts: read to choose the cached experts, written back on\n"
+                  "                         exit and by --serve after an answer, every 10 s at most\n"
+                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
++                 "  --elastic-experts      lend idle prompt workspace to experts during solo Qwen35 MoE decode\n"
+                  "  --any-node             on a PC with several NUMA nodes, let the CPU threads run on any of them\n"
+                  "                         (default: on the node whose memory holds most of the experts)\n"
+                  "  --window N             the most tokens that go through the model at once while an answer is\n"
+@@ -1493,6 +1496,7 @@ int main(int argc, char** argv) {
+         else if (a == "--vram-reserve-mib") o.vram_reserve_mib = std::atoi(val());
+         else if (a == "--expert-profile") o.profile = val();
+         else if (a == "--no-gpu-experts") o.gpu_experts = false;
++        else if (a == "--elastic-experts") o.elastic_experts = true;
+         else if (a == "--any-node") o.stay_near = false;
+         else if (a == "--no-graphs") o.graphs = false;
+         else if (a == "--kv-whole") o.kv_grow = false;
+diff --git a/src/poly/qwen35.cpp b/src/poly/qwen35.cpp
+index 44859033..b1133824 100644
+--- a/src/poly/qwen35.cpp
++++ b/src/poly/qwen35.cpp
+@@ -178,19 +178,19 @@ void Qwen35::alloc_caches() {
+ // Per-token buffers hold rows_ tokens, row after row.
+ void Qwen35::assign_scratch() {
+     const size_t n = (size_t) rows_, heads = n * n_head_ * head_dim_, kv = n * n_kv_ * head_dim_;
+-    proj_ = fbuf(n * conv_dim_);
+-    qkv_ = fbuf(n * conv_dim_);
+-    z_ = fbuf(n * d_inner_);
+-    alpha_ = fbuf(n * v_heads_);
+-    beta_ = fbuf(n * v_heads_);
+-    gated_ = fbuf(n * d_inner_);
+-
+-    qg_ = fbuf(2 * heads);
+-    q_ = fbuf(heads);
+-    kraw_ = fbuf(kv);
+-    k_ = fbuf(kv);
+-    v_ = fbuf(kv);
+-    att_ = fbuf(heads);
++    proj_ = elastic_fbuf(n * conv_dim_, size_t(kStageRows) * conv_dim_);
++    qkv_ = elastic_fbuf(n * conv_dim_, size_t(kStageRows) * conv_dim_);
++    z_ = elastic_fbuf(n * d_inner_, size_t(kStageRows) * d_inner_);
++    alpha_ = elastic_fbuf(n * v_heads_, size_t(kStageRows) * v_heads_);
++    beta_ = elastic_fbuf(n * v_heads_, size_t(kStageRows) * v_heads_);
++    gated_ = elastic_fbuf(n * d_inner_, size_t(kStageRows) * d_inner_);
++
++    qg_ = elastic_fbuf(2 * heads, size_t(kStageRows) * 2 * n_head_ * head_dim_);
++    q_ = elastic_fbuf(heads, size_t(kStageRows) * n_head_ * head_dim_);
++    kraw_ = elastic_fbuf(kv, size_t(kStageRows) * n_kv_ * head_dim_);
++    k_ = elastic_fbuf(kv, size_t(kStageRows) * n_kv_ * head_dim_);
++    v_ = elastic_fbuf(kv, size_t(kStageRows) * n_kv_ * head_dim_);
++    att_ = elastic_fbuf(heads, size_t(kStageRows) * n_head_ * head_dim_);
+     score_ = fbuf((size_t) chunk_ * n_head_ * cache_capacity());
+     sg_ = fbuf(n);
+     if (rows_ >= kStageRows) awork_ = fbuf(heads + heads / 2 + 1 + 3 * n * n_head_);   // a prompt batch's attention
+diff --git a/tools/poly_elastic_test.cpp b/tools/poly_elastic_test.cpp
+new file mode 100644
+index 00000000..36111376
+--- /dev/null
++++ b/tools/poly_elastic_test.cpp
+@@ -0,0 +1,144 @@
++#include "../src/poly/engine.hpp"
++#include <cuda_runtime.h>
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++#include <iostream>
++#include <numeric>
++#include <stdexcept>
++#include <vector>
++
++using namespace strata::poly;
++static void check(bool ok, const char* what) { if (!ok) throw std::runtime_error(what); }
++
++namespace strata::poly {
++struct KvmemTestAccess {
++    static std::vector<uint8_t> kv(KvmemMemory& m) {
++        std::vector<uint8_t> result(m.visible_ * (m.descriptor_.layout.record_bytes / KvmemMemory::block_tokens));
++        m.save_view(result.data());
++        return result;
++    }
++    static std::vector<float> means(KvmemMemory& m) {
++        std::vector<float> result(m.versions_.size() * m.planes_.size() * m.key_width_);
++        for (uint32_t b=0; b<m.versions_.size(); ++b)
++            for (uint32_t il=0; il<m.planes_.size(); ++il)
++                m.statistics_->mean_k(b, il, result.data() + (b*m.planes_.size()+il)*m.key_width_);
++        return result;
++    }
++};
++struct ElasticTestAccess {
++    static void workspace(Engine& e, bool full) { e.elastic_workspace(full); }
++    static void freeze(Engine& e, bool frozen) { e.freeze_experts_ = frozen; }
++    static void enabled(Engine& e, bool on) { e.elastic_enabled_ = on; }
++    static void fail_after(Engine& e, int count) { e.elastic_fail_after_ = count; }
++    static size_t mapped(Engine& e) {
++        size_t total=0; for(const auto& w:e.elastic_workspaces_)total+=w.mapped; return total;
++    }
++    static void verify(Engine& e) {
++        check(e.elastic_enabled_, "elastic feature did not activate");
++        check(!e.elastic_workspaces_.empty(), "no elastic workspace");
++        size_t cache=0; for(const auto& p:e.arena_.pieces)cache+=p.second;
++        check(cache==e.arena_.mapped, "cache allocation ledger mismatch");
++        int count=0;
++        for(const auto& layer:e.layers_)for(const auto* slot:layer.slot)if(slot) {
++            ++count;
++            check(slot>=e.exp_ && size_t(slot-e.exp_)+layer.slot_bytes<=e.arena_.mapped,
++                  "expert references unmapped cache pages");
++        }
++        check(count==e.cached_, "published expert count mismatch");
++        for(const auto& w:e.elastic_workspaces_) {
++            size_t physical=0;for(const auto& p:w.pieces)physical+=p.second;
++            check(physical==w.mapped,"workspace allocation ledger mismatch");
++            check(w.mapped==(e.elastic_full_?w.full:w.keep), "workspace lease incomplete");
++        }
++    }
++};
++}
++
++int main(int argc, char** argv) {
++    try {
++        check(argc>=2,"usage: poly_elastic_test MODEL [--no-graphs]");
++        Options o;
++        o.model=argv[1];o.max_context=4096;o.prompt_batch=128;o.window=1;o.draft=false;
++        o.elastic_experts=true;o.vram_reserve_mib=256;o.expert_swaps=0;
++        o.memory.budget=512;o.memory.reserve=128;o.memory.host_mib=1024;
++        o.memory.sink=64;o.memory.recent=64;o.memory.verify=true;
++        o.kv_format=KvFmt::kQ8_0;
++        o.graphs=!(argc>2 && std::string(argv[2])=="--no-graphs");
++        auto e=Engine::open(o);
++        ElasticTestAccess::verify(*e);
++        std::vector<int32_t> prompt(128);for(size_t i=0;i<prompt.size();++i)prompt[i]=100+int(i%32);
++        e->eval(prompt.data(),64,false);
++        const auto cp=e->memory().checkpoint();
++        const auto kv=KvmemTestAccess::kv(e->memory());
++        const auto means=KvmemTestAccess::means(e->memory());
++        const size_t full=ElasticTestAccess::mapped(*e);
++        for(int cycle=0;cycle<16;++cycle) {
++            ElasticTestAccess::workspace(*e,false);
++            check(ElasticTestAccess::mapped(*e)<full,"decode released no workspace");
++            ElasticTestAccess::verify(*e);
++            ElasticTestAccess::workspace(*e,true);
++            ElasticTestAccess::verify(*e);
++        }
++        check(e->memory().checkpoint().state==cp.state,"workspace cycling changed recurrent state");
++        check(KvmemTestAccess::kv(e->memory())==kv,"workspace cycling changed native KV");
++        check(KvmemTestAccess::means(e->memory())==means,"workspace cycling changed persistent statistics");
++        std::cout<<"PASS 16_workspace_cycles native_KV recurrent_state statistics byte_identical\n";
++
++        // Independent oracle for workspace lifetime: same live engine/cache and accepted checkpoint,
++        // full mappings versus narrow mappings. Hold expert placement still only for this comparison.
++        const int32_t token=1000;
++        ElasticTestAccess::freeze(*e,true);
++        ElasticTestAccess::enabled(*e,false);
++        e->eval(&token,1,true);
++        std::vector<float> logits(e->logits(),e->logits()+e->n_vocab());
++        const auto expected=e->memory().checkpoint();
++        const auto expected_kv=KvmemTestAccess::kv(e->memory());
++        e->memory().restore_prefix(cp);
++        ElasticTestAccess::enabled(*e,true);
++        e->eval(&token,1,true);
++        check(std::memcmp(logits.data(),e->logits(),logits.size()*sizeof(float))==0,"narrow workspace changed logits");
++        check(e->memory().checkpoint().state==expected.state,"narrow workspace changed accepted state");
++        check(KvmemTestAccess::kv(e->memory())==expected_kv,"narrow workspace changed accepted native KV");
++        ElasticTestAccess::freeze(*e,false);
++        std::cout<<"PASS full_vs_narrow logits accepted_state native_KV byte_identical graphs="<<o.graphs<<'\n';
++
++        const auto before_failure=e->memory().checkpoint();
++        ElasticTestAccess::fail_after(*e,1);
++        bool failed=false;
++        try { ElasticTestAccess::workspace(*e,true); }
++        catch(const std::exception& error) { failed=std::string(error.what()).find("injected")!=std::string::npos; }
++        check(failed,"partial admission failure did not fire");
++        ElasticTestAccess::verify(*e);
++        check(e->memory().checkpoint().state==before_failure.state,"failed admission changed accepted state");
++        ElasticTestAccess::fail_after(*e,-1);
++        ElasticTestAccess::workspace(*e,true);
++        ElasticTestAccess::verify(*e);
++        std::cout<<"PASS partial_admission_rollback_and_retry\n";
++
++        // Real cache growth and reclaim, then Pressure and bounded Query/replay through ordinary eval.
++        for(int cycle=0;cycle<6;++cycle) {
++            e->eval(prompt.data(),128,false);
++            for(int i=0;i<64;++i)e->eval(&token,1,true);
++            ElasticTestAccess::verify(*e);
++            check(e->memory().stamp().frontier==uint64_t(e->pos()),"accepted frontier drifted");
++            check(e->memory().visible_tokens()<=o.memory.budget+o.memory.reserve,"physical KV budget exceeded");
++        }
++        const auto first=e->pos();
++        e->memory().begin_query(first,first+16);
++        const auto query_cp=e->memory().checkpoint();
++        e->eval(prompt.data(),16,false);
++        const bool replay=e->memory().freeze_and_rewind(query_cp,first+16);
++        check(replay,"sparse query did not exercise replay");
++        e->eval(prompt.data(),16,false);
++        e->memory().finish_query();
++        check(e->memory().stamp().frontier==uint64_t(first+16),"replay changed accepted frontier");
++        e->eval(&token,1,true);
++        ElasticTestAccess::verify(*e);
++        std::cout<<"PASS cache_growth_reclaim Pressure Query_replay\n";
++        e->reset();
++        e->eval(prompt.data(),64,false);
++        check(e->memory().stamp().frontier==64,"reset retained old accepted tokens");
++        std::cout<<"PASS reset_after_elastic_decode\n";
++    } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
++}

@@ -1,0 +1,289 @@
+{
+  "schema_version": 1,
+  "launch_contract_version": 3,
+  "query_scoring_revision": 2,
+  "backends": {
+    "ninfer": {
+      "model_format": ".ninfer",
+      "speculative_decoding": true,
+      "concurrent_requests": true,
+      "backend": "ninfer",
+      "active_kv_tiering": true,
+      "cross_backend_kv_transfer": false,
+      "ssd_persistence": "process",
+      "streaming": true,
+      "multimodal": true,
+      "disk_restore": false,
+      "supported_combinations": {
+        "multi_gpu": {
+          "host_history": "shared",
+          "vision_residency": [
+            "resident",
+            "cpu"
+          ],
+          "mtp": true,
+          "mode": "layer",
+          "max_devices": 8
+        },
+        "ngram": {
+          "wide_max_concurrency": 1,
+          "concurrent_max_drafts": 15,
+          "image_kv": [
+            "bf16",
+            "int8",
+            "fp8",
+            "nvfp4",
+            "k8v4",
+            "rk8v4",
+            "rk4v4",
+            "rk4v4-e8",
+            "rk2v4-e8"
+          ],
+          "concurrent_width_policy": "clamp_to_15",
+          "text_only": false,
+          "max_concurrency": 8,
+          "requires_speculative": [
+            "mtp",
+            "dflash2"
+          ],
+          "max_drafts": 63
+        },
+        "text": {
+          "kv": [
+            "bf16",
+            "int8",
+            "fp8",
+            "nvfp4",
+            "k8v4",
+            "rk8v4",
+            "rk4v4",
+            "rk4v4-e8",
+            "rk2v4-e8"
+          ],
+          "max_concurrency": 8,
+          "mtp_drafts": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15
+          ]
+        },
+        "lookup_ngram": {
+          "replacement": "--ngram-draft-tokens --ngram-min-match",
+          "reason": "legacy_path_disabled",
+          "enabled": false
+        },
+        "video": false,
+        "images": {
+          "kv": [
+            "bf16",
+            "int8",
+            "fp8",
+            "nvfp4",
+            "k8v4",
+            "rk8v4",
+            "rk4v4",
+            "rk4v4-e8",
+            "rk2v4-e8"
+          ],
+          "residency": [
+            "resident",
+            "cpu"
+          ],
+          "max_concurrency": 8
+        },
+        "cold_disk": {
+          "reason": "replaced_by_process_local_tiering",
+          "enabled": false
+        },
+        "adaptive_mtp": {
+          "text_only": false,
+          "ngram": true,
+          "cold_disk": false,
+          "ngram_concurrent_max_drafts": 15,
+          "max_concurrency": 8,
+          "ngram_max_concurrency": 8
+        },
+        "active_disk": {
+          "max_concurrency": 8,
+          "shared_active_idle_quota": true,
+          "enabled": true
+        },
+        "fast_prefill": {
+          "kv": [
+            "int8",
+            "rk8v4",
+            "rk4v4",
+            "rk4v4-e8",
+            "rk2v4-e8"
+          ],
+          "residency": [
+            "resident",
+            "cpu"
+          ],
+          "text_only": false,
+          "max_concurrency": 8,
+          "cold_disk": false
+        },
+        "rk8v4": {
+          "max_concurrency": 8,
+          "text_only": false
+        }
+      },
+      "speculative": {
+        "modes": {
+          "none": {
+            "max_draft_tokens": 0
+          },
+          "mtp": {
+            "max_draft_tokens": 15,
+            "adaptive": true,
+            "ngram": true,
+            "max_concurrency": 8,
+            "max_devices": 8,
+            "draft_asset": "embedded"
+          },
+          "dflash2": {
+            "max_draft_tokens": 15,
+            "adaptive": false,
+            "ngram": true,
+            "max_concurrency": 8,
+            "max_devices": 1,
+            "draft_asset": "embedded"
+          }
+        },
+        "schema_version": 1
+      },
+      "history_reuse": true,
+      "text_chat": true
+    },
+    "llamacpp": {
+      "model_format": ".gguf",
+      "speculative_decoding": true,
+      "concurrent_requests": true,
+      "backend": "llamacpp",
+      "active_kv_tiering": true,
+      "cross_backend_kv_transfer": false,
+      "ssd_persistence": "process",
+      "streaming": true,
+      "multimodal": true,
+      "disk_restore": true,
+      "speculative": {
+        "modes": {
+          "none": {
+            "max_draft_tokens": 0
+          },
+          "mtp": {
+            "max_draft_tokens": 5,
+            "adaptive": false,
+            "ngram": false,
+            "max_concurrency": 8,
+            "max_devices": 8,
+            "draft_asset": "optional_gguf"
+          },
+          "dflash2": {
+            "max_draft_tokens": 5,
+            "adaptive": false,
+            "ngram": false,
+            "max_concurrency": 8,
+            "max_devices": 1,
+            "draft_asset": "required_gguf"
+          }
+        },
+        "schema_version": 1
+      },
+      "history_reuse": true,
+      "text_chat": true
+    },
+    "polystrata": {
+      "model_format": ".gguf",
+      "speculative_decoding": true,
+      "concurrent_requests": true,
+      "backend": "polystrata",
+      "active_kv_tiering": true,
+      "cross_backend_kv_transfer": false,
+      "ssd_persistence": "process",
+      "streaming": true,
+      "multimodal": true,
+      "disk_restore": true,
+      "supported_combinations": {
+        "query": {
+          "scorers": [
+            "page-softmax",
+            "meanq-cosine"
+          ],
+          "bounded_replay": true,
+          "tool_continuation": "resident_pressure"
+        },
+        "mtp": {
+          "solo": true,
+          "batch": false,
+          "drafts": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "batch_fallback": "ordinary_decode"
+        },
+        "text": {
+          "architectures": [
+            "qwen35moe"
+          ],
+          "max_concurrency": 8,
+          "kv": [
+            "f16",
+            "q8_0"
+          ],
+          "max_devices": 1
+        },
+        "storage": {
+          "scope": "process",
+          "ssd_persistence": "process",
+          "shared_active_idle_quota": true
+        }
+      },
+      "speculative": {
+        "modes": {
+          "none": {
+            "max_draft_tokens": 0
+          },
+          "mtp": {
+            "max_draft_tokens": 3,
+            "adaptive": true,
+            "ngram": false,
+            "max_concurrency": 8,
+            "max_devices": 1,
+            "draft_asset": "embedded",
+            "batch_drafts": false,
+            "solo_drafts": true,
+            "adaptive_kind": "native_cost"
+          }
+        },
+        "schema_version": 1
+      },
+      "history_reuse": true,
+      "block_tokens": {
+        "default": 32,
+        "startup_fixed": true,
+        "supported": [
+          32,
+          64
+        ]
+      },
+      "text_chat": true
+    }
+  }
+}

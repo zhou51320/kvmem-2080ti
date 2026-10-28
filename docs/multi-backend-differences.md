@@ -1,14 +1,15 @@
 # KVMem 两后端实现差异
 
-更新日期：2026 年 10 月 17 日（KVMem CLI v1 与 NInfer 上游刷新）。本次工作分支 `feat/ninfer-all-27b-refresh` 基于 master `27a221e`，包含已合入的活跃 KV 分层和 LCP。两个后端的完整集成改动在 `backends/patches/`，准备后的精确树哈希在 `backends/versions.json`。
+更新日期：2026 年 10 月 22 日（NInfer 上游刷新）。工作分支 `update/ninfer-upstream-kv-20261023` 基于 master `19f4ee6`，保留已合入的图召回 C、统一 Query/Pressure、活跃 KV 分层和 LCP。两个后端的完整集成改动在 `backends/patches/`，准备后的精确树哈希在 `backends/versions.json`。
 
-本轮工作分支的 ninfer 上游为 `iamwavecut/ninfer-all`，固定在 `08fd7019925f`，已完成 Qwen3.8-27B Dense 的本地定向验证。KVMem 保留既有 Qwen Dense 边界；`qwen4_exp`、Gemma 4、host/disk routed expert、suspend、graft 和 router 尚未适配，组合会被拒绝。本轮不承诺 35B MoE 的 KVMem 支持。Q2_0/Q4_0/Q5_0 是权重量化格式，不能据此推断新的模型架构已经支持 KVMem。实际验证范围见 [迁移记录](ninfer-all-migration-validation.md)。
+本轮工作分支的 ninfer 上游为 `iamwavecut/ninfer-all`，固定在 `db8c114802a0`。本次验收聚焦 Qwen3.8-27B Dense 的同激活 KV 对照与核心协议、原生状态检查。KVMem 保留既有 Qwen Dense 边界；`qwen4_exp`、Gemma 4、host/disk routed expert、suspend、graft 和 router 尚未适配，组合会被拒绝。本轮不承诺 35B MoE 的 KVMem 支持。Q2_0/Q4_0/Q5_0 是权重量化格式，不能据此推断新的模型架构已经支持 KVMem。实际验证范围见 [迁移记录](ninfer-all-migration-validation.md)。
+
 
 llama.cpp 与 ninfer 共用 KVMem 策略和内存契约，并共用 KVMem 公共参数解析；各自保留原生推理、页池、请求处理和原生参数解析。切换后端时，需要同时核对参数名称、默认值、计量范围和执行行为。下表比较的是本项目的 `llama-kvmem-server` 与 ninfer KVMem worker，不是上游两个引擎的全部能力。
 
 除“统一启动入口”一节外，默认值均指直接启动 worker 且未显式覆盖的配置。旧预编译包的功能以随包说明和验收报告为准；当前源码的参数不能自动用于旧包。运行方法见 [多后端运行](multi-backend.md)，源码准备方法见 [仓库工作流](multi-backend-repository.md)。
 
-公共参数的精确定义、迁移规则与默认值见 [原生 CLI 与公共配置规范](native-cli-configuration-spec.md)。SSD 额度显式 0 在两个 EXE 中均为关闭，此时不得携带 SSD 目录；LRFU 支持正反开关。
+公共参数的精确定义、迁移规则与默认值见 [原生 CLI 与公共配置规范](native-cli-configuration-spec.md)。SSD 额度显式 0 在两个 EXE 中均为关闭，此时不得携带 SSD 目录；当前支持两种 Query scorer、mean/max 聚合及 LRFU 正反开关（仅 meanq-cosine 支持历史加权），见 [C 算法与验证](graph-recall.md)。
 
 ## ninfer 保留的粒度约定
 
@@ -16,10 +17,10 @@ llama.cpp 与 ninfer 共用 KVMem 策略和内存契约，并共用 KVMem 公共
 
 | 概念 | llama.cpp KVMem | ninfer KVMem |
 |---|---|---|
-| 检索块 block | `--kvmem-block-tokens N` 可配置，默认 128 tokens | 当前固定 64 tokens，未开放对应启动参数 |
+| 检索块 block | `--kvmem-block-tokens N` 可配置，服务端与 CLI 默认 32 tokens | 当前固定 64 tokens，未开放对应启动参数 |
 | 原生物理页 page | 本项目的 KV 搬运按适配器 block 和原生布局处理，不要求与 ninfer 页大小相同 | 原生页池要求每页 64 tokens |
 | block 与 page 的关系 | 依据本后端的 block 与 KV 布局执行 | 当前一块对应一页；统计、选择、搬运和冷快照都按此关系实现 |
-| recent 保留量 | `--kvmem-recent-tokens N`，转换为 `N / block_tokens` 个完整块；公共输入默认 64，block=128 时有效值为 0 | `--kvmem-recent-tokens N`，按 64-token 页向下取整；N 必须至少 64。省略时为 64，即最新一页 |
+| recent 保留量 | `--kvmem-recent-tokens N`，转换为 `N / block_tokens` 个完整块；公共输入默认 64，默认 block=32 时为两块；显式 block=128 时为 0 | `--kvmem-recent-tokens N`，按 64-token 页向下取整；N 必须至少 64。省略时为 64，即最新一页 |
 | sink 保留量 | `--kvmem-sink-tokens N`；默认 0 表示一块，正数向下取完整块且至少一块 | `--kvmem-sink-tokens N`，规则相同。默认 0 表示首个 64-token 页；正数向下取整且至少一页 |
 
 block 是检索统计和选中历史的单位，page 是原生 KV 分配和搬运的单位，两者概念不同。保留 ninfer 的 block=64。`--kvmem-recent-tokens 1024` 在这个粒度下保留最新 16 页；不足一页的余数被舍去。ninfer 必须保留至少一页 recent，以维护尚未写满的追加页；0–63 会被启动脚本、服务参数和 Engine 校验拒绝。
@@ -32,13 +33,14 @@ block 是检索统计和选中历史的单位，page 是原生 KV 分配和搬�
 |---|---|---|
 | 启用 KVMem | 提供 `--kvmem` / `--no-kvmem`，默认关闭；正 B 兼容启用 | 相同；关闭与有效 KVMem 预算冲突时报错 |
 | 历史选择预算 B | `--kvmem-budget`，依据 block、设备容量和适配器配置计算有效值 | 同名参数；B 至少 128，必须为 64 的整数倍 |
-| 生成预留 R | `--kvmem-gen-reserve`，公共默认 1024；当前检索实现使服务输出能力受 R 限制 | 同名参数，默认 1024；KVMem 下至少 64，必须为 64 的整数倍；作为可复用追加空间 |
+| 生成预留 R | `--kvmem-gen-reserve`，公共默认 1024；作为可复用追加空间 | 同名参数，默认 1024；KVMem 下至少 64，必须为 64 的整数倍；作为可复用追加空间 |
 | Main KV 工作空间 | 根据本后端容量规则配置 B+R 的槽池 | 每条活动请求按 B+R 配置 Main 页池；要求 B+R 不超过逻辑上下文；MTP 另有原生页池 |
-| 单次输出超过 R | KVMem 开启且 R>0 时，默认和请求输出预算均收敛到 `min(context, R)` | 允许；输出受请求预算、逻辑上下文和结束条件约束 |
-| 生成时追加空间不足 | 本服务当前用上述 R 上限限制单次输出；不能从参数名推断已支持 ninfer 的持续追加行为 | 下一步紧凑 KV 视图超过 B+R 时，归档、重选最多 B、回填并继续追加；MTP 会为下一验证批次提前检查空间 |
-| 选择方法 | `--kvmem-method recency\|retrieval`，默认 retrieval | 没有同名选项；query 完整时按 mean-K 检索，query 尚未完整时保留必选页并按最近历史补足 |
-| 检索 query | 由最后用户 span 等逻辑确定；`--kvmem-query-max-tokens` 默认从 span 尾部取最多 512 tokens，`--kvmem-query-last` 提供 64-token 回退 | 使用 Frontend 标记的最后真实用户内容 span；没有对应的可配置长度上限 |
-| query 重放和策略 | 开放 `--kvmem-query-replay legacy\|auto`、`--kvmem-query-policy legacy\|user` | 使用 ninfer 的 query probe、checkpoint 和 replay 流程，没有上述策略开关 |
+| 单次输出超过 R | 允许；输出受请求预算、逻辑上下文和结束条件约束 | 允许；输出受请求预算、逻辑上下文和结束条件约束 |
+| 生成时追加空间不足 | DecodePressure 从驻留 accepted 工作集按累计注意力重选到 B，再继续追加；不从 Host 冷召回 | 下一步紧凑 KV 视图超过 B+R 时，归档并以 DecodePressure 对驻留工作集重选最多 B，继续追加；MTP 会为下一验证批次提前检查空间 |
+| 选择方法 | 新用户 Query 默认 C：page-softmax + 图传播；Pressure 使用驻留累计 attention | 相同；共用评分和 Pressure 规则 |
+| 检索 query | 本轮真实用户内容末尾最多 512 tokens；无可靠边界时使用有界回退 | Frontend 确定真实用户内容，使用同一 512-token 上限；工具续接不产生新 Q |
+| query 重放和策略 | 默认完整后缀最多 2048 tokens，先检查容量再改变选择；可证明视图有效时跳过 | 相同的长度与容量准入规则；固定选择回放，禁止在 Query replay 中执行 Pressure |
+| 普通工具续接 | 追加＋Pressure，不使用旧 Q 冷召回 | 相同，包括冷启动和会话恢复后的工具返回 |
 | 必须保留的历史 | sink、配置的 recent 和本请求其他 mandatory 区域占用 B | 配置的 sink、recent 和完整图片区域占用 B；其余页参与选择。省略 recent 时仍保留最新一页 |
 
 recent 是 B 内的保留份额，R 是追加空间。增大 recent 不会自动增大 B+R；它会减少可供其他历史参与检索的份额。配置必须给 sink、recent、图片等必选区域留下足够的 B。
@@ -56,7 +58,7 @@ recent 是 B 内的保留份额，R 是追加空间。增大 recent 不会自动
 
 RTX 5050 Laptop 已通过 [超过 R 的真实输出验证](reserve-output-5050-validation-20261006.md)：B=256、R=128、NVFP4 普通 decode 下，分别请求并生成 512/1024 tokens，结束原因均为 length；生成途中分别完成 2/6 次重选，KV/GDN 搬运校验通过，Main 页池保持 384-token 容量。这组功能结果不代表其他 KV 格式、MTP 或 Graph 已完成相同验证。
 
-llama 的 R 输出限制是原服务路径已有的实现约束，尚未认定为缺陷。是否解除该限制及如何实现追加空间复用，需要单独确定行为目标和回归范围。
+当前 C 已按用户确定的持续追加设计解除 llama 的旧 R 输出能力限制。R 仍为 append workspace；两个后端的核心长输出检查均覆盖多次 DecodePressure。上述 2026-10-06 记录保留其历史测试范围。
 
 代码位置：[llama 输出上限](../tools/kvmem-webui.h)、[llama 服务与 query 处理](../tools/llama-kvmem-server.cpp)、[ninfer 选页和原生 KV 搬运](../backends/ninfer/src/models/qwen3_5/program/storage/kvmem_window.cpp)、[ninfer decode 空间检查](../backends/ninfer/src/models/qwen3_5/program/decode.cpp)。
 
@@ -148,10 +150,10 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 | 入口配置 | 当前映射和限制 |
 |---|---|
 | 两边共用 | Backend、Model、Worker、Gpu、ListenHost、Port、Context、Budget、Reserve、Prefill、MaxTokens、KvType、HostMiB、DiskPath、DiskMiB、SinkTokens、RecentTokens、NoLrfu、LrfuLambda、LrfuTopFraction、ScoreAggregation，以及 WorkerArgs。ninfer 的 `-Gpu` 接受 1–8 个不重复 UUID，顺序即 layer stage 顺序 |
-| 共用脚本默认值 | 端口 18200、Context=262144、B=32768、R=1024、Prefill=128、MaxTokens=1024、Concurrency=1；sink=12288、recent=1024 tokens（12K/1K，16页 recent），计入 B；LRFU 开启、lambda=0.5、top-frac=0.9、GQA max；KV 默认 llama q8_0 / ninfer int8；ninfer 视觉 token 默认 1024。相同 MaxTokens 仍受各后端的输出限制。直接运行 worker 时仍沿用前文的 sink/recent 默认值 |
+| 共用脚本默认值 | 端口 18200、Context=262144、B=32768、R=1024、Prefill=128、MaxTokens=1024、Concurrency=1；sink=12288、recent=1024 tokens（12K/1K，16页 recent），计入 B；默认 C：Mean-K page softmax + Query 图传播，pressure 累计 attention；KV 默认 llama q8_0 / ninfer int8；ninfer 视觉 token 默认 1024。相同 MaxTokens 仍受各后端的输出限制。直接运行 worker 时仍沿用前文的 sink/recent 默认值 |
 | 只为 ninfer 映射 | StageLayers、MtpDrafts、AdaptiveMtp、FastPrefill、NgramDrafts/MinMatch、Concurrency、RetainedSessions、Vision/Residency/Tokens、DeviceProfile、ThinkingBudget；显式传给 llama 会被脚本拒绝。省略 ThinkingBudget 不限制思考。DiskPath/MiB 映射到两后端的公共进程内 SSD 分层，必须通过顶层参数传入。ninfer 的设备参数只能走 `-Gpu` 和 `-StageLayers`，思考预算只能走 `-ThinkingBudget`，sink/recent 只能走 `-SinkTokens` 和 `-RecentTokens`，不能再从 WorkerArgs 传 `--device`、`--devices`、`--stage-layers`、`--default-thinking-budget`、`--kvmem-sink-tokens` 或 `--kvmem-recent-tokens` |
 | llama 的对应能力 | MTP、lane、会话、视觉和冷磁盘等已有能力仍可用，当前需要通过 WorkerArgs 传原生参数；脚本拒绝对应入口选项不表示后端没有该能力 |
-| 默认 ninfer 快捷脚本 | `start-ninfer.ps1` 调用统一启动器。Context=204800、B=36864、R=16384、Host=12288MiB、Prefill=256、输出上限16384、思考预算8192、sink=12288、recent=1024 tokens（12K/1K，16页 recent）、单路、INT8、自适应MTP上限4、ngram31、CPU视觉、每图1024 tokens、保留1个非活动 Host 会话。LRFU 开启、lambda=0.5、top-frac=0.9、GQA max。可用 `-Gpu`、`-StageLayers`、`-SinkTokens`、`-RecentTokens` 及上述检索参数覆盖，`-DryRun` 查看完整参数。预算、MTP 等配方值与共用脚本默认值不同 |
+| 默认 ninfer 快捷脚本 | `start-ninfer.ps1` 调用统一启动器。Context=204800、B=36864、R=16384、Host=12288MiB、Prefill=256、输出上限16384、思考预算8192、sink=12288、recent=1024 tokens（12K/1K，16页 recent）、单路、INT8、自适应MTP上限4、ngram31、CPU视觉、每图1024 tokens、保留1个非活动 Host 会话。默认 C：Mean-K page softmax + Query 图传播，pressure 累计 attention。可用 `-Gpu`、`-StageLayers`、`-SinkTokens`、`-RecentTokens` 覆盖资源设置，`-DryRun` 查看完整参数。预算、MTP 等配方值与共用脚本默认值不同 |
 
 代码位置：[共用启动脚本](../scripts/windows/start-backend.ps1)、[ninfer 快捷脚本](../scripts/windows/start-ninfer.ps1)。
 
@@ -161,7 +163,7 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 |---|---|
 | ninfer block 与物理页 | 已决定保留当前 64 tokens，作为实现差异展示；不为参数外观一致而修改原生页池 |
 | recent、sink | ninfer 已按整页向下取整规则开放 `--kvmem-sink-tokens` 和 `--kvmem-recent-tokens`。recent 至少 64 tokens，省略时仍是一页，与 llama 允许 0 的规则不同。query 长度仍未开放 |
-| 思考、输出预算、MTP、并发 | 优先统一用户入口和默认值说明；R 输出限制等行为变化需要另行确定目标，不能只改别名 |
+| 思考、输出预算、MTP、并发 | 优先统一用户入口和默认值说明；当前 C 已实现 accepted 驻留工作集上的 pressure 持续追加，仍分别遵守上下文与输出预算 |
 | 会话和内存预算 | 统一单位与展示，并明确预算范围、活动/非活动计数、硬预算与软上限 |
 | 原生 KV 格式和多卡实现 | ninfer 源码已开放 layer pipeline；llama 保持自己的 layer/tensor 路径。两者不等价，也不迁移 KV。按包、模型和功能组合校验 |
 

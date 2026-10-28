@@ -326,6 +326,21 @@ static void test_decision_table() {
     }
 }
 
+static void test_explicit_owner_edit() {
+    g_row = "spread permits editing only the explicitly bound owner";
+    auto owner = store_fixture(1, 9000, 100, {26, 2048, 4096, 8900}, 1 * GiB, 10);
+    owner.client_id = "owner";
+    owner.lcp = 3800;
+    CHECK(select({owner}, 9100, false, "owner", {4, 0}).action == kvmem_store_action::fresh);
+    owner.allow_bound_edit = true;
+    const auto edit = select({owner}, 9100, false, "owner", {4, 0});
+    CHECK(edit.action == kvmem_store_action::extend && edit.keep == 2048 && edit.id == 1);
+    CHECK(select({owner}, 9100, false, "", {4, 0}).action == kvmem_store_action::fresh);
+    CHECK(select({owner}, 9100, false, "different", {4, 0}).action == kvmem_store_action::fresh);
+    owner.ckpt_rows = {4096, 8900};
+    CHECK(select({owner}, 9100, false, "owner", {4, 0}).action == kvmem_store_action::fresh);
+}
+
 static void test_capture_hint_does_not_authorize_restore() {
     g_row = "capture hint survives a cold fork without authorizing restore";
     auto a = store_fixture(1, 9000, 100, {0, 8900}, 1 * GiB, 10);
@@ -525,6 +540,7 @@ static void test_table_lru_and_bytes() {
 
 int main() {
     test_decision_table();
+    test_explicit_owner_edit();
     test_capture_hint_does_not_authorize_restore();
     test_client_id_never_fails_a_request();
     test_checkpoint_arithmetic();

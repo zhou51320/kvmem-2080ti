@@ -1,0 +1,279 @@
+diff --git a/NOTICE b/NOTICE
+index 1a9ca3dbc97a6634dc6d71ce5e671a3eff6202f3..df355b8595b77b507621a9c21273eab9356258b0 100644
+--- a/NOTICE
++++ b/NOTICE
+@@ -26,3 +26,11 @@ https://github.com/melis2023/ninfer-kvmem-actkv
+ Changes here: preserved current NVFP4/INT8 dispatch and Blackwell scale handling;
+ priced workspace for all admitted GGUF blocks; added native shape/conv oracles,
+ exact artifact import checks and a bounded weight-only NVFP4 conversion method.
++
++CUDA Graph startup calibration
++==============================
++Adapted from melis2023/ninfer-kvmem-actkv, revision 664cb6daa8cba30dfe39b0d10113a72b20587853,
++including b4d8096 (probe) and 591537b (repeat above-floor measurement).
++Contributor: melis2023 <zhuangisme@gmail.com>.
++Changes here: automatic calibration for dense single-device MTP/DFlash2/ordinary execution, typed
++recoverable allocation fallback, fatal CUDA execution errors preserved, and regression tests.
+diff --git a/src/models/qwen3_5/program/planning/startup.cpp b/src/models/qwen3_5/program/planning/startup.cpp
+index ef17a9eae3a39dad3b61426793bf2c39e5cf1e3e..714db8cc6b6f0ab22acb82cae60bbe48e7f38d84 100644
+--- a/src/models/qwen3_5/program/planning/startup.cpp
++++ b/src/models/qwen3_5/program/planning/startup.cpp
+@@ -1597,6 +1597,20 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
+     return planner;
+ }
+ 
++std::unique_ptr<SequencePlanImpl>
++make_graph_probe_plan(const execution::Parameters& parameters, DeviceContext& device,
++                      const EngineOptions& options) {
++    auto planner = make_sequence_planner_impl(parameters, device, options, 0);
++    auto inputs = planner->inputs;
++    // Match the window used by prepare_graphs(), including the n-gram graph family.
++    // This is a full physical window, not one dummy page: graph preparation runs kernels.
++    if (inputs.kvmem_window_tokens && inputs.kvmem_window_tokens < inputs.capacity) {
++        inputs.capacity = inputs.kvmem_window_tokens;
++    }
++    const auto pages = std::max(page_count(inputs.capacity), inputs.max_concurrency);
++    return build_sequence_candidate(inputs, pages);
++}
++
+ std::unique_ptr<SequencePlanImpl>
+ finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl> planner,
+                             std::uint32_t main_page_groups) {
+diff --git a/src/models/qwen3_5/program/planning/startup.h b/src/models/qwen3_5/program/planning/startup.h
+index d36e2a59a6a51d609809311c4e01765fddb2a60d..30292c4b7f9a4b80ad70667b96cb60f3b2d28cbc 100644
+--- a/src/models/qwen3_5/program/planning/startup.h
++++ b/src/models/qwen3_5/program/planning/startup.h
+@@ -224,6 +224,9 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
+ finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl> planner,
+                             std::uint32_t main_page_groups);
+ 
++[[nodiscard]] std::unique_ptr<SequencePlanImpl>
++make_graph_probe_plan(const execution::Parameters&, DeviceContext&, const EngineOptions&);
++
+ // Resolves the single Host RAM budget into the plan's context-cache shape: one StateImage per
+ // position it retains and Host KV for everything else. StateImages are the fixed per-position cost
+ // of a checkpoint and Host KV the per-token cost, so the budget first covers the inventory the
+diff --git a/src/models/qwen3_5/program/program.cpp b/src/models/qwen3_5/program/program.cpp
+index 5021b5d7fe962fc2bddd2288cdba2669a07b784a..20fda7a344d04fffb45e873cecf737d7a7b31caa 100644
+--- a/src/models/qwen3_5/program/program.cpp
++++ b/src/models/qwen3_5/program/program.cpp
+@@ -3,6 +3,8 @@
+ #include "models/qwen3_5/program/graft_injection.h"
+ #include "models/qwen3_5/program/planning/startup.h"
+ #include "models/qwen3_5/program/program_impl.h"
++#include "core/resident_memory.h"
++#include <new>
+ #include <stdexcept>
+ #include <string>
+ #include <utility>
+@@ -834,6 +836,34 @@ std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
+     return std::unique_ptr<Program>(new Program(std::move(impl)));
+ }
+ 
++std::optional<std::size_t> measure_cuda_graph_bytes(
++    const execution::Parameters& parameters, DeviceContext& device, const EngineOptions& options) {
++    if (!options.use_cuda_graph) { return std::nullopt; }
++    auto probe_options = options;
++    probe_options.cuda_graph_allowance_bytes = 0;
++    try {
++        auto plan = detail::make_graph_probe_plan(parameters, device, probe_options);
++        auto probe = create_program(parameters, SequencePlan(std::move(plan)), device,
++                                    StartupObserver{});
++        const auto measured = probe->memory_summary().cuda_graph_measured_bytes;
++        probe.reset();
++        device.synchronize();
++        return measured;
++    } catch (const CudaError& error) {
++        if (error.status() != cudaErrorMemoryAllocation) { throw; }
++        const auto pending = cudaGetLastError();
++        if (pending != cudaSuccess && pending != cudaErrorMemoryAllocation) {
++            CUDA_CHECK(pending);
++        }
++    } catch (const core::VramCapacityError&) {
++        // The real planner retains the static allowance when the probe cannot fit.
++    } catch (const std::bad_alloc&) {
++        // Includes Host allocation pressure; all temporary owners have unwound.
++    }
++    device.synchronize();
++    return std::nullopt;
++}
++
+ void Program::inject_graft(const PromptGraft& graft) {
+     if (impl_->experts) { impl_->experts->check(); }
+     inject_direct_graft(*impl_, graft);
+diff --git a/src/models/qwen3_5/program/program.h b/src/models/qwen3_5/program/program.h
+index f11467f7ffca84844b45abf69fbd5b5a17d5d35e..5e11772d3c900b544d951275821381527cb5934c 100644
+--- a/src/models/qwen3_5/program/program.h
++++ b/src/models/qwen3_5/program/program.h
+@@ -1464,6 +1464,11 @@ struct RuntimeContractAccess {
+                                                     const EngineOptions& options,
+                                                     std::uint32_t resident_main_pages = 0);
+ 
++// A temporary Program captures the configured graphs, then releases its arenas.
++// Allocation pressure returns no reading; execution errors must propagate.
++[[nodiscard]] std::optional<std::size_t> measure_cuda_graph_bytes(
++    const execution::Parameters&, DeviceContext&, const EngineOptions&);
++
+ // Overlay Vision residency: sizes one encode window for these options, checks that the evictable
+ // weight tail covers it and captures the weight pool's window mirror. Call once after load and
+ // before sequence planning, so the pinned mirror is already charged when KV capacity resolves.
+diff --git a/src/runtime/engine/graph_probe.h b/src/runtime/engine/graph_probe.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a31582825392e09e6ef98e2c16393b92157ea4e
+--- /dev/null
++++ b/src/runtime/engine/graph_probe.h
+@@ -0,0 +1,32 @@
++#pragma once
++
++#include <algorithm>
++#include <cstddef>
++#include <optional>
++
++namespace ninfer::detail {
++// Adapted from melis2023/ninfer-kvmem-actkv b4d8096 and 591537b.
++// Measurements are driver deltas, not an exact allocator ledger. Keep the donor's
++// floor and confirm above-floor readings to filter WDDM residency spikes.
++inline constexpr std::size_t kGraphProbeFloor = 256ULL << 20;
++
++struct GraphProbeResult {
++    std::optional<std::size_t> first;
++    std::optional<std::size_t> second;
++    std::optional<std::size_t> allowance;
++};
++
++template<class Measure>
++GraphProbeResult calibrate_graph_allowance(Measure&& measure) {
++    GraphProbeResult result;
++    result.first = measure();
++    if (!result.first) { return result; }
++    auto measured = *result.first;
++    if (measured > kGraphProbeFloor) {
++        result.second = measure();
++        if (result.second) { measured = std::min(measured, *result.second); }
++    }
++    result.allowance = std::max(measured, kGraphProbeFloor);
++    return result;
++}
++} // namespace ninfer::detail
+diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
+index 9fa87b4e529d0aac4356fd0382a936b6db338fc6..1e527a1388574931cb08ff97fea55968cb085c14 100644
+--- a/src/runtime/engine/model_instance.cpp
++++ b/src/runtime/engine/model_instance.cpp
+@@ -21,6 +21,7 @@
+ #include "models/qwen3_5/expert_admission.h"
+ #include "models/qwen3_5/measurement.h"
+ #include "runtime/engine/host_memory.h"
++#include "runtime/engine/graph_probe.h"
+ #include "runtime/contract/rope_scaling.h"
+ 
+ #include <algorithm>
+@@ -923,8 +924,43 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext&
+             graft_main_pages += (graft.n_slots + page_tokens - 1U) / page_tokens;
+         }
+     }
+-    const EngineOptions planning_options =
++    EngineOptions planning_options =
+         artifact_scoped_disk_tier(options, instance->model->info().artifact_id);
++    // Calibrate dense single-device execution uniformly, including MTP and DFlash2.
++    // Expert streaming, grafts and suspend need separate qualification of
++    // temporary Program ownership. Do not reopen production disk stores in a probe.
++    if (options.use_cuda_graph && options.cuda_graph_allowance_bytes == 0 &&
++        device.size() == 1 &&
++        instance->model->expert_sources().layers.empty() && options.grafts.empty() &&
++        !options.suspend.enabled && options.kvmem.disk_bytes == 0 &&
++        options.context_cache.disk_kv_path.empty()) {
++        publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
++                           "CUDA graph probe starting");
++        const auto result = ninfer::detail::calibrate_graph_allowance([&] {
++            return models::qwen3_5::measure_cuda_graph_bytes(
++                instance->parameters, device, planning_options);
++        });
++        if (result.allowance) {
++            options.cuda_graph_allowance_bytes = *result.allowance;
++            planning_options.cuda_graph_allowance_bytes = *result.allowance;
++            if (result.second) {
++                publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
++                    "CUDA graph probe first %.1f MiB, second %.1f MiB; planning allowance %.1f MiB",
++                    static_cast<double>(*result.first) / 1048576.0,
++                    static_cast<double>(*result.second) / 1048576.0,
++                    static_cast<double>(*result.allowance) / 1048576.0);
++            } else {
++                publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
++                    "CUDA graph probe measured %.1f MiB; planning allowance %.1f MiB (second %s)",
++                    static_cast<double>(*result.first) / 1048576.0,
++                    static_cast<double>(*result.allowance) / 1048576.0,
++                    *result.first > ninfer::detail::kGraphProbeFloor ? "unavailable" : "not needed");
++            }
++        } else {
++            publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Warning,
++                               "CUDA graph probe unavailable; retaining static allowance");
++        }
++    }
+     const auto curve = models::qwen3_5::make_sequence_planner(
+         instance->parameters, device, planning_options, graft_main_pages).capacity_curve();
+     std::vector<std::size_t> free_by_rank =
+diff --git a/tests/cmake/RuntimeTests.cmake b/tests/cmake/RuntimeTests.cmake
+index 686327ad1dc3b2651320f9dcaadf012ea07a1ef1..7c76899bbfc226b714146d6e367eff58a81d4051 100644
+--- a/tests/cmake/RuntimeTests.cmake
++++ b/tests/cmake/RuntimeTests.cmake
+@@ -31,6 +31,9 @@ endif()
+ ninfer_add_test(ninfer_kv_capacity_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_kv_capacity.cpp"
+   LIBRARIES ninfer_runtime_support)
+ 
++ninfer_add_test(ninfer_graph_probe_test STANDALONE
++  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_graph_probe.cpp")
++
+ ninfer_add_test(ninfer_device_profile_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_device_profile.cpp"
+   LIBRARIES ninfer_runtime_support ninfer_calibration)
+ 
+diff --git a/tests/test_graph_probe.cpp b/tests/test_graph_probe.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..61c2f8ad5b9a325de8f30570e840928d6fa234a0
+--- /dev/null
++++ b/tests/test_graph_probe.cpp
+@@ -0,0 +1,45 @@
++#include "runtime/engine/graph_probe.h"
++#include <initializer_list>
++#include <iostream>
++#include <stdexcept>
++#include <vector>
++
++using Reading = std::optional<std::size_t>;
++constexpr std::size_t MiB = 1ULL << 20;
++
++void check(std::initializer_list<Reading> readings, Reading expected, std::size_t calls) {
++    std::vector<Reading> values(readings);
++    std::size_t index = 0;
++    const auto result = ninfer::detail::calibrate_graph_allowance([&]() -> Reading {
++        if (index == values.size()) { throw std::runtime_error("unexpected extra probe"); }
++        return values[index++];
++    });
++    if (result.allowance != expected || index != calls) {
++        throw std::runtime_error("invalid calibrated capacity allowance");
++    }
++}
++
++int main() {
++    try {
++        check({std::nullopt}, std::nullopt, 1); // Preserve static planning on failure.
++        check({0}, 256 * MiB, 1); // Warm driver caches must not remove the floor.
++        check({30 * MiB}, 256 * MiB, 1);
++        check({256 * MiB}, 256 * MiB, 1);
++        check({300 * MiB, 40 * MiB}, 256 * MiB, 2);
++        check({300 * MiB, 290 * MiB}, 290 * MiB, 2);
++        check({300 * MiB, 400 * MiB}, 300 * MiB, 2);
++        check({300 * MiB, std::nullopt}, 300 * MiB, 2);
++        bool propagated = false;
++        try {
++            ninfer::detail::calibrate_graph_allowance([]() -> Reading {
++                throw std::runtime_error("execution fault");
++            });
++        } catch (const std::runtime_error&) { propagated = true; }
++        if (!propagated) { throw std::runtime_error("execution fault was swallowed"); }
++        std::cout << "graph probe calibration policy: 9 cases passed\n";
++        return 0;
++    } catch (const std::exception& error) {
++        std::cerr << error.what() << '\n';
++        return 1;
++    }
++}

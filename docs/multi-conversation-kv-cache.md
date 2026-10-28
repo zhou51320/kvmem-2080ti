@@ -3,6 +3,10 @@
 For the optional RAM/NVMe extension, capacity admission and disk restore, see
 [Session disk cache](session-disk-cache.md). For dynamic scheduling across multiple lanes, see [Multi-lane conversations](multi-lane-conversations.md).
 The policy below describes the original single-lane RAM-only mode unless stated otherwise.
+The experimental [spread checkpoint policy](checkpoint-policy.md) also permits
+middle-history edits of an explicitly bound conversation to restore a valid
+prefix and replace its suffix. Inferred IDs and legacy mode keep the continuation
+gate described below.
 
 `--kvmem-conversations N` lets the server hold N conversations' KV in host RAM
 at the same time and switch between them. With the flag absent, or set to `1`,

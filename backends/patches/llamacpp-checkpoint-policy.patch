@@ -1,0 +1,104 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -211,7 +211,8 @@
+     virtual void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) = 0;
+ 
+     // (optional) serialize/restore per-seq internal state (e.g. eagle3's deferred boundary).
+-    virtual bool get_state(llama_seq_id /*seq_id*/, std::vector<uint8_t> & /*data*/) const { return false; }
++    virtual size_t state_size(llama_seq_id /*seq_id*/) const { return 0; }
++    virtual bool get_state(llama_seq_id /*seq_id*/, std::vector<uint8_t> & /*data*/, size_t /*max_bytes*/) const { return false; }
+     virtual void set_state(llama_seq_id /*seq_id*/, const std::vector<uint8_t> & /*data*/) {}
+ };
+ 
+@@ -941,7 +942,7 @@
+         return llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+     }
+ 
+-    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
++    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data, size_t max_bytes) const override {
+         if (!need_boundary_stash()) {
+             return false;
+         }
+@@ -952,10 +953,16 @@
+         const llama_pos          pos = pending_pos_last[seq_id];
+         const std::vector<float> & g = pending_g_last[seq_id];
+ 
++        if (sizeof(llama_pos) + g.size()*sizeof(float) > max_bytes) return false;
+         data.resize(sizeof(llama_pos) + g.size() * sizeof(float));
+         std::memcpy(data.data(),                     &pos,     sizeof(llama_pos));
+         std::memcpy(data.data() + sizeof(llama_pos), g.data(), g.size() * sizeof(float));
+         return true;
++    }
++
++    size_t state_size(llama_seq_id seq_id) const override {
++        if (!need_boundary_stash() || seq_id < 0 || seq_id >= (llama_seq_id)n_seq || pending_pos_last[seq_id] < 0) return 0;
++        return sizeof(llama_pos) + pending_g_last[seq_id].size()*sizeof(float);
+     }
+ 
+     void set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
+@@ -1438,8 +1445,12 @@
+     void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
+         synced_rows.at(seq_id) = verify_start.at(seq_id) + n_accepted + 1;
+     }
+-    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
++    size_t state_size(llama_seq_id seq_id) const override {
++        return sizeof(llama_pos) + llama_state_seq_get_size_ext(params.ctx_dft, seq_id, 0);
++    }
++    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data, size_t max_bytes) const override {
+         const size_t size = llama_state_seq_get_size_ext(params.ctx_dft, seq_id, 0);
++        if (sizeof(llama_pos) + size > max_bytes) return false;
+         data.resize(sizeof(llama_pos) + size);
+         std::memcpy(data.data(), &synced_rows.at(seq_id), sizeof(llama_pos));
+         if (llama_state_seq_get_data_ext(params.ctx_dft, data.data() + sizeof(llama_pos), size, seq_id, 0) != size)
+@@ -1916,8 +1927,12 @@
+         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
+         synced_rows[seq_id] = verify_start[seq_id] + i_h + 1;
+     }
+-    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
++    size_t state_size(llama_seq_id seq_id) const override {
++        return seq_id >= 0 && (uint32_t)seq_id < n_seq ? sizeof(llama_pos) + size_t(n_embd)*sizeof(float) : 0;
++    }
++    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data, size_t max_bytes) const override {
+         if (seq_id < 0 || (uint32_t) seq_id >= n_seq) return false;
++        if (sizeof(llama_pos) + (size_t)n_embd*sizeof(float) > max_bytes) return false;
+         data.resize(sizeof(llama_pos) + (size_t) n_embd*sizeof(float));
+         std::memcpy(data.data(), &synced_rows[seq_id], sizeof(llama_pos));
+         std::memcpy(data.data() + sizeof(llama_pos), pending_h[seq_id].data(), (size_t) n_embd*sizeof(float));
+@@ -3130,13 +3145,21 @@
+ }
+ 
+ // TODO: support the case of more than one speculative implementations having a state
+-bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data) {
++size_t common_speculative_state_size(common_speculative * spec, llama_seq_id seq_id) {
++    if (spec) for (const auto & impl : spec->impls) {
++        const auto bytes = impl->state_size(seq_id);
++        if (bytes) return bytes;
++    }
++    return 0;
++}
++
++bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data, size_t max_bytes) {
+     if (spec == nullptr) {
+         return false;
+     }
+ 
+     for (auto & impl : spec->impls) {
+-        if (impl->get_state(seq_id, data)) {
++        if (impl->get_state(seq_id, data, max_bytes)) {
+             return true;
+         }
+     }
+diff --git a/common/speculative.h b/common/speculative.h
+--- a/common/speculative.h
++++ b/common/speculative.h
+@@ -97,7 +97,8 @@
+ void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted);
+ 
+ // (optional) get/set internal state
+-bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
++size_t common_speculative_state_size(common_speculative * spec, llama_seq_id seq_id);
++bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data, size_t max_bytes = SIZE_MAX);
+ void common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
+ 
+ // print statistics about the speculative decoding

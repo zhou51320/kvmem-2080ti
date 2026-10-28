@@ -1,0 +1,456 @@
+diff --git a/docs/BACKENDS.md b/docs/BACKENDS.md
+index 0f4a0959..a49dfd8e 100644
+--- a/docs/BACKENDS.md
++++ b/docs/BACKENDS.md
+@@ -166,6 +166,32 @@ the previous request's high water. Parked sessions retain their Host-backed hist
+ steps with 1024 rows of lookahead. `poly_elastic_test MODEL.gguf --kv-reclaim-test` checks accepted KV, recurrent
+ state, statistics and restored-session logits across immediate reclamation.
+ 
++On Windows CUDA, `--elastic-experts-headroom` additionally opts into bounded steady-decode borrowing and implies
++`--elastic-experts`. After 128 decode calls it can use the reserve down to 128 MiB; after 256 calls it can exceed
++the worker's DXGI local budget by at most 128 MiB, while keeping at least 512 MiB physically free according to
++NVML. A configured reserve above 256 MiB increases these margins. DXGI and NVML must identify the same CUDA
++adapter. The worker repays any signed budget excess and restores the full configured reserve before prefill
++or KV expansion. Missing telemetry or shared-memory growth above the sampled baseline by 16 MiB disables
++borrowing for the worker's remaining lifetime; ordinary elastic behavior continues. An allocation failure
++above budget gives back a 64 MiB piece and lowers the borrowing ceiling for the worker lifetime; a failure
++without enough borrowed memory to retreat disables borrowing. The failed ceiling is not repeatedly retried.
++External physical pressure shrinks the cache. Unsupported platforms use ordinary elastic behavior.
++
++Use `["--elastic-experts", "--elastic-experts-headroom"]` in the console's native arguments; remove the second
++flag to compare ordinary elastic allocation. INFO also exposes physical free memory, DXGI budget/local/shared
++usage, headroom state and mapped KV rows/MiB. `poly_elastic_test MODEL.gguf --headroom-test` exercises real decode
++growth, prefill/KV repayment and injected pressure/allocation/telemetry/shared-memory failures. Borrowing beyond
++the Windows budget is opt-in; qualify decode performance on the target machine before enabling it.
++
++`--elastic-headroom-mib N` controls the above-budget ceiling (default 128, range 0..1024 MiB), and
++`--elastic-physical-reserve-mib N` controls the physical-free floor (default 512, range 256..4096 MiB).
++Both require the headroom switch to take effect. For an aggressive target use native arguments
++`["--elastic-experts-headroom", "--elastic-headroom-mib", "512", "--elastic-physical-reserve-mib", "256"]`.
++These are ceilings/targets, not promised allocations: WDDM can reject mappings before the physical floor.
++INFO reports requested and learned ceilings, the physical reserve and allocation backoff count.
++`poly_elastic_test MODEL.gguf --aggressive-test` checks this configuration and verifies that a learned ceiling
++is retained across later decode ticks, alongside the existing repayment and accepted-state checks.
++
+ ## How a backend works
+ 
+ There are two levels.
+diff --git a/src/poly/engine.cpp b/src/poly/engine.cpp
+index 7b9ce000..0bed5f65 100644
+--- a/src/poly/engine.cpp
++++ b/src/poly/engine.cpp
+@@ -11,6 +11,7 @@
+ #include "mmq.hpp"
+ #include "qwen35.hpp"
+ #include "runtime.hpp"
++#include "windows_vram.hpp"
+ #include "strata/poly/kernels.hpp"
+ #include "strata/kernels/native_mmvq.hpp"
+ 
+@@ -825,7 +826,10 @@ void Engine::cover(int64_t end) {
+         if (want > k.mapped) more += want - k.mapped;   // trim_card_kv() leaves a piece it cuts through
+         held += k.mapped;
+     }
+-    if (exp_) {
++    if (exp_ && elastic_enabled_ && opt_.elastic_experts_headroom) {
++        elastic_admit(more);
++        elastic_ticks_ = 0;
++    } else if (exp_) {
+         size_t free_b = 0, total_b = 0;
+         ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+         const size_t quarter = (size_t(std::max(reserve_mib_, 0)) << 20) / 4;
+@@ -837,6 +841,7 @@ void Engine::cover(int64_t end) {
+     for (Kv& k : kv_)
+         vmm_map(k, size(k), (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes, "the attention cache");
+     kv_rows_ = rows;
++    if (elastic_enabled_ && opt_.elastic_experts_headroom) held_is_budget();
+ }
+ 
+ int64_t Engine::kv_rows_for(int64_t end) const {
+@@ -949,6 +954,7 @@ void Engine::shrink_cache(size_t bytes) {
+         --cached_;
+     }
+     ck(cudaStreamSynchronize(cs(st_)), "the expert cache");
++    elastic_extra_ -= std::min(elastic_extra_, arena_.mapped - cut);
+     vmm_unmap(arena_, cut);
+     if (cut > kTail) zero_vram(exp_ + end, kTail);
+     exp_at_ = std::min(exp_at_, end);
+@@ -993,6 +999,37 @@ void Engine::elastic_info() const {
+     std::printf("INFO elastic_experts=1 expert_slots=%d expert_cache_mib=%lld expert_cache_mapped_mib=%zu "
+                 "elastic_workspace_mib=%zu elastic_workspace_full_mib=%zu vram_free_mib=%lld\n", cached_,
+                 (long long)(exp_at_ >> 20), arena_.mapped >> 20, mapped >> 20, full >> 20, (long long)vram_free_mib());
++    size_t kv_mapped=0;for(const auto& k:kv_)kv_mapped+=k.mapped;
++    const auto budget=opt_.elastic_experts_headroom?windows_vram(device_):VramBudget{};
++    std::printf("INFO kv_mapped_mib=%zu kv_mapped_rows=%lld elastic_headroom=%d elastic_headroom_blocked=%d "
++                "dxgi_budget_mib=%lld dxgi_local_mib=%lld dxgi_shared_mib=%lld physical_free_mib=%lld\n",
++                kv_mapped>>20,(long long)kv_rows_,int(opt_.elastic_experts_headroom && budget.valid),int(elastic_headroom_blocked_),
++                (long long)(budget.budget>>20),(long long)(budget.local>>20),(long long)(budget.shared>>20),(long long)(budget.physical_free>>20));
++    std::printf("INFO elastic_headroom_requested_mib=%d elastic_headroom_limit_mib=%d "
++                "elastic_physical_reserve_mib=%d elastic_oom_backoffs=%u\n",opt_.elastic_headroom_mib,
++                elastic_headroom_limit_mib_<0?opt_.elastic_headroom_mib:elastic_headroom_limit_mib_,
++                opt_.elastic_physical_reserve_mib,elastic_oom_backoffs_);
++}
++
++void Engine::elastic_admit(size_t need) {
++    if (!elastic_enabled_ || !opt_.elastic_experts_headroom) return;
++    const size_t guard=size_t(std::max(reserve_mib_,256))<<20;
++    // CUDA free saturates at zero above WDDM's budget. Repay the signed DXGI debt too.
++    // If telemetry disappears, repay every byte grown under the relaxed policy before retrying.
++    for(int attempt=0;attempt<4;++attempt){
++        size_t free_b=0,total_b=0;ck(cudaMemGetInfo(&free_b,&total_b),"elastic admission budget");
++        const auto b=windows_vram(device_);
++        const size_t debt=b.valid?size_t(std::max<int64_t>(0,b.local-b.budget)):elastic_extra_;
++        if(free_b>=need+guard && debt==0){elastic_extra_=0;held_is_budget();return;}
++        const size_t cut=need+guard+debt>free_b?need+guard+debt-free_b:0;
++        if(!cut)break;
++        const size_t before=arena_.mapped;shrink_cache(cut);held_is_budget();
++        if(arena_.mapped==before)break;
++        if(!b.valid)elastic_extra_=0;
++    }
++    size_t free_b=0,total_b=0;ck(cudaMemGetInfo(&free_b,&total_b),"elastic admission result");
++    if(free_b<need+guard)throw std::runtime_error("insufficient VRAM after elastic headroom repayment");
++    elastic_extra_=0;
+ }
+ 
+ void Engine::elastic_report(const char* phase, double ms) {
+@@ -1019,6 +1056,7 @@ void Engine::elastic_workspace(bool full) {
+     if (full) {
+         size_t need = 0, free_b = 0, total_b = 0;
+         for (const auto& w : elastic_workspaces_) need += w.full - w.mapped;
++        elastic_admit(need);
+         ck(cudaMemGetInfo(&free_b, &total_b), "elastic workspace admission");
+         const size_t guard = size_t(std::max(reserve_mib_, 256)) << 20;
+         if (need + guard > free_b) shrink_cache(need + guard - free_b);
+@@ -1044,6 +1082,10 @@ void Engine::elastic_workspace(bool full) {
+     staged_il_ = -1;
+     elastic_full_ = full;
+     elastic_ticks_ = 0;
++    if (!full) {
++        const auto b=opt_.elastic_experts_headroom?windows_vram(device_):VramBudget{};
++        elastic_shared_base_=b.valid?b.shared:-1;
++    }
+     elastic_report(full ? "prefill" : "decode", ms_since(started));
+ }
+ 
+@@ -1055,6 +1097,54 @@ void Engine::elastic_tick() {
+     ck(cudaMemGetInfo(&free_b, &total_b), "elastic cache budget");
+     const size_t guard = size_t(std::max(reserve_mib_, 256)) << 20;
+     const auto started = Clock::now();
++    if(opt_.elastic_experts_headroom && !elastic_headroom_blocked_ && elastic_ticks_>128) {
++        auto b=windows_vram(device_);
++#ifdef STRATA_ELASTIC_TESTING
++        if(elastic_budget_fault_==1)b.valid=false;
++        if(elastic_budget_fault_==2)b.shared=elastic_shared_base_+(32LL<<20);
++        if(elastic_budget_fault_==4)b.physical_free=int64_t(opt_.elastic_physical_reserve_mib-64)<<20;
++#endif
++        if(!b.valid || elastic_shared_base_<0 || b.shared>elastic_shared_base_+(16LL<<20)) {
++            elastic_headroom_blocked_=true;elastic_admit(0);
++            elastic_report("headroom_fallback",ms_since(started));return;
++        }
++        // Respect a larger explicit reserve. Warm the ordinary decode graphs before borrowing.
++        // Phase one keeps 128 MiB inside the budget. Later use the configured/learned ceiling.
++        if(elastic_headroom_limit_mib_<0)elastic_headroom_limit_mib_=opt_.elastic_headroom_mib;
++        const int64_t allowance=elastic_ticks_>256 ? (int64_t(elastic_headroom_limit_mib_)<<20) : -(128LL<<20);
++        const int64_t extra_guard=int64_t(std::max(reserve_mib_-256,0))<<20;
++        const int64_t room=std::min(b.budget+allowance-extra_guard-b.local,
++                                   b.physical_free-(int64_t(opt_.elastic_physical_reserve_mib)<<20)-extra_guard);
++        if(room<0){
++            shrink_cache(size_t(-room));held_is_budget();
++            elastic_report("headroom_shrink",ms_since(started));return;
++        }
++        if(room>=int64_t(kArenaPiece) && arena_.mapped<arena_.reserved){
++            const size_t before=arena_.mapped;
++            int added=0;
++#ifdef STRATA_ELASTIC_TESTING
++            if(elastic_budget_fault_!=3)
++#endif
++                added=grow_cache(kArenaPiece);
++            elastic_extra_+=arena_.mapped-before;
++            if(arena_.mapped==before || !added){
++                // A WDDM allocation ceiling can precede NVML's free-memory floor. Give back a piece,
++                // remember a lower signed-budget ceiling, and never retry the failing high-water mark.
++                ++elastic_oom_backoffs_;
++                // Round the learned MiB ceiling up: truncating a fractional MiB would make the
++                // next tick reclaim another whole piece after the intentional one-piece retreat.
++                const int safe=int((b.local-b.budget+(1LL<<20)-1)/(1LL<<20))-int(kArenaPiece>>20);
++                if(safe<0){elastic_headroom_blocked_=true;elastic_admit(0);}
++                else {
++                    elastic_headroom_limit_mib_=std::min(elastic_headroom_limit_mib_,safe);
++                    shrink_cache(kArenaPiece);held_is_budget();
++                }
++                elastic_report("headroom_allocation_backoff",ms_since(started));return;
++            }
++            elastic_report("headroom_grow",ms_since(started));
++        } else if(elastic_ticks_%128==1)elastic_report("headroom_steady");
++        return;
++    }
+     if (free_b < guard / 2) {
+         shrink_cache(guard - free_b);
+         held_is_budget();
+@@ -1210,6 +1300,9 @@ void Engine::load_moe(int il, bool shared) {
+ 
+ // The engine for a model file: its general.architecture says which.
+ std::unique_ptr<Engine> Engine::open(const Options& o) {
++    if(o.elastic_headroom_mib<0 || o.elastic_headroom_mib>1024 ||
++       o.elastic_physical_reserve_mib<256 || o.elastic_physical_reserve_mib>4096)
++        throw std::runtime_error("elastic headroom must be 0..1024 MiB and physical reserve 256..4096 MiB");
+     const Shards file(o.model);
+     const MetaValue* arch = file.get("general.architecture");
+     const std::string name = arch ? arch->s : std::string();
+diff --git a/src/poly/engine.hpp b/src/poly/engine.hpp
+index 218fd16c..4d99e8ac 100644
+--- a/src/poly/engine.hpp
++++ b/src/poly/engine.hpp
+@@ -58,6 +58,9 @@ struct Options {
+     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
+     bool gpu_experts = true;
+     bool elastic_experts = false; ///< lend idle prompt workspace to experts during solo Qwen35 MoE decode
++    bool elastic_experts_headroom = false; ///< opt-in Windows DXGI/NVML bounded steady-decode headroom
++    int elastic_headroom_mib = 128; ///< maximum above the DXGI budget, may be reduced after failed mapping
++    int elastic_physical_reserve_mib = 512; ///< adapter-wide NVML free-memory floor during decode
+     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
+     // A prompt batch.  More tokens a call and a larger staging buffer read a prompt faster, and both take VRAM
+     // that the expert cache, and so decoding, does without.
+@@ -534,6 +537,7 @@ protected:
+     void* elastic_alloc(size_t bytes, size_t decode_bytes, const char* what);
+     void elastic_workspace(bool full);
+     void elastic_tick();
++    void elastic_admit(size_t need);
+     void elastic_report(const char* phase, double ms = 0);
+     int room(int n) const;
+     int room_key(int n) const;
+@@ -569,10 +573,16 @@ protected:
+     friend struct ElasticTestAccess;
+ #ifdef STRATA_ELASTIC_TESTING
+     int elastic_fail_after_ = -1;
++    int elastic_budget_fault_ = 0;
+ #endif
+     std::vector<Workspace> elastic_workspaces_;
+     bool elastic_enabled_ = false, elastic_full_ = true;
+     uint64_t elastic_ticks_ = 0;
++    size_t elastic_extra_ = 0;
++    int64_t elastic_shared_base_ = -1;
++    bool elastic_headroom_blocked_ = false;
++    int elastic_headroom_limit_mib_ = -1;
++    unsigned elastic_oom_backoffs_ = 0;
+     void vmm_reserve(Mapped& m, size_t bytes);
+     void vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what);
+     void vmm_unmap(Mapped& m, size_t bytes);
+diff --git a/src/poly/main.cpp b/src/poly/main.cpp
+index 6d6bb2f6..2e36d5a7 100644
+--- a/src/poly/main.cpp
++++ b/src/poly/main.cpp
+@@ -1364,6 +1364,9 @@ void usage() {
+                  "                         exit and by --serve after an answer, every 10 s at most\n"
+                  "  --no-gpu-experts       keep every routed expert on the CPU\n"
+                  "  --elastic-experts      lend idle prompt workspace to experts during solo Qwen35 MoE decode\n"
++                 "  --elastic-experts-headroom  opt in to bounded Windows steady-decode VRAM borrowing (implies elastic)\n"
++                 "  --elastic-headroom-mib N    DXGI budget excess ceiling (default 128, range 0..1024)\n"
++                 "  --elastic-physical-reserve-mib N  NVML free-memory floor (default 512, range 256..4096)\n"
+                  "  --any-node             on a PC with several NUMA nodes, let the CPU threads run on any of them\n"
+                  "                         (default: on the node whose memory holds most of the experts)\n"
+                  "  --window N             the most tokens that go through the model at once while an answer is\n"
+@@ -1497,6 +1500,9 @@ int main(int argc, char** argv) {
+         else if (a == "--expert-profile") o.profile = val();
+         else if (a == "--no-gpu-experts") o.gpu_experts = false;
+         else if (a == "--elastic-experts") o.elastic_experts = true;
++        else if (a == "--elastic-experts-headroom") o.elastic_experts = o.elastic_experts_headroom = true;
++        else if (a == "--elastic-headroom-mib") o.elastic_headroom_mib = std::stoi(val());
++        else if (a == "--elastic-physical-reserve-mib") o.elastic_physical_reserve_mib = std::stoi(val());
+         else if (a == "--any-node") o.stay_near = false;
+         else if (a == "--no-graphs") o.graphs = false;
+         else if (a == "--kv-whole") o.kv_grow = false;
+diff --git a/src/poly/windows_vram.hpp b/src/poly/windows_vram.hpp
+new file mode 100644
+index 00000000..8647e7d2
+--- /dev/null
++++ b/src/poly/windows_vram.hpp
+@@ -0,0 +1,78 @@
++#pragma once
++#include <cstdint>
++
++namespace strata::poly {
++struct VramBudget {
++    bool valid = false;
++    int64_t budget = 0, local = 0, shared = 0, physical_free = 0;
++};
++}
++
++#if defined(_WIN32) && !defined(__HIP_PLATFORM_AMD__)
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#include <dxgi1_4.h>
++#include <cuda.h>
++#include <cstring>
++
++namespace strata::poly {
++// Both sources must identify the CUDA adapter. No GPU-index assumptions and no allocation probes here.
++// DXGI usage belongs to this worker; NVML also sees competing processes on the adapter.
++class WindowsVram {
++    HMODULE dxgi_ = nullptr, nvml_ = nullptr;
++    IDXGIAdapter3* adapter_ = nullptr;
++    void* device_ = nullptr;
++    using Init = int(*)();
++    using Handle = int(*)(const char*,void**);
++    struct Memory { unsigned long long total, free, used; };
++    using Info = int(*)(void*,Memory*);
++    Info info_ = nullptr;
++    Init shutdown_ = nullptr;
++    bool initialized_ = false;
++    int ordinal_;
++public:
++    explicit WindowsVram(int ordinal) : ordinal_(ordinal) {
++        CUdevice dev; char luid[8]{}, bus[32]{}; unsigned mask=0;
++        if(cuDeviceGet(&dev,ordinal)!=CUDA_SUCCESS || cuDeviceGetLuid(luid,&mask,dev)!=CUDA_SUCCESS ||
++           cuDeviceGetPCIBusId(bus,sizeof(bus),dev)!=CUDA_SUCCESS)return;
++        dxgi_=LoadLibraryExA("dxgi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
++        nvml_=LoadLibraryExA("nvml.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
++        if(!dxgi_ || !nvml_)return;
++        using Factory=HRESULT(WINAPI*)(REFIID,void**);
++        auto create=reinterpret_cast<Factory>(GetProcAddress(dxgi_,"CreateDXGIFactory1"));
++        auto init=reinterpret_cast<Init>(GetProcAddress(nvml_,"nvmlInit_v2"));
++        auto handle=reinterpret_cast<Handle>(GetProcAddress(nvml_,"nvmlDeviceGetHandleByPciBusId_v2"));
++        info_=reinterpret_cast<Info>(GetProcAddress(nvml_,"nvmlDeviceGetMemoryInfo"));
++        shutdown_=reinterpret_cast<Init>(GetProcAddress(nvml_,"nvmlShutdown"));
++        if(!create || !init || !handle || !info_ || !shutdown_ || init()!=0)return;
++        initialized_=true;
++        if(handle(bus,&device_)!=0)return;
++        IDXGIFactory1* factory=nullptr;
++        if(FAILED(create(__uuidof(IDXGIFactory1),reinterpret_cast<void**>(&factory))))return;
++        for(UINT i=0;;++i){
++            IDXGIAdapter1* a=nullptr;if(factory->EnumAdapters1(i,&a)!=S_OK)break;
++            DXGI_ADAPTER_DESC1 d{};
++            if(SUCCEEDED(a->GetDesc1(&d)) && std::memcmp(&d.AdapterLuid,luid,8)==0)
++                a->QueryInterface(__uuidof(IDXGIAdapter3),reinterpret_cast<void**>(&adapter_));
++            a->Release();if(adapter_)break;
++        }
++        factory->Release();
++    }
++    ~WindowsVram(){if(adapter_)adapter_->Release();if(initialized_)shutdown_();if(nvml_)FreeLibrary(nvml_);if(dxgi_)FreeLibrary(dxgi_);}
++    VramBudget sample(int ordinal) const {
++        VramBudget r;DXGI_QUERY_VIDEO_MEMORY_INFO local{},shared{};Memory m{};
++        if(ordinal!=ordinal_ || !adapter_ || !device_ || !info_ ||
++           FAILED(adapter_->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local)) ||
++           FAILED(adapter_->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&shared)) ||
++           info_(device_,&m)!=0 || !local.Budget || m.free>m.total)return r;
++        r.valid=true;r.budget=int64_t(local.Budget);r.local=int64_t(local.CurrentUsage);
++        r.shared=int64_t(shared.CurrentUsage);r.physical_free=int64_t(m.free);return r;
++    }
++};
++inline VramBudget windows_vram(int device){static thread_local WindowsVram monitor(device);return monitor.sample(device);}
++}
++#else
++namespace strata::poly { inline VramBudget windows_vram(int){return {};} }
++#endif
+diff --git a/tools/poly_elastic_test.cpp b/tools/poly_elastic_test.cpp
+index d1a21289..d8fe450e 100644
+--- a/tools/poly_elastic_test.cpp
++++ b/tools/poly_elastic_test.cpp
+@@ -27,6 +27,62 @@ struct KvmemTestAccess {
+     }
+ };
+ struct ElasticTestAccess {
++    static void headroom_test(Engine& e) {
++        const int32_t token=1000;std::vector<int32_t> prompt(128,token);
++        e.eval(prompt.data(),128,false);
++        for(int i=0;i<512;++i)e.eval(&token,1,true);
++        check(!e.elastic_headroom_blocked_,"headroom telemetry unavailable or unexpectedly blocked");
++        check(e.elastic_extra_>0,"no relaxed cache growth exercised");
++        e.elastic_info();
++        const auto backoffs=e.elastic_oom_backoffs_;
++        for(int i=0;i<512;++i)e.elastic_tick();
++        check(e.elastic_oom_backoffs_==backoffs,"learned allocation ceiling was retried");
++        const auto cp=e.memory().checkpoint();const auto kv=KvmemTestAccess::kv(e.memory());
++        const auto means=KvmemTestAccess::means(e.memory());
++        const auto intact=[&]{verify(e);check(e.memory().checkpoint().state==cp.state,"budget transition changed state");
++            check(KvmemTestAccess::kv(e.memory())==kv,"budget transition changed KV");
++            check(KvmemTestAccess::means(e.memory())==means,"budget transition changed statistics");};
++        const size_t expanded=e.arena_.mapped;
++        e.elastic_workspace(true);intact();
++        check(e.vram_free_mib()>=256,"prefill did not repay borrowed budget");
++        check(e.arena_.mapped<expanded,"prefill did not reclaim experts");
++        e.elastic_workspace(false);for(int i=0;i<512;++i)e.elastic_tick();
++        e.cover(e.cache_capacity());intact();
++        check(e.vram_free_mib()>=256,"KV expansion did not repay borrowed budget");
++        e.trim_kv(e.memory().visible_tokens());
++        for(int fault:{4,3,1,2}) {
++            e.elastic_budget_fault_=0;e.elastic_headroom_blocked_=false;
++            for(int i=0;i<512;++i)e.elastic_tick();
++            if(fault==3){e.shrink_cache(256ULL<<20);e.held_is_budget();}
++            const size_t before=e.arena_.mapped;
++            const auto prior_backoffs=e.elastic_oom_backoffs_;
++            const auto prior_limit=e.elastic_headroom_limit_mib_;
++            e.elastic_budget_fault_=fault;e.elastic_ticks_=256;e.elastic_tick();
++            if(fault==4)check(e.arena_.mapped<before,"physical pressure did not reclaim experts");
++            else if(fault==3) {
++                check(e.elastic_oom_backoffs_==prior_backoffs+1,"allocation fault did not record one backoff");
++                check(e.arena_.mapped<before,"allocation failure did not reclaim experts");
++                if(e.elastic_headroom_blocked_)
++                    check(e.vram_free_mib()>=256,"disabled borrowing failed to restore conservative budget");
++                else {
++                    check(e.elastic_headroom_limit_mib_>=0 && e.elastic_headroom_limit_mib_<prior_limit,
++                          "allocation failure did not lower the borrowing ceiling");
++                    const auto learned=e.elastic_headroom_limit_mib_;
++                    e.elastic_budget_fault_=0;
++                    for(int i=0;i<512;++i)e.elastic_tick();
++                    check(e.elastic_oom_backoffs_==prior_backoffs+1 && e.elastic_headroom_limit_mib_==learned,
++                          "injected failed allocation ceiling was retried");
++                    check(e.arena_.mapped<before,"decode regrew the failed allocation extent");
++                }
++                std::cout<<"PASS allocation_fault_backoff blocked="<<e.elastic_headroom_blocked_
++                         <<" learned_mib="<<e.elastic_headroom_limit_mib_<<'\n';
++            }
++            else check(e.elastic_headroom_blocked_ && e.vram_free_mib()>=256,"fault failed to restore conservative budget");
++            intact();
++        }
++        e.elastic_budget_fault_=0;e.eval(prompt.data(),128,false);e.eval(&token,1,true);verify(e);
++        std::cout<<"PASS headroom_growth prefill_repayment KV_repayment physical_pressure allocation_failure telemetry_loss shared_growth accepted_state\n";
++    }
+     static void reclaim_test(Engine& e) {
+         std::vector<int32_t> prompt(128,1000);
+         for(int i=0;i<36;++i)e.eval(prompt.data(),128,false);
+@@ -53,6 +109,22 @@ struct ElasticTestAccess {
+         freeze(e,false);verify(e);
+         std::cout<<"PASS first_request_KV_reclaim resident_KV statistics recurrent_state session_restore logits\n";
+     }
++    static void audit(Engine& e) {
++        const auto report=[&](const char* label){
++            size_t mapped=0,reserved=0;for(const auto& k:e.kv_){mapped+=k.mapped;reserved+=k.reserved;}
++            std::cout<<"AUDIT phase="<<label<<" kv_rows="<<e.kv_rows_<<" kv_reach="<<e.kv_reach_
++                <<" kv_mapped_mib="<<(mapped>>20)<<" kv_reserved_mib="<<(reserved>>20)
++                <<" cache_mib="<<(e.arena_.mapped>>20)<<" experts="<<e.cached_<<" cuda_free_mib="<<e.vram_free_mib()<<'\n';
++        };
++        report("loaded");e.elastic_workspace(false);
++        for(int i=0;i<512;++i)e.elastic_tick();report("short_decode");
++        for(int rows:{4097,8193,16385,28673,32769}) {
++            e.cover(rows);verify(e);report("kv_growth");
++        }
++        e.trim_kv(64);report("first_short_request");
++        e.trim_kv(64);report("second_short_request");
++        for(int i=0;i<512;++i)e.elastic_tick();verify(e);report("refilled");
++    }
+     static void workspace(Engine& e, bool full) { e.elastic_workspace(full); }
+     static void freeze(Engine& e, bool frozen) { e.freeze_experts_ = frozen; }
+     static void enabled(Engine& e, bool on) { e.elastic_enabled_ = on; }
+@@ -91,11 +163,18 @@ int main(int argc, char** argv) {
+         o.memory.sink=64;o.memory.recent=64;o.memory.verify=true;
+         o.kv_format=KvFmt::kQ8_0;
+         o.graphs=!(argc>2 && std::string(argv[2])=="--no-graphs");
++        const bool audit=argc>2 && std::string(argv[2])=="--memory-audit";
+         const bool reclaim=argc>2 && std::string(argv[2])=="--kv-reclaim-test";
+-        if(reclaim){o.max_context=262144;o.prompt_batch=512;o.memory.budget=32768;o.memory.reserve=2048;}
++        const bool aggressive=argc>2 && std::string(argv[2])=="--aggressive-test";
++        const bool headroom=aggressive || (argc>2 && std::string(argv[2])=="--headroom-test");
++        if(aggressive){o.elastic_headroom_mib=512;o.elastic_physical_reserve_mib=256;}
++        if(audit||reclaim||headroom){o.max_context=262144;o.prompt_batch=512;o.memory.budget=32768;o.memory.reserve=2048;}
++        o.elastic_experts_headroom=headroom;
+         auto e=Engine::open(o);
+         ElasticTestAccess::verify(*e);
++        if(audit){ElasticTestAccess::audit(*e);return 0;}
+         if(reclaim){ElasticTestAccess::reclaim_test(*e);return 0;}
++        if(headroom){ElasticTestAccess::headroom_test(*e);return 0;}
+         std::vector<int32_t> prompt(128);for(size_t i=0;i<prompt.size();++i)prompt[i]=100+int(i%32);
+         e->eval(prompt.data(),64,false);
+         const auto cp=e->memory().checkpoint();

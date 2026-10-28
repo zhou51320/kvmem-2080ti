@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--gpu', required=True)
     parser.add_argument('--with-images', action='store_true', help='Exercise image groups and text together')
-    parser.add_argument('--query-policy', choices=['user', 'legacy'], default='user')
+    parser.add_argument('--query-policy', choices=['user'], default='user')
     parser.add_argument('--configuration', action='append', help='Only run named configurations, e.g. mtp-1024-auto')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -161,12 +161,8 @@ def main():
                 if budget == 64:
                     request('oversized_image_group', messages, expected_error='image group exceeds KV budget')
                     continue
-                # Legacy multimodal policy probes only the default 512-token
-                # suffix. Explicit spans below still exercise its overflow path.
-                low_budget_path = ('query_replay' if args.with_images and args.query_policy == 'legacy'
-                                   else 'query_replay_skipped')
                 answer, usage, trace = request('long_tail', messages, expected_path=
-                                        low_budget_path if budget == 1024 else 'all_resident',
+                                        'append_pressure',
                                         expected_color=args.with_images)
                 if budget == 1024 and mode == 'auto':
                     continuation = messages + [
@@ -187,13 +183,13 @@ def main():
                             hard.update(range(max(0, int(begin) - 1) // 32, (int(finish) + 1 + 31) // 32))
                     fit_begin = ((end + 31) // 32 - (budget // 32 - len(hard))) * 32
                     assert fit_begin // 32 > max(hard)
-                    request('exact_fit', messages, query=fit_begin, expected_path='query_replay')
+                    request('exact_fit', messages, query=fit_begin, expected_path='append_pressure')
                     request('one_row_over', messages, query=fit_begin - 1,
-                            expected_path='query_replay_skipped')
+                            expected_path='append_pressure')
                     if args.with_images:
                         request('multiple_images', [messages[0], {'role': 'user', 'content':
                             [image, image, {'type': 'text', 'text': 'What color are both images? Answer only the color.'}]},
-                            *messages[2:]], expected_path=low_budget_path,
+                            *messages[2:]], expected_path='append_pressure',
                             expected_color=True, expected_ready=False)
         finally:
             if proc is not None and proc.poll() is None:

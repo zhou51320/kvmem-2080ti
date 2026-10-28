@@ -2,6 +2,7 @@
 """Build the lightweight or full UI from pinned llama.cpp sources."""
 import argparse
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -50,6 +51,21 @@ def copy_monitor(output):
     manifest = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in sorted(source.iterdir()) if p.is_file()}
     (output / 'monitor-build.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+
+
+def validate_icons(output):
+    from urllib.parse import unquote, urlsplit
+    class Icons(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if tag != 'link' or not {'icon', 'apple-touch-icon'}.intersection(attributes.get('rel', '').split()):
+                return
+            target = urlsplit(attributes.get('href', ''))
+            if target.scheme or target.netloc:
+                return
+            if not (output / unquote(target.path).lstrip('/')).is_file():
+                raise ValueError('Built UI references a missing icon: ' + target.path)
+    Icons().feed((output / 'index.html').read_text(encoding='utf-8'))
 
 
 def main():
@@ -105,13 +121,19 @@ def main():
         stamp.write_text(lock_hash)
     subprocess.run([node_command('npx'), 'svelte-kit', 'sync'], cwd=work, check=True)
     subprocess.run([node_command('npx'), 'svelte-check', '--threshold', 'error'], cwd=work, check=True)
+    if not args.full_ui:
+        # The lightweight build disables the PWA plugin but keeps app.html's
+        # favicon/touch-icon links. Generate those pinned upstream static assets.
+        subprocess.run([node_command('npm'), 'run', 'build-pwa-assets'], cwd=work, check=True)
     command = [node_command('npm'), 'run', 'build'] if args.full_ui else [node_command('npx'), 'vite', 'build']
     subprocess.run(command, cwd=work, check=True)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     shutil.copytree(work / 'dist', output, dirs_exist_ok=True)
+    validate_icons(output)
     shutil.copy2(ROOT / 'backends/llamacpp/LICENSE', output / 'llama.cpp-LICENSE')
     copy_monitor(output)
+    shutil.copy2(ROOT/'ui/monitor/history-export.html', output/'history-export.html')
     if args.full_ui:
         # Full UI: hash upstream src/lib entry files so the manifest records whether the page is genuinely upstream-built.
         # 中文：full-ui 模式下对上游 src/lib 的 TS 入口文件做哈希，写入 manifest 以证明产物非轻量构建
@@ -122,8 +144,8 @@ def main():
         entry_files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                        for p in sorted((ROOT / 'ui/lightweight').iterdir()) if p.is_file()}
         mode = 'lightweight'
-    manifest = {'llama_commit': pin, 'backend_patch_sha256': versions['llamacpp']['patch_sha256'],
-                'mode': mode, 'entry_files': entry_files}
+    manifest = {'llama_commit': pin, 'backend_sources': versions['llamacpp'],
+                'mode': mode, 'console_chat_protocol': None if args.full_ui else 1, 'entry_files': entry_files}
     (output / 'ui-build.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(output)
 

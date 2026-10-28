@@ -43,15 +43,20 @@ public:
     void finish(const std::string & id, const std::string & status) {
         if (id.empty()) return;
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto set_status = [&](nlohmann::json& data) {
+            data["status"] = status;
+            if (status == "error") data["finish_reason"] = "error";
+            else if (status == "disconnected") data["finish_reason"] = "disconnect";
+        };
         auto it = active_.find(id);
         if (it == active_.end()) {
             if (status != "completed") for (auto & e : recent_)
-                if (e.data["id"] == id) { e.data["status"] = status; break; }
+                if (e.data["id"] == id) { set_status(e.data); break; }
             return;
         }
         auto e = std::move(it->second);
         active_.erase(it);
-        e.data["status"] = status;
+        set_status(e.data);
         e.data["elapsed_ms"] = std::chrono::duration<double, std::milli>(clock::now() - e.started).count();
         recent_.push_front(std::move(e));
         if (recent_.size() > 100) recent_.pop_back();

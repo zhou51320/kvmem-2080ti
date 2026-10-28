@@ -1,0 +1,250 @@
+diff --git a/docs/BACKENDS.md b/docs/BACKENDS.md
+index a49dfd8e..fd7946ba 100644
+--- a/docs/BACKENDS.md
++++ b/docs/BACKENDS.md
+@@ -150,12 +150,24 @@ KV, recurrent state, persistent KVMem statistics and attention score scratch sta
+ evaluation or pipelined prompt read, it reclaims expert pages and restores the full workspace before launching
+ dependent kernels. Cache growth is limited to 64 MiB per 16 decode calls and retains the configured VRAM reserve.
+ 
+-The initial scope is CUDA VMM, one sequence, no draft/MTP, no frozen expert placement, and no `--stage-read-mib`
++The scope is CUDA VMM, one sequence, no frozen expert placement, and no `--stage-read-mib`
+ override. Unsupported configurations log that the feature is inactive. It is off by default. In KVMem's local
+ console, the native argument array is `["--elastic-experts"]`; remove it to restore static workspace allocation.
+ Live INFO facts expose expert slots/cache MiB and mapped/full elastic workspace MiB. `STRATA_ELASTIC_TRACE=1`
+ also records periodic native CUDA free-memory and CPU/GPU expert counters for controlled comparisons.
+ 
++Managed KVMem MTP with a verification window of 2..4 (one to three draft tokens) supports both elastic flags.
++The retained workspace includes the draft projection and the entire verification window. Drafting reserves
++KV for the full window before writing provisional rows; verification and partial acceptance keep the narrow
++workspace. Expert growth runs only after accepted state commits, once per MTP cycle, so headroom warmup counts
++accepted cycles in this mode. Ordinary multi-token prompts and reads still restore the full workspace.
++Unmanaged speculative decoding remains outside the qualified scope.
++
++`poly_kvmem_mtp_test MODEL.gguf --elastic-experts [--window 2..4] [--no-graphs] [--q8]` checks partial/full
++acceptance against serial native KV/state, exact full/narrow target logits and draft probabilities, cancellation,
++Query/replay, real expert growth and subsequent prompt admission. `--elastic-headroom-test` uses 288 accepted
++cycles with a 512 MiB borrowing ceiling and a 512 MiB physical reserve.
++
+ Qualification uses `poly_elastic_test MODEL.gguf [--no-graphs]`: exact native KV/state/statistics preservation
+ across map cycles, full versus narrow workspace logits with fixed expert placement, partial-admission rollback,
+ real cache growth/reclaim, Pressure and bounded Query/replay. These are functional tests, not recall-quality tests.
+diff --git a/src/poly/engine.cpp b/src/poly/engine.cpp
+index 0bed5f65..22f88793 100644
+--- a/src/poly/engine.cpp
++++ b/src/poly/engine.cpp
+@@ -2168,7 +2168,7 @@ void Engine::shared_scratch() {
+     const size_t ff = n * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_});
+     // the draft block works in it too (draft_input()); read() keeps two calls' rows in it
+     r_ = elastic_fbuf(std::max(streams(), draft_ ? 3 : 1) * (size_t) (read_rows_ > rows_ ? 2 : 1) * rows_ * n_embd_,
+-                      size_t(2 * kStageRows) * streams() * n_embd_);
++                      size_t(kStageRows) * std::max(2 * streams(), draft_ ? 3 : 1) * n_embd_);
+     cur_ = elastic_fbuf(e, size_t(kStageRows) * n_embd_);
+     xn_ = elastic_fbuf(e, size_t(kStageRows) * n_embd_);
+     ao_ = elastic_fbuf(e, size_t(kStageRows) * n_embd_);
+@@ -2191,15 +2191,19 @@ void Engine::shared_scratch() {
+ 
+ // The sequence's state, the caches and every buffer, once the weights are known.
+ void Engine::alloc() {
+-    // This opt-in implementation is qualified for CUDA, solo text decode, without speculative state.
++    // Managed MTP retains the complete small verification window, including draft_input's three planes.
+ #if !defined(__HIP_PLATFORM_AMD__)
+-    elastic_enabled_ = opt_.elastic_experts && vmm_ && !split_ && opt_.batch == 0 && opt_.window <= 1 &&
+-                       !draft_ && !freeze_experts_ && opt_.gpu_experts && opt_.stage_read_mib == 0 &&
++    bool elastic_decode = opt_.window <= 1 && !draft_;
++#ifdef STRATA_KVMEM
++    elastic_decode |= opt_.memory.budget && opt_.memory.mtp && draft_ && opt_.window >= 2 && opt_.window <= 4;
++#endif
++    elastic_enabled_ = opt_.elastic_experts && vmm_ && !split_ && opt_.batch == 0 && elastic_decode &&
++                       !freeze_experts_ && opt_.gpu_experts && opt_.stage_read_mib == 0 &&
+                        gg_->get("general.architecture")->s == "qwen35moe";
+ #endif
+     if (opt_.elastic_experts)
+         std::fprintf(stderr, "strata-poly: elastic experts %s\n", elastic_enabled_ ? "enabled" :
+-                     "inactive (requires CUDA VMM, solo Qwen35 MoE, no draft/freeze/stage-read override)");
++                     "inactive (requires CUDA VMM, solo Qwen35 MoE, no freeze/stage-read override; draft requires managed KVMem MTP window 2..4)");
+     // --dump-layers prints one token's stages
+     rows_ = opt_.dump ? 1 : std::min(opt_.prompt_batch, opt_.max_context);
+     const size_t most = std::min<size_t>(kReadBytes / ((size_t) streams() * n_embd_ * sizeof(float)), opt_.max_context);
+@@ -3106,9 +3110,14 @@ void Engine::run(const int32_t* tokens, int n) {
+     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
+     if (pos_ + n > opt_.max_context)
+         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
+-    elastic_workspace(n != 1 || !images_.empty());
++    bool elastic_window = false;
++#ifdef STRATA_KVMEM
++    elastic_window = elastic_enabled_ && memory_window_;
++#endif
++    // Verification and partial reaccept use the retained decode prefix. Grow only after keep commits.
++    elastic_workspace((n != 1 && !elastic_window) || !images_.empty());
+     cover(cache_position() + n);
+-    elastic_tick();
++    if (!elastic_window) elastic_tick();
+     if (std::getenv("STRATA_ELASTIC_TRACE") && n == 1 && pos_ % 128 == 0) elastic_report(elastic_enabled_ ? "sample" : "static");
+ #ifdef STRATA_KVMEM
+     if(memory_ && !memory_drafting_) memory_capture_call(pos_,n);
+@@ -4009,6 +4018,7 @@ void Engine::keep(int n) {
+     if (memory_) {
+         commit_memory_window(n);
+         memory_window_ = false;
++        elastic_tick();
+     }
+     } catch (...) {
+         if (memory_) { memory_window_ = false; memory_->invalidate(); }
+@@ -4103,7 +4113,9 @@ int32_t Engine::draft(int32_t token, int i, float* prob) {
+     }
+     try {
+ #endif
+-    cover(cache_position() + i + 1);
++    // Admit the whole managed window before provisional draft KV exists. No expert growth occurs here.
++    if (elastic_enabled_ && i == 0) elastic_workspace(!images_.empty());
++    cover(cache_position() + (elastic_enabled_ ? opt_.window : i + 1));
+     ck(cudaStreamSynchronize(cs(st_)), "draft");
+     draft_step(token, i);
+     // The guess and its probability are found on the card.  On the host a vocabulary's softmax takes up to 2 ms
+diff --git a/tools/poly_kvmem_mtp_test.cpp b/tools/poly_kvmem_mtp_test.cpp
+index f40de481..edac9967 100644
+--- a/tools/poly_kvmem_mtp_test.cpp
++++ b/tools/poly_kvmem_mtp_test.cpp
+@@ -11,6 +11,21 @@
+ 
+ using namespace strata::poly;
+ namespace strata::poly {
++struct ElasticTestAccess {
++    static bool enabled(const Engine& e) { return e.elastic_enabled_; }
++    static bool full(const Engine& e) { return e.elastic_full_; }
++    static uint64_t ticks(const Engine& e) { return e.elastic_ticks_; }
++    static int slots(const Engine& e) { return e.cached_; }
++    static void freeze(Engine& e, bool value) { e.freeze_experts_=value; }
++    static void comparison_room(Engine& e) { e.shrink_cache(256ULL<<20);e.held_is_budget(); }
++    static void lending(Engine& e, bool value) {
++        if(!value)e.elastic_workspace(true);
++        e.elastic_enabled_=value;
++    }
++    static size_t released(const Engine& e) {
++        size_t bytes=0;for(const auto& w:e.elastic_workspaces_)bytes+=w.full-w.mapped;return bytes;
++    }
++};
+ struct KvmemTestAccess {
+     static size_t staging_bytes(const KvmemMemory& m) { return m.out_bytes_+m.in_bytes_; }
+     static kvmem::AttentionFeedbackSnapshot feedback(const KvmemMemory& m) { return m.feedback_.snapshot(); }
+@@ -80,12 +95,12 @@ std::vector<float> floats(const std::vector<uint8_t>& bytes) {
+ int main(int argc,char** argv) {
+     try {
+         if (argc < 2) throw std::runtime_error(
+-            "usage: poly_kvmem_mtp_test MODEL.gguf [--window 2..4] [--no-graphs] [--disk-path DIR]");
++            "usage: poly_kvmem_mtp_test MODEL.gguf [--window 2..4] [--elastic-experts] [--elastic-headroom-test] [--no-graphs] [--disk-path DIR]");
+         bool one_case=false,archive_chunks=false;
+         Options opt;
+         opt.model=argv[1]; opt.max_context=1024; opt.threads=8; opt.stage_mib=512;
+         opt.prompt_batch=64; opt.window=4; opt.draft=true; opt.expert_swaps=0;
+-        opt.graphs=true;
++        opt.graphs=true; opt.vram_reserve_mib=256;
+         opt.memory.budget=128; opt.memory.reserve=64; opt.memory.host_mib=1024;
+         opt.memory.verify=true; opt.memory.mtp=true;
+         for (int i=2;i<argc;++i) {
+@@ -93,6 +108,11 @@ int main(int argc,char** argv) {
+             if(arg=="--one-case")one_case=true;
+             else if(arg=="--archive-chunks")archive_chunks=true;
+             else if (arg == "--no-graphs") opt.graphs=false;
++            else if (arg == "--elastic-experts") opt.elastic_experts=true;
++            else if (arg == "--elastic-headroom-test") {
++                opt.elastic_experts=true; opt.elastic_experts_headroom=true;
++                opt.elastic_headroom_mib=512; opt.elastic_physical_reserve_mib=512;
++            }
+             else if(arg=="--q8")opt.kv_format=KvFmt::kQ8_0;
+             else if (arg == "--window" && i+1 < argc) {
+                 opt.window=std::atoi(argv[++i]);
+@@ -110,6 +130,13 @@ int main(int argc,char** argv) {
+         auto engine=Engine::open(opt);
+         check(KvmemTestAccess::staging_bytes(engine->memory())==0,"unused transfer buffers were pinned at load");
+         check(engine->drafts(),"model has no usable MTP block");
++        if(opt.elastic_experts) {
++            check(ElasticTestAccess::enabled(*engine),"MTP silently disabled elastic experts");
++            // Hold placement fixed for numerical comparisons; exercise real growth separately below.
++            // Leave room for lazily captured graphs while the headroom admission guard cannot evict experts.
++            if(opt.elastic_experts_headroom)ElasticTestAccess::comparison_room(*engine);
++            ElasticTestAccess::freeze(*engine,true);
++        }
+         if(archive_chunks) {
+             std::vector<int32_t> tokens(4161);
+             for(size_t i=0;i<tokens.size();++i)tokens[i]=100+int(i%32);
+@@ -138,7 +165,8 @@ int main(int argc,char** argv) {
+         // independent of the model's guesses so every accepted-prefix branch runs.
+         const int32_t w[4]={1000,1001,1002,1003};
+         struct Case { int prefix, window, accepted; };
+-        const Case cases[]={{63,2,1},{191,2,2},{63,4,4},{191,4,1},{191,4,2},{191,4,3},{319,4,4}};
++        const Case cases[]={{63,2,1},{191,2,2},{63,3,3},{191,3,1},{191,3,2},
++                            {63,4,4},{191,4,1},{191,4,2},{191,4,3},{319,4,4}};
+         const auto draft=[&](int window) {
+             for (int i=0;i<window-1;++i) { float p=0; engine->draft(w[i],i,&p); }
+         };
+@@ -149,8 +177,11 @@ int main(int argc,char** argv) {
+             prefix(length);
+             const auto before=engine->memory().stamp().frontier;
+             draft(window);
++            if(opt.elastic_experts)check(!ElasticTestAccess::full(*engine) && ElasticTestAccess::released(*engine)>0,
++                                        "draft did not retain a narrow mapped workspace");
+             check(engine->memory().stamp().frontier == before,"draft advanced accepted frontier");
+             engine->window(w,window);
++            if(opt.elastic_experts)check(!ElasticTestAccess::full(*engine),"verification remapped prefill workspace");
+             check(engine->memory().stamp().frontier == before,"window published provisional tokens");
+             bool rejected=false;
+             try { engine->memory().checkpoint(); } catch (const std::exception&) { rejected=true; }
+@@ -253,5 +284,57 @@ int main(int argc,char** argv) {
+             std::cout << "PASS accept_fault_invalidated_and_rebuilt\n";
+         }
+         std::cout << "PASS cancellation_reset and accepted-state checks\n";
++        if(opt.elastic_experts) {
++            std::vector<float> reference_logits,reference_probs;
++            std::vector<int32_t> reference_guesses;
++            std::vector<uint8_t> reference_state,reference_kv;
++            for(bool lending:{false,true}) {
++                ElasticTestAccess::lending(*engine,lending);prefix(191);
++                std::vector<float> probs(opt.window-1);
++                std::vector<int32_t> guesses(opt.window-1);
++                for(int i=0;i<opt.window-1;++i)guesses[i]=engine->draft(w[i],i,&probs[i]);
++                engine->window(w,opt.window);
++                std::vector<float> logits(engine->logits_of(0),engine->logits_of(0)+size_t(opt.window)*engine->n_vocab());
++                engine->keep(opt.window-1);
++                const auto cp=engine->memory().checkpoint();const auto kv=KvmemTestAccess::kv(engine->memory());
++                if(!lending) {
++                    reference_logits=logits;reference_probs=probs;reference_guesses=guesses;
++                    reference_state=cp.state;reference_kv=kv;
++                } else {
++                    check(logits==reference_logits && probs==reference_probs && guesses==reference_guesses,
++                          "full/narrow MTP logits or draft guesses/probabilities differ");
++                    check(cp.state==reference_state && kv==reference_kv,"full/narrow MTP accepted state differs");
++                }
++            }
++            std::cout<<"PASS full_narrow_mtp_exact_logits_draft_probabilities_and_native_state\n";
++            prefix(63);
++            check(ElasticTestAccess::full(*engine),"ordinary prefill did not restore full workspace");
++            ElasticTestAccess::freeze(*engine,false);
++            const int before_slots=ElasticTestAccess::slots(*engine);
++            const int cycles=opt.elastic_experts_headroom?288:48;
++            for(int i=0;i<cycles;++i) {
++                const auto frontier=engine->memory().stamp().frontier;
++                draft(opt.window);
++                const auto tick=ElasticTestAccess::ticks(*engine);
++                const int slots=ElasticTestAccess::slots(*engine);
++                engine->window(w,opt.window);
++                check(ElasticTestAccess::ticks(*engine)==tick && ElasticTestAccess::slots(*engine)==slots,
++                      "verification resized expert cache before acceptance");
++                const int accepted=1+i%std::min(opt.window,3);
++                engine->keep(accepted);
++                check(!ElasticTestAccess::full(*engine) && ElasticTestAccess::ticks(*engine)==tick+1,
++                      "partial acceptance restored prefill workspace or reset decode warmup");
++                check(engine->memory().stamp().frontier==frontier+accepted,"growth changed accepted frontier");
++            }
++            check(ElasticTestAccess::slots(*engine)>before_slots,"MTP decode loaded no additional experts");
++            engine->elastic_info();
++            std::cout<<"PASS elastic_mtp_growth cycles="<<cycles<<" slots_before="<<before_slots
++                     <<" slots_after="<<ElasticTestAccess::slots(*engine)
++                     <<" released_bytes="<<ElasticTestAccess::released(*engine)<<'\n';
++            const int32_t prompt[32]={100};engine->eval(prompt,32,false);
++            check(ElasticTestAccess::full(*engine),"post-MTP prefill failed to restore workspace");
++            engine->memory().checkpoint();KvmemTestAccess::check_archive(engine->memory());
++            std::cout<<"PASS elastic_mtp_prefill_repayment and accepted_archive\n";
++        }
+     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
+ }

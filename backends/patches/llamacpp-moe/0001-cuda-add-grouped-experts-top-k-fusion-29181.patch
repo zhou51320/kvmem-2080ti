@@ -1,0 +1,374 @@
+From ce8fe5b9f55ebf0e677eb051cbbe4e79a57554ea Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Sigbj=C3=B8rn=20Skj=C3=A6ret?=
+ <sigbjorn.skjaeret@huggingface.co>
+Date: Sat, 17 Oct 2026 13:55:33 +0200
+Subject: [PATCH 1/3] cuda : add grouped experts top-k fusion (#29181)
+
+* fuse grouped experts
+
+* add tests
+
+* hip fix
+
+* add to graph_optimize
+
+* apply suggestion from am17an
+
+* hip fix
+
+* fix hip fix
+
+* fix fix fix
+
+* gate on hip version instead
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 7c45d0d..b73ac71 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -3023,6 +3023,65 @@ static int ggml_cuda_try_ssm_scan_cache_fusion(
+     return skip;
+ }
+ 
++// expert group selection from build_moe_ffn (n_expert_groups > 1)
++// src0/src1 index into this table, -1 is the (biased) probs, -2 is not checked
++static const struct {
++    ggml_op op;
++    int     src0;
++    int     src1;
++} topk_moe_group_pattern[] = {
++    { GGML_OP_RESHAPE,  -1, -2 }, //  0: [n_exp_per_group, n_expert_groups, n_tokens]
++    { GGML_OP_RESHAPE,   0, -2 }, //  1: [1, n_exp_per_group, n_expert_groups, n_tokens]
++    { GGML_OP_ARGSORT,   0, -2 }, //  2
++    { GGML_OP_VIEW,      2, -2 }, //  3: top-2 per group
++    { GGML_OP_GET_ROWS,  1,  3 }, //  4
++    { GGML_OP_RESHAPE,   4, -2 }, //  5
++    { GGML_OP_SUM_ROWS,  5, -2 }, //  6: group scores
++    { GGML_OP_RESHAPE,   6, -2 }, //  7
++    { GGML_OP_ARGSORT,   7, -2 }, //  8
++    { GGML_OP_VIEW,      8, -2 }, //  9: top n_group_used groups
++    { GGML_OP_GET_ROWS,  0,  9 }, // 10
++    { GGML_OP_FILL,      0, -2 }, // 11
++    { GGML_OP_SET_ROWS, 10,  9 }, // 12: unused groups -> -inf
++    { GGML_OP_RESHAPE,  12, -2 }, // 13: [n_expert, n_tokens]
++};
++
++static bool ggml_cuda_topk_moe_group_fusion(const struct ggml_cgraph * cgraph, int node_idx, const ggml_tensor * selection, ggml_cuda_topk_moe_args & args) {
++#if defined(GGML_USE_HIP) && HIP_VERSION < 60300000
++    GGML_UNUSED_VARS(cgraph, node_idx, selection, args);
++    return false;
++#else
++    const int n_ops = (int) std::size(topk_moe_group_pattern);
++    if (node_idx + n_ops > cgraph->n_nodes) {
++        return false;
++    }
++
++    ggml_tensor ** nodes = cgraph->nodes + node_idx;
++    auto src_ok = [&](const ggml_tensor * src, int idx) {
++        return idx == -2 || src == (idx == -1 ? selection : nodes[idx]);
++    };
++
++    for (int i = 0; i < n_ops; i++) {
++        const auto & p = topk_moe_group_pattern[i];
++        if (nodes[i]->op != p.op || !src_ok(nodes[i]->src[0], p.src0) || !src_ok(nodes[i]->src[1], p.src1)) {
++            return false;
++        }
++    }
++
++    const int n_groups     = nodes[0]->ne[1];
++    const int n_group_used = nodes[9]->ne[0];
++
++    if (nodes[3]->ne[0] != 2 || nodes[12]->src[2] != nodes[11] || ggml_get_op_params_f32(nodes[11], 0) != -INFINITY ||
++            n_groups > WARP_SIZE) {
++        return false;
++    }
++
++    args.n_groups     = n_groups;
++    args.n_group_used = n_group_used;
++    return true;
++#endif // defined(GGML_USE_HIP) && HIP_VERSION < 60300000
++}
++
+ static bool ggml_cuda_topk_moe_fusion(const struct ggml_cgraph * cgraph, int node_idx, ggml_cuda_topk_moe_args & args) {
+     args.sigmoid         = false;
+     args.sqrt_softplus   = false;
+@@ -3030,6 +3089,8 @@ static bool ggml_cuda_topk_moe_fusion(const struct ggml_cgraph * cgraph, int nod
+     args.delayed_softmax = false;
+     args.prob_bias       = false;
+     args.norm            = false;
++    args.n_groups        = 0;
++    args.n_group_used    = 0;
+ 
+     const int      n_nodes = cgraph->n_nodes;
+     ggml_tensor ** nodes   = cgraph->nodes;
+@@ -3072,18 +3133,20 @@ static bool ggml_cuda_topk_moe_fusion(const struct ggml_cgraph * cgraph, int nod
+         }
+ 
+         // src of bias add is the unreshaped probs (-2 instead of -1)
+-        if (nodes[node_idx]->op == GGML_OP_ADD && nodes[node_idx]->src[0] == nodes[node_idx - 2]) {
++        const ggml_tensor * selection = nodes[node_idx - 2];
++        if (nodes[node_idx]->op == GGML_OP_ADD && nodes[node_idx]->src[0] == selection) {
+             args.prob_bias = true;
++            selection = nodes[node_idx];
+             node_idx++;
+         }
+-        // RESHAPE/ADD -> ARGSORT
+-        if (node_idx >= n_nodes || nodes[node_idx]->op != GGML_OP_ARGSORT) {
+-            return false;
++
++        if (ggml_cuda_topk_moe_group_fusion(cgraph, node_idx, selection, args)) {
++            node_idx += (int) std::size(topk_moe_group_pattern);
++            selection = nodes[node_idx - 1];
+         }
+ 
+-        if (args.prob_bias && nodes[node_idx]->src[0] != nodes[node_idx - 1]) {
+-            return false;
+-        } else if (!args.prob_bias && nodes[node_idx]->src[0] != nodes[node_idx - 2]) {
++        // RESHAPE/ADD/group mask -> ARGSORT
++        if (node_idx >= n_nodes || nodes[node_idx]->op != GGML_OP_ARGSORT || nodes[node_idx]->src[0] != selection) {
+             return false;
+         }
+ 
+@@ -3094,6 +3157,11 @@ static bool ggml_cuda_topk_moe_fusion(const struct ggml_cgraph * cgraph, int nod
+                 nodes[node_idx]->src[0] != nodes[node_idx - 1]) {
+             return false;
+         }
++
++        // kept groups must hold all used experts
++        if (args.n_groups > 0 && nodes[node_idx]->ne[0] > args.n_group_used * (probs_reshaped->ne[1] / args.n_groups)) {
++            return false;
++        }
+         node_idx++;
+ 
+         if (node_idx >= n_nodes || nodes[node_idx]->op != GGML_OP_GET_ROWS) {
+@@ -3748,17 +3816,18 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+                 } else {
+                     ops.insert(ops.end(), { GGML_OP_SOFT_MAX });
+                 }
+-                const int i_probs = i + (int) ops.size() - 1;  // last node of the gating activation
+-
++                ops.push_back(GGML_OP_RESHAPE);
+                 if (args.prob_bias) {
+-                    bias = cgraph->nodes[i_probs + 2]->src[1];
+-                    ops.insert(ops.end(), { GGML_OP_RESHAPE, GGML_OP_ADD, GGML_OP_ARGSORT, GGML_OP_VIEW,
+-                                            GGML_OP_GET_ROWS });
+-                    out_nodes[0] = i_probs + 4;
+-                } else {
+-                    ops.insert(ops.end(), { GGML_OP_RESHAPE, GGML_OP_ARGSORT, GGML_OP_VIEW, GGML_OP_GET_ROWS });
+-                    out_nodes[0] = i_probs + 3;
++                    ops.push_back(GGML_OP_ADD);
++                    bias = cgraph->nodes[i + ops.size() - 1]->src[1];
++                }
++                if (args.n_groups > 0) {
++                    for (const auto & p : topk_moe_group_pattern) {
++                        ops.push_back(p.op);
++                    }
+                 }
++                ops.insert(ops.end(), { GGML_OP_ARGSORT, GGML_OP_VIEW, GGML_OP_GET_ROWS });
++                out_nodes[0] = i + ops.size() - 2;
+                 ids = cgraph->nodes[out_nodes[0]];
+ 
+                 if (args.norm) {
+diff --git a/ggml/src/ggml-cuda/topk-moe.cu b/ggml/src/ggml-cuda/topk-moe.cu
+index d015e7d..81d6ec3 100644
+--- a/ggml/src/ggml-cuda/topk-moe.cu
++++ b/ggml/src/ggml-cuda/topk-moe.cu
+@@ -11,6 +11,8 @@ struct topk_moe_config {
+     bool use_sqrt_softplus;
+     bool with_norm;
+     bool delayed_softmax;
++    int  n_groups;
++    int  n_group_used;
+ };
+ 
+ // Warp-local softmax used for both the pre-top-k logits and the post-top-k delayed path.
+@@ -78,6 +80,53 @@ __device__ void sqrt_softplus_warp_inplace(float (&vals)[experts_per_thread], co
+     }
+ }
+ 
++#if !defined(GGML_USE_HIP) || HIP_VERSION >= 60300000
++// Set -inf for experts outside the top n_group_used groups. Group score is the sum of its top-2 experts (DeepSeek V3).
++template <int n_experts, int experts_per_thread>
++__device__ void group_mask_warp_inplace(float (&vals)[experts_per_thread], const int n_groups, const int n_group_used, const int lane) {
++    const int n_per_group = n_experts / n_groups;
++
++    float score = -INFINITY; // lane g holds the score of group g
++    for (int g = 0; g < n_groups; g++) {
++        float top1 = -INFINITY;
++        float top2 = -INFINITY;
++#pragma unroll
++        for (int i = 0; i < experts_per_thread; i++) {
++            if ((i * WARP_SIZE + lane) / n_per_group == g) {
++                top2 = fmaxf(top2, fminf(top1, vals[i]));
++                top1 = fmaxf(top1, vals[i]);
++            }
++        }
++#pragma unroll
++        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
++            const float o1 = __shfl_xor_sync(0xFFFFFFFF, top1, offset, WARP_SIZE);
++            const float o2 = __shfl_xor_sync(0xFFFFFFFF, top2, offset, WARP_SIZE);
++            top2 = fmaxf(fminf(top1, o1), fmaxf(top2, o2));
++            top1 = fmaxf(top1, o1);
++        }
++        if (lane == g) {
++            score = top1 + top2;
++        }
++    }
++
++    // rank of each group, lower index wins ties
++    int rank = 0;
++    for (int g = 0; g < n_groups; g++) {
++        const float other = __shfl_sync(0xFFFFFFFF, score, g, WARP_SIZE);
++        rank += other > score || (other == score && g < lane);
++    }
++    const auto keep = __ballot_sync(0xFFFFFFFFULL, lane < n_groups && rank < n_group_used);
++
++#pragma unroll
++    for (int i = 0; i < experts_per_thread; i++) {
++        const int g = (i * WARP_SIZE + lane) / n_per_group;
++        if (g >= n_groups || !((keep >> g) & 1)) {
++            vals[i] = -INFINITY;
++        }
++    }
++}
++#endif // !defined(GGML_USE_HIP) || HIP_VERSION >= 60300000
++
+ /*
+     This kernel does the following:
+     1. optionally softmax over the logits per token [n_experts, n_tokens]
+@@ -171,6 +220,17 @@ __global__ void topk_moe_cuda(const float *         logits,
+         }
+     }
+ 
++#if !defined(GGML_USE_HIP) || HIP_VERSION >= 60300000
++    // without bias, masking wt is safe: the matcher ensures the kept groups hold all used experts
++    if (config.n_groups > 0) {
++        if constexpr (has_bias) {
++            group_mask_warp_inplace<n_experts>(selection_wt, config.n_groups, config.n_group_used, threadIdx.x);
++        } else {
++            group_mask_warp_inplace<n_experts>(wt, config.n_groups, config.n_group_used, threadIdx.x);
++        }
++    }
++#endif // !defined(GGML_USE_HIP) || HIP_VERSION >= 60300000
++
+     //at this point, each thread holds either a portion of the softmax distribution
+     //or the raw logits. We do the argmax reduce over n_expert_used, each time marking
+     //the expert weight as -inf to exclude from the next iteration
+@@ -297,6 +357,10 @@ static void launch_topk_moe_cuda(ggml_backend_cuda_context & ctx,
+     cudaStream_t stream = ctx.stream();
+     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(grid_dims, block_dims, 0, stream);
+ 
++#if defined(GGML_USE_HIP) && HIP_VERSION < 60300000
++    GGML_ASSERT(config.n_groups == 0 && "expert groups fusion is not supported on this HIP version");
++#endif
++
+     switch (n_expert) {
+         case 1:
+             ggml_cuda_kernel_launch(topk_moe_cuda<1, has_bias>, launch_params,
+@@ -389,6 +453,8 @@ void ggml_cuda_op_topk_moe(ggml_backend_cuda_context &     ctx,
+     config.use_sqrt_softplus = args.sqrt_softplus;
+     config.with_norm         = with_norm;
+     config.delayed_softmax   = args.delayed_softmax;
++    config.n_groups          = args.n_groups;
++    config.n_group_used      = args.n_group_used;
+ 
+     if (bias) {
+         launch_topk_moe_cuda<true>(ctx, logits_d, weights_d, ids_d, bias_d, n_rows, n_experts, n_expert_used, clamp_val,
+diff --git a/ggml/src/ggml-cuda/topk-moe.cuh b/ggml/src/ggml-cuda/topk-moe.cuh
+index 061b37e..3637500 100644
+--- a/ggml/src/ggml-cuda/topk-moe.cuh
++++ b/ggml/src/ggml-cuda/topk-moe.cuh
+@@ -14,6 +14,8 @@ struct ggml_cuda_topk_moe_args {
+     bool prob_bias{};
+     bool norm{};
+     bool scale{};
++    int  n_groups{};     // > 0: pick experts only from the top n_group_used expert groups
++    int  n_group_used{};
+ };
+ 
+ void ggml_cuda_op_topk_moe(ggml_backend_cuda_context &     ctx,
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index ba7f7eb..6187469 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -7328,6 +7328,7 @@ struct test_topk_moe : public test_case {
+     const bool bias_probs;
+     const MoeGatingFunc gating_func;
+     const float scale_w;
++    const int n_expert_groups;
+     ggml_tensor * weights {};
+     ggml_tensor * selected_experts {};
+ 
+@@ -7336,17 +7337,21 @@ struct test_topk_moe : public test_case {
+                   bool                   with_norm       = false,
+                   bool                   bias_probs      = false,
+                   MoeGatingFunc          gating_func     = GATING_FUNC_SOFTMAX,
+-                  float                  scale_w         = 0.0f) :
++                  float                  scale_w         = 0.0f,
++                  int                    n_expert_groups = 1) :
+         ne(ne),
+         n_expert_used(n_expert_used),
+         with_norm(with_norm),
+         bias_probs(bias_probs),
+         gating_func(gating_func),
+-        scale_w(scale_w) {
++        scale_w(scale_w),
++        n_expert_groups(n_expert_groups) {
+         GGML_ASSERT(n_expert_used <= ne[0]);
++        GGML_ASSERT(ne[0] % n_expert_groups == 0);
++        GGML_ASSERT(n_expert_used <= ne[0] / n_expert_groups);
+     }
+ 
+-    std::string vars() override { return VARS_TO_STR6(ne, n_expert_used, with_norm, bias_probs, gating_func, scale_w); }
++    std::string vars() override { return VARS_TO_STR7(ne, n_expert_used, with_norm, bias_probs, gating_func, scale_w, n_expert_groups); }
+ 
+     std::string op_desc(ggml_tensor * t) override {
+         GGML_UNUSED(t);
+@@ -7358,6 +7363,8 @@ struct test_topk_moe : public test_case {
+     ggml_tensor * build_graph(ggml_context * ctx) override {
+         const int n_expert = ne[0];
+         const int n_tokens = ne[1];
++        const int n_exp_per_group = n_expert / n_expert_groups;
++        const int n_group_used = n_expert_groups / 2;
+ 
+         ggml_tensor * logits = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne.data());
+         ggml_tensor * probs            =
+@@ -7374,6 +7381,24 @@ struct test_topk_moe : public test_case {
+             ggml_set_name(selection_probs, "selection_probs");
+         }
+ 
++        if (n_expert_groups > 1) {
++            ggml_tensor * selection_groups = ggml_reshape_3d(ctx, selection_probs, n_exp_per_group, n_expert_groups, n_tokens); // [n_exp_per_group, n_expert_groups, n_tokens]
++
++            ggml_tensor * group_scores = ggml_argsort_top_k(ctx, selection_groups, 2); // [2, n_expert_groups, n_tokens]
++            group_scores = ggml_get_rows(ctx, ggml_reshape_4d(ctx, selection_groups, 1, selection_groups->ne[0], selection_groups->ne[1], selection_groups->ne[2]), group_scores); // [1, 2, n_expert_groups, n_tokens]
++
++            group_scores = ggml_sum_rows(ctx, ggml_reshape_3d(ctx, group_scores, group_scores->ne[1], group_scores->ne[2], group_scores->ne[3])); // [1, n_expert_groups, n_tokens]
++            group_scores = ggml_reshape_2d(ctx, group_scores, group_scores->ne[1], group_scores->ne[2]); // [n_expert_groups, n_tokens]
++
++            ggml_tensor * expert_groups = ggml_argsort_top_k(ctx, group_scores, n_group_used); // [n_group_used, n_tokens]
++            ggml_set_name(expert_groups, "ffn_moe_group_topk");
++
++            selection_probs = ggml_get_rows(ctx, selection_groups, expert_groups); // [n_exp_per_group, n_group_used, n_tokens]
++            selection_probs = ggml_set_rows(ctx, ggml_fill(ctx, selection_groups, -INFINITY), selection_probs, expert_groups); // [n_exp_per_group, n_expert_groups, n_tokens]
++            selection_probs = ggml_reshape_2d(ctx, selection_probs, n_expert, n_tokens); // [n_expert, n_tokens]
++            ggml_set_name(selection_probs, "ffn_moe_probs_masked");
++        }
++
+         selected_experts = ggml_argsort_top_k(ctx, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+         ggml_set_name(selected_experts, "selected_experts");
+ 
+@@ -11934,6 +11959,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+                     test_cases.emplace_back(new test_topk_moe({32, 8, 1, 1}, 4, with_norm, bias_probs, gate, scale_w));
+                     test_cases.emplace_back(new test_topk_moe({32, 8, 1, 1}, 8, with_norm, bias_probs, gate, scale_w));
+                     test_cases.emplace_back(new test_topk_moe({32, 9, 1, 1}, 8, with_norm, bias_probs, gate, scale_w));
++
++                    // grouped experts
++                    test_cases.emplace_back(new test_topk_moe({128, 1, 1, 1}, 8, with_norm, bias_probs, gate, scale_w, 16));
++                    test_cases.emplace_back(new test_topk_moe({256, 22, 1, 1}, 6, with_norm, bias_probs, gate, scale_w, 32));
++                    test_cases.emplace_back(new test_topk_moe({256, 7, 1, 1}, 8, with_norm, bias_probs, gate, scale_w, 8)); // DeepSeek V3
++                    test_cases.emplace_back(new test_topk_moe({128, 5, 1, 1}, 6, with_norm, bias_probs, gate, scale_w, 8));
++                    test_cases.emplace_back(new test_topk_moe({512, 3, 1, 1}, 8, with_norm, bias_probs, gate, scale_w, 4));
+                 }
+             }
+         }

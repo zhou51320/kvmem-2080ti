@@ -1,8 +1,10 @@
+#include "kvmem/query_policy.hpp"
 #include "llama.h"
 #include "../backends/llamacpp/src/llama-ext.h"
 #include "llama-kvmem-hooks.h"
 #include "kvmem/retrieval_options.hpp"
 #include "kvmem/cli_options.h"
+#include "kvmem/token_options.hpp"
 #include "kvmem-spec.h"
 #include "kvmem-server-devices.h"
 #include "kvmem-execution-scope.h"
@@ -44,10 +46,14 @@ static void print_usage(const char * argv0) {
             "  --kvmem-sink-tokens N      always-kept prefix; 0 = one block\n"
             "  --kvmem-recent-tokens N    always-kept suffix blocks (default 0)\n"
             "  --kvmem-method NAME        recency | retrieval (default retrieval)\n"
-            "  --kvmem-lrfu               rank by decayed retrieval history\n"
-            "  --kvmem-lrfu-lambda X      history decay [0,1] (default 0.5)\n"
-            "  --kvmem-lrfu-top-frac X    hit fraction (0,1] (default 0.9)\n"
-            "  --kvmem-score-agg MODE     mean | max across GQA heads (default mean)\n"
+            "  --kvmem-query-scorer NAME    page-softmax (default) | meanq-cosine\n"
+            "  --kvmem-score-agg MODE       mean | max (default: page-softmax mean, cosine max)\n"
+            "  --kvmem-lrfu / --no-kvmem-lrfu  Query history (default on only for cosine)\n"
+            "  --kvmem-lrfu-lambda X        history decay in [0,1] (default 0.5)\n"
+            "  --kvmem-lrfu-top-frac X      history hit fraction in (0,1] (default 0.9)\n"
+            "  --kvmem-graph-alpha X        Query propagation in [0,1] (default: page-softmax 0.2; cosine 0)\n"
+            "  --kvmem-query-max-tokens N cap raw Query capture (default 512)\n"
+            "  --kvmem-query-replay-max-tokens N bound full replay suffix (default 2048)\n"
             "  --kvmem-query-last N       last N prompt tokens are the retrieval query (default 64)\n"
             "  --kvmem-force-substr S     force-select the block containing substring S\n"
             "  --kvmem-gpu-ratio R        cap slot pool at this fraction of GPU VRAM (default 0.50)\n"
@@ -98,6 +104,7 @@ int main(int argc, char ** argv) {
         llama_kvmem_execution_create(), llama_kvmem_execution_free};
     kvmem_execution_scope execution_scope(execution.get());
     llama_kvmem_params kparams = {};
+    kvmem::CliOptions scoring_options;
     kparams.block_tokens = 32;
     kparams.gen_reserve = 256;
     kparams.method = 1;  // retrieval
@@ -105,6 +112,7 @@ int main(int argc, char ** argv) {
     kparams.query_end = -1;
     kparams.force_pos = -1;
     int query_last = 64;
+    uint32_t query_max_tokens=512, query_replay_max_tokens=2048;
     std::string force_substr;
     kvmem::CliOptions storage_options;
     bool dump_kv = false;
@@ -195,14 +203,17 @@ int main(int argc, char ** argv) {
             } else {
                 kparams.method = 0;
             }
-        } else if (eq(arg, "--kvmem-lrfu")) {
-            kparams.lrfu = true;
-        } else if (eq(arg, "--kvmem-lrfu-lambda")) {
-            kparams.lrfu_lambda = kvmem::parse_lrfu_real(need(arg), true);
-        } else if (eq(arg, "--kvmem-lrfu-top-frac")) {
-            kparams.lrfu_top_fraction = kvmem::parse_lrfu_real(need(arg), false);
-        } else if (eq(arg, "--kvmem-score-agg")) {
-            kparams.score_agg = kvmem::parse_score_aggregation(need(arg));
+        } else if (eq(arg,"--kvmem-query-scorer") || eq(arg,"--kvmem-graph-alpha") ||
+                   eq(arg,"--kvmem-lrfu") || eq(arg,"--no-kvmem-lrfu") ||
+                   eq(arg,"--kvmem-lrfu-lambda") || eq(arg,"--kvmem-lrfu-top-frac") || eq(arg,"--kvmem-score-agg")) {
+            try { scoring_options.parse(arg,need); }
+            catch (const std::exception& e) { fprintf(stderr,"%s\n",e.what()); return 1; }
+        } else if (eq(arg,"--kvmem-query-max-tokens")) {
+            try { query_max_tokens=kvmem::CliOptions::integer(arg,need(arg),1); }
+            catch(const std::invalid_argument& error) {fprintf(stderr,"%s\n",error.what());return 1;}
+        } else if (eq(arg,"--kvmem-query-replay-max-tokens")) {
+            try { query_replay_max_tokens=kvmem::CliOptions::integer(arg,need(arg),1); }
+            catch(const std::invalid_argument& error) {fprintf(stderr,"%s\n",error.what());return 1;}
         } else if (eq(arg, "--kvmem-query-last")) {
             query_last = std::atoi(need(arg));
         } else if (eq(arg, "--kvmem-force-substr")) {
@@ -324,6 +335,20 @@ int main(int argc, char ** argv) {
         print_usage(argv[0]);
         return 1;
     }
+    try {
+        if (!kparams.enabled && (scoring_options.auxiliary_set || scoring_options.lrfu))
+            throw std::invalid_argument("KVMem scoring settings require --kvmem");
+        if (!kparams.gen_reserve) kparams.gen_reserve = 256;
+        if (kparams.enabled && kparams.budget) kvmem::normalize_memory_tokens(kparams.budget, kparams.gen_reserve,
+            kparams.sink_tokens, kparams.recent_tokens, kparams.block_tokens, true, false);
+        scoring_options.resolve_query_scoring();
+        kparams.query_meanq_cosine = scoring_options.query_scorer == kvmem::QueryScorer::MeanQCosine;
+        kparams.graph_alpha = scoring_options.graph_alpha;
+        kparams.score_agg = scoring_options.score_agg;
+        kparams.lrfu = scoring_options.lrfu;
+        kparams.lrfu_lambda = scoring_options.lrfu_lambda;
+        kparams.lrfu_top_fraction = scoring_options.lrfu_top_fraction;
+    } catch (const std::exception& e) { fprintf(stderr,"%s\n",e.what()); return 1; }
     if (!prompt_file.empty()) {
         std::ifstream in(prompt_file);
         if (!in) {
@@ -427,7 +452,7 @@ int main(int argc, char ** argv) {
 #endif
         }
         if (query_last > 0 && n_prompt > 0) {
-            const int last = std::min(query_last, n_prompt);
+            const int last = std::min({query_last, n_prompt, int(query_max_tokens)});
             kparams.query_begin = n_prompt - last;
             kparams.query_end = n_prompt;
         }
@@ -550,7 +575,17 @@ int main(int argc, char ** argv) {
 
     const bool do_retr = kparams.enabled && kparams.method == 1 && kparams.query_begin > 0;
     const bool recr_ckpt = do_retr && llama_kvmem_has_recurrent();
-    const int prefix_end = recr_ckpt ? kparams.query_begin : eval_end;
+    const int prefix_end = do_retr ? kparams.query_begin : eval_end;
+    llama_kvmem_tail_mean_state query_prefix;
+    llama_kvmem_attention_view probe_view;
+    std::vector<uint8_t> query_draft;
+    if(do_retr) {
+        llama_kvmem_turn_spans spans;
+        spans.query={{prefix_end,std::min(kparams.query_end,eval_end)}};
+        spans.mandatory={{prefix_end,eval_end}};
+        spans.replay_begin=prefix_end;
+        llama_kvmem_set_turn_spans(spans);
+    }
 
     if (kparams.lrfu) llama_kvmem_set_request_span(kparams.query_begin,
         std::min(kparams.query_end > 0 ? kparams.query_end : eval_end, eval_end), kparams.force_pos);
@@ -577,9 +612,12 @@ int main(int argc, char ** argv) {
         }
         fprintf(stderr, "KVMEM_TRACE gdn_ckpt pos_end=%d bytes=%zu query_begin=%d\n",
                 prefix_end, sz, kparams.query_begin);
-        if (decode_span(prefix_end, eval_end, "prefill-query") != 0) {
-            return 1;
-        }
+    }
+    if(do_retr) {
+        if(!llama_kvmem_get_tail_mean(prefix_end,query_prefix)) return 1;
+        probe_view=llama_kvmem_get_attention_view();
+        if(spec_sess.ok) common_speculative_get_state(spec_sess.spec,0,query_draft);
+        if(decode_span(prefix_end,eval_end,"prefill-query")!=0) return 1;
     }
     llama_synchronize(ctx);
 
@@ -597,77 +635,58 @@ int main(int argc, char ** argv) {
         llama_kvmem_dump_kv_writeback(ctx, -1);
     }
 
-    if (do_retr) {
-        const auto t0 = std::chrono::steady_clock::now();
-        llama_kvmem_apply_retrieval(ctx);
-        retrieval_ms = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - t0).count();
-        if (recr_ckpt && !gdn_ckpt.empty()) {
-            const llama_state_seq_flags fl = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-            const size_t nset = llama_state_seq_set_data_ext(
-                    ctx, gdn_ckpt.data(), gdn_ckpt.size(), 0, fl);
-            if (nset != gdn_ckpt.size()) {
-                fprintf(stderr, "GDN restore failed (%zu != %zu)\n", nset, gdn_ckpt.size());
-                return 1;
-            }
-            fprintf(stderr, "KVMEM_TRACE gdn_restore bytes=%zu\n", gdn_ckpt.size());
-            llama_kvmem_trace_cells(ctx, "after_gdn_restore");
-        }
-        llama_memory_t mem = llama_get_memory(ctx);
-        llama_kvmem_set_replay(true);
-        if (mem) {
-            fprintf(stderr, "KVMEM_TRACE before_seq_rm seq_pos=[%d,%d] query=[%d,%d)\n",
-                    llama_memory_seq_pos_min(mem, 0), llama_memory_seq_pos_max(mem, 0),
-                    kparams.query_begin, kparams.query_end);
-            llama_memory_seq_rm(mem, 0, kparams.query_begin, kparams.query_end);
-            fprintf(stderr, "KVMEM_TRACE after_seq_rm seq_pos=[%d,%d] auto_pos0=%d\n",
-                    llama_memory_seq_pos_min(mem, 0), llama_memory_seq_pos_max(mem, 0),
-                    llama_memory_seq_pos_max(mem, 0) + 1);
-            llama_kvmem_trace_cells(ctx, "after_seq_rm");
-        }
-        if (spec_sess.ctx_dft) {
-            llama_memory_t md = llama_get_memory(spec_sess.ctx_dft);
-            if (md) {
-                llama_memory_seq_rm(md, 0, kparams.query_begin, kparams.query_end);
-                fprintf(stderr, "KVMEM_TRACE mtp_after_seq_rm seq_pos=[%d,%d]\n",
-                        llama_memory_seq_pos_min(md, 0), llama_memory_seq_pos_max(md, 0));
+    if(do_retr) {
+        const uint32_t block=kparams.block_tokens;
+        const uint32_t budget=kparams.budget ? kparams.budget : uint32_t(n_ctx);
+        const auto plan=kvmem::query_replay_plan({uint64_t(prefix_end),uint64_t(eval_end)},
+            prefix_end,eval_end,query_replay_max_tokens,block,
+            std::min<uint64_t>((uint64_t(prefix_end)+block-1)/block,budget/block),
+            (uint64_t(budget)+kparams.gen_reserve)/block,spec_sess.ok ? spec_n_max+1 : 0);
+        bool replay=false;
+        const auto t0=std::chrono::steady_clock::now();
+        if(plan.admitted) {
+            const auto selection=llama_kvmem_preview_retrieval(&query_prefix);
+            if(!llama_kvmem_commit_unchanged(probe_view,selection) &&
+                llama_kvmem_selection_fits(selection,eval_end,spec_sess.ok ? spec_n_max+1 : 0)) {
+                llama_kvmem_apply_selection(selection);
+                replay=true;
             }
         }
-        const int q0 = kparams.query_begin;
-        const int qn = eval_end - q0;
-        if (qn > 0) {
+        retrieval_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
+        if(replay) {
+            if(recr_ckpt) {
+                const auto flags=LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+                if(llama_state_seq_set_data_ext(ctx,gdn_ckpt.data(),gdn_ckpt.size(),0,flags)!=gdn_ckpt.size()) return 1;
+            }
+            if(!llama_kvmem_set_tail_mean(prefix_end,query_prefix)) return 1;
+            llama_kvmem_set_replay(true);
+            if(!llama_kvmem_remove_logical(ctx,prefix_end,-1)) return 1;
+            if(spec_sess.ok) {
+                if(!llama_kvmem_remove_logical(spec_sess.ctx_dft,prefix_end,-1)) return 1;
+                common_speculative_set_state(spec_sess.spec,0,query_draft);
+            }
+            const auto before=llama_perf_context(ctx);
+            const auto started=std::chrono::steady_clock::now();
+            const int rc=decode_span(prefix_end,eval_end,"query replay");
             llama_synchronize(ctx);
-            const llama_perf_context_data before_replay = llama_perf_context(ctx);
-            const auto r0 = std::chrono::steady_clock::now();
-            const int rc = decode_span(q0, q0 + qn, "query replay");
-            llama_synchronize(ctx);
-            replay_wall_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - r0).count();
-            const llama_perf_context_data after_replay = llama_perf_context(ctx);
-            replay_n = after_replay.n_p_eval - before_replay.n_p_eval;
-            replay_eval_ms = after_replay.t_p_eval_ms - before_replay.t_p_eval_ms;
-            if (rc != 0) {
-                fprintf(stderr, "llama_decode(query replay) failed rc=%d\n", rc);
-                return 1;
-            }
+            replay_wall_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+            const auto after=llama_perf_context(ctx);
+            replay_n=after.n_p_eval-before.n_p_eval;
+            replay_eval_ms=after.t_p_eval_ms-before.t_p_eval_ms;
+            llama_kvmem_set_replay(false);
+            if(rc) return 1;
         }
-        llama_kvmem_set_replay(false);
-        fprintf(stderr, "KVMEM_TRACE query_replay begin=%d n=%d recr_ckpt=%d\n",
-                q0, qn, (int) recr_ckpt);
-        llama_kvmem_trace_cells(ctx, "after_query_replay");
-        if (spec_sess.ctx_dft) {
-            llama_memory_t md = llama_get_memory(spec_sess.ctx_dft);
-            if (md) {
-                fprintf(stderr, "KVMEM_TRACE mtp_after_query_replay seq_pos=[%d,%d]\n",
-                        llama_memory_seq_pos_min(md, 0), llama_memory_seq_pos_max(md, 0));
-            }
-        }
+        llama_kvmem_pin_working_set();
+        fprintf(stderr,"KVMEM_PREFILL_DECISION path=%s reason=%s replay_rows=%d\n",
+            replay?"query_replay":plan.admitted?"first_pass":"query_replay_skipped",
+            plan.reason,replay?eval_end-prefix_end:0);
     }
 
     std::vector<llama_token> gen;
     gen.reserve(static_cast<size_t>(n_predict));
     llama_kvmem_accept_retrieval_round();
     llama_kvmem_end_prefill_capture();
+    llama_kvmem_attention_begin(prompt_tokens.data(),uint32_t(prompt_tokens.size()));
     llama_synchronize(ctx);
     const auto t_gen0 = std::chrono::steady_clock::now();
     if (spec_sess.ok) {
@@ -772,6 +791,7 @@ int main(int argc, char ** argv) {
                 (unsigned long long)storage.read_bytes, (unsigned long long)storage.written_bytes,
                 (unsigned long long)storage.errors);
     }
+    llama_kvmem_attention_finish(true);
     kvmem_spec_stop(spec_sess);
     llama_sampler_free(smpl);
     llama_free(ctx);

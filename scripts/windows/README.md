@@ -3,6 +3,10 @@
 > Device identifiers and private paths have been anonymized; reported measurements are unchanged.
 
 
+Current source builds use [graph recall C](../../docs/graph-recall.md) in both backends. The 0.18 resource recipe remains. Use `-QueryScorer meanq-cosine|page-softmax`, `-ScoreAggregation mean|max`, `-GraphAlpha`, and `-Lrfu`/`-NoLrfu` for the documented scoring variants. Rebuild workers with the versioned backend patches. Published old packages keep their original behavior.
+
+当前源码的两个后端默认采用图召回 C，保留 0.18 资源配方。可用 `-QueryScorer`、`-ScoreAggregation`、`-GraphAlpha`、`-Lrfu`/`-NoLrfu` 切换已支持的评分组合；新脚本须配合本源码重编译的 worker。旧发布包保持其原有行为。
+
 ## Multi-backend launchers / 多后端启动入口
 
 The current launch UI calls `start-backend.ps1` internally with typed JSON settings.
@@ -17,6 +21,10 @@ worker EXEs remain available for advanced options.
 
 The source and newly built packages share `start-ninfer.ps1`, including `-Model`,
 `-NoVision`, `-ThinkingBudget`, `-ReasoningEffort` and `-PreserveThinking`.
+For the Qwen CPU Vision path, `-CpuVisionIdleSeconds` defaults to 300: weights load on the
+first actual image encode and unload five minutes after the last encoder releases them. Set it
+to 0 to retain lazily loaded weights until model unload. Both launchers forward this setting.
+
 Its 0.18 recipe differs from the unified launcher's defaults. Older ZIPs retain their
 original scripts. In a PowerShell session, pass an array; for an external `-File`
 invocation put native options last after `-WorkerArgs`:

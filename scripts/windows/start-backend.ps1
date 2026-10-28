@@ -1,9 +1,16 @@
 #Requires -Version 5.1
 [CmdletBinding(PositionalBinding=$false)]
 param(
-    [Parameter(Mandatory)][ValidateSet('llamacpp', 'ninfer')][string]$Backend,
+    [Parameter(Mandatory)][ValidateSet('llamacpp', 'ninfer', 'polystrata')][string]$Backend,
     [string]$Model,
     [string]$Worker,
+    [string]$Tokenizer,
+    [string]$PolystrataSource,
+    [string]$Python,
+    [string]$VisionWorker,
+    [string]$Mmproj,
+    [ValidateRange(256,65536)][int]$VramReserveMiB=256,
+    [ValidateRange(1,65536)][int]$ReplayMaxTokens=2048,
     [string]$Gpu = $env:CUDA_VISIBLE_DEVICES,
     [uint32[]]$StageLayers = @(),
     [ValidateRange(1, 65535)][int]$Port = 18200,
@@ -17,10 +24,11 @@ param(
     [switch]$PreserveThinking,
     [ValidateRange(256, 2147483647)][int]$Context = 262144,
     [ValidateRange(128, 2147483647)][int]$Budget = 32768,
-    [ValidateRange(64, 2147483647)][int]$Reserve = 1024,
+    [ValidateSet(32,64)][int]$BlockTokens = 32,
+    [ValidateRange(32, 2147483647)][int]$Reserve = 1024,
     [ValidateRange(1, 1048576)][int]$HostMiB = 16384,
-    [ValidateRange(128, 2147483647)][int]$Prefill = 128,
-    [ValidateRange(1, 2147483647)][int]$MaxTokens = 1024,
+    [ValidateRange(1, 2147483647)][int]$Prefill = 128,
+    [ValidateRange(0, 2147483647)][int]$MaxTokens = 1024,
     [string]$KvType,
     [string]$KvTypeK,
     [string]$KvTypeV,
@@ -37,15 +45,21 @@ param(
     [ValidateRange(1, 16)][int]$RetainedSessions = 4,
     [switch]$Vision,
     [ValidateSet('resident', 'cpu')][string]$VisionResidency = 'resident',
+    [ValidateRange(0, 2147483647)][int]$CpuVisionIdleSeconds = 300,
     [ValidateRange(1, 16384)][int]$VisionTokens = 1024,
     [ValidateSet('off', 'auto')][string]$DeviceProfile = 'off',
     [ValidateRange(0, 2147483647)][int]$ThinkingBudget = 0,
     [ValidateRange(0, 2147483647)][int]$SinkTokens = 12288,
     [ValidateRange(0, 2147483647)][int]$RecentTokens = 1024,
+    [ValidateSet('page-softmax', 'meanq-cosine')][string]$QueryScorer = 'page-softmax',
+    [ValidateRange(0.0, 1.0)][double]$GraphAlpha,
+    [ValidateRange(1, 2147483647)][int]$QueryMaxTokens,
+    [ValidateRange(1, 2147483647)][int]$QueryReplayMaxTokens,
+    [switch]$Lrfu,
     [switch]$NoLrfu,
     [ValidateRange(0.0, 1.0)][double]$LrfuLambda = 0.5,
     [ValidateScript({ $_ -gt 0 -and $_ -le 1 })][double]$LrfuTopFraction = 0.9,
-    [ValidateSet('mean', 'max')][string]$ScoreAggregation = 'max',
+    [ValidateSet('mean', 'max')][string]$ScoreAggregation = 'mean',
     [string]$DiskPath,
     [ValidateRange(0, 1048576)][int]$DiskMiB = 4096,
     [AllowEmptyCollection()][AllowEmptyString()][string[]]$WorkerArgs = @(),
@@ -57,6 +71,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'native-process.ps1')
+. (Join-Path $PSScriptRoot 'query-scoring.ps1')
+. (Join-Path $PSScriptRoot 'token-settings.ps1')
 $WorkerArgs = Resolve-KVMemWorkerArgs $PSBoundParameters $WorkerArgsTail
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $specProfiles = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../speculative-capabilities.json') -Raw | ConvertFrom-Json
@@ -88,7 +104,37 @@ if ($Backend -eq 'ninfer') {
         throw 'KVMem disables legacy --lookup-ngram; use -NgramDrafts and -NgramMinMatch'
     }
 }
+if ($Backend -eq 'polystrata') {
+    $capabilities.block_tokens = @{default=32;supported=@(32,64);startup_fixed=$true}
+    $capabilities.supported_combinations=@{
+        text=@{architectures=@('qwen35moe');kv=@('f16','q8_0');max_concurrency=8;max_devices=1}
+        mtp=@{drafts=@(0..3);solo=$true;batch=$false;batch_fallback='ordinary_decode'}
+        storage=@{scope='process';shared_active_idle_quota=$true;ssd_persistence='process'}
+        query=@{scorers=@('page-softmax','meanq-cosine');bounded_replay=$true;tool_continuation='resident_pressure'}
+    }
+}
 if ($Describe) { $capabilities | ConvertTo-Json -Depth 4; return }
+if ($Backend -ne 'polystrata' -and $PSBoundParameters.ContainsKey('BlockTokens')) {
+    throw '-BlockTokens configures PolyStrata in this launcher'
+}
+if ($Backend -eq 'polystrata' -and !$PSBoundParameters.ContainsKey('Prefill')) { $Prefill=512 }
+$resolvedBlock = if ($Backend -eq 'llamacpp') { 32 } else { $BlockTokens }
+# A native logical-batch override must not change the independently emitted ubatch.
+$llamaPhysicalPrefill=$Prefill
+$tokenInputs = Resolve-KVMemTokenOverrides $Backend $WorkerArgs $Context $Prefill $resolvedBlock
+$WorkerArgs = @($tokenInputs.WorkerArgs)
+$resolvedBlock = $tokenInputs.BlockTokens
+$resolvedContext = $tokenInputs.Context
+$tokenPlan = Resolve-KVMemTokenSettings $Backend $resolvedBlock $Budget $Reserve $tokenInputs.Prefill $SinkTokens $RecentTokens $resolvedContext
+$Budget=[int]$tokenPlan.effective.Budget; $Reserve=[int]$tokenPlan.effective.Reserve
+$Prefill=[int]$tokenPlan.effective.Prefill; $SinkTokens=[int]$tokenPlan.effective.SinkTokens; $RecentTokens=[int]$tokenPlan.effective.RecentTokens
+foreach ($change in $tokenPlan.adjustments) {
+    Write-Warning "KVMEM_CONFIG $($change.parameter): $($change.requested) -> $($change.effective) tokens ($($change.reason))"
+}
+if ($Backend -eq 'polystrata') {
+    & (Join-Path $PSScriptRoot 'start-polystrata.ps1') -Parameters $PSBoundParameters -Root $root -WorkerArgs $WorkerArgs -TokenPlan $tokenPlan
+    return
+}
 # Canonical settings take precedence over defaults, while conflicting explicit
 # aliases fail before the worker starts. Old saved MTP configurations still work.
 if (!$SpeculativeMode) { $SpeculativeMode = if ($MtpDrafts -gt 0) { 'mtp' } else { 'none' } }
@@ -136,8 +182,13 @@ foreach ($setting in @(
     @('LogLevel', '^(-lv|--verbosity|--log-verbosity|--log-level)(=|$)'),
     @('ChatTemplateFile', '^--chat-template(-file)?(=|$)'),
     @('ThinkingMode', '^--(enable-thinking|no-think(ing)?)(=|$)'),
-    @('ReasoningEffort', '^--default-reasoning-effort(=|$)'),
-    @('PreserveThinking', '^--preserve-thinking(=|$)'),
+    @('ReasoningEffort', '^--(default-reasoning-effort|reasoning-effort)(=|$)'),
+    @('ThinkingBudget', '^--(default-thinking-budget|reasoning-budget)(=|$)'),
+    @('MaxTokens', '^(-n|--n-predict|--predict|--default-max-tokens)(=|$)'),
+    @('Vision', '^--(mmproj|mmproj-offload|no-mmproj-offload|mmproj-device|image-max-tokens)(=|$)'),
+    @('Mmproj', '^--mmproj(=|$)'),
+    @('PreserveThinking', '^--(preserve-thinking|chat-template-kwargs)(=|$)'),
+    @('CpuVisionIdleSeconds', '^--cpu-vision-idle-seconds(=|$)'),
     @('Concurrency', '^(-np|--parallel|--max-concurrency)(=|$)')
 )) {
     if ($PSBoundParameters.ContainsKey($setting[0]) -and @($WorkerArgs | Where-Object { $_ -match $setting[1] }).Count) {
@@ -155,7 +206,7 @@ if ($Backend -eq 'ninfer' -and $ThinkingMode -eq 'off' -and
     ($ReasoningEffort -or @($WorkerArgs | Where-Object { $_ -match '^--default-reasoning-effort(=|$)' }).Count)) {
     throw 'ReasoningEffort conflicts with ThinkingMode off'
 }
-if (@($WorkerArgs | Where-Object { $_ -match '^--(no-)?kvmem($|-(budget|gen-reserve|host-mib|sessions|sink-tokens|recent-tokens|lrfu|lrfu-lambda|lrfu-top-frac|score-agg)(=|$))' }).Count) {
+if (@($WorkerArgs | Where-Object { $_ -match '^--(no-)?kvmem($|-(budget|gen-reserve|host-mib|sessions|sink-tokens|recent-tokens|lrfu|lrfu-lambda|lrfu-top-frac|score-agg|query-scorer|graph-alpha)(=|$))' }).Count) {
     throw 'KVMem common options are owned by the launcher; use its named parameters instead of WorkerArgs'
 }
 if (!$Worker) {
@@ -198,9 +249,8 @@ if ($Backend -eq 'ninfer') {
     }
     $requestedNgramDrafts = $NgramDrafts
     if ($Concurrency -gt 1 -and $NgramDrafts -gt 15) { $NgramDrafts = 15 }
-    if ($Budget % 64 -or $Reserve % 64 -or $Prefill % 128 -or $Prefill -gt $Reserve -or
-        ([long]$Budget + $Reserve) -gt $Context -or $KvType -notin @('bf16', 'int8', 'fp8', 'nvfp4', 'k8v4', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8')) {
-        throw 'ninfer requires B/R aligned to 64, prefill aligned to 128 and <= R, B+R <= Context, bf16/int8/fp8/nvfp4/k8v4/rk8v4/rk4v4/rk4v4-e8/rk2v4-e8'
+    if ($KvType -notin @('bf16', 'int8', 'fp8', 'nvfp4', 'k8v4', 'rk8v4', 'rk4v4', 'rk4v4-e8', 'rk2v4-e8')) {
+        throw 'ninfer KvType must be bf16/int8/fp8/nvfp4/k8v4/rk8v4/rk4v4/rk4v4-e8/rk2v4-e8'
     }
     if ($AdaptiveMtp -and !$MtpDrafts) {
         throw 'Adaptive MTP requires MTP; image, ngram and disk limits still apply'
@@ -222,11 +272,12 @@ if ($Backend -eq 'ninfer') {
     if ($requestedNgramDrafts -ne $NgramDrafts) {
         Write-Warning "NgramDrafts reduced from $requestedNgramDrafts to $NgramDrafts for Concurrency $Concurrency"
     }
-    $nativeArgs = @($Model, '--host', $ListenHost, '--port', "$Port", '--max-context', "$Context",
-        '--max-concurrency', "$Concurrency", '--prefill-chunk', "$Prefill", '--default-max-tokens', "$MaxTokens",
+    $nativeArgs = @($Model, '--host', $ListenHost, '--port', "$Port", '--max-context', "$resolvedContext",
+        '--max-concurrency', "$Concurrency", '--prefill-chunk', "$Prefill",
         '--kvmem-budget', "$Budget", '--kvmem-gen-reserve', "$Reserve", '--kvmem-host-mib', "$HostMiB",
         '--kvmem-sink-tokens', "$SinkTokens", '--kvmem-recent-tokens', "$RecentTokens",
         '--kvmem-sessions', "$RetainedSessions", '--kv-dtype', $KvType, '--device-profile', $DeviceProfile)
+    if ($MaxTokens -gt 0) { $nativeArgs += @('--default-max-tokens', "$MaxTokens") }
     if ($gpuIds.Count -gt 1) { $nativeArgs += @('--devices', ((0..($gpuIds.Count - 1)) -join ',')) }
     else { $nativeArgs += @('--device', '0') }
     if ($StageLayers.Count) { $nativeArgs += @('--stage-layers', ($StageLayers -join ',')) }
@@ -235,9 +286,10 @@ if ($Backend -eq 'ninfer') {
     if ($AdaptiveMtp) { $nativeArgs += '--adaptive-mtp' }
     if ($FastPrefill) { $nativeArgs += '--fast-prefill-kernel' }
     if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', $VisionResidency, '--vision-max-merged', "$VisionTokens") }
+    if ($Vision -and $VisionResidency -eq 'cpu') { $nativeArgs += @('--cpu-vision-idle-seconds', "$CpuVisionIdleSeconds") }
     if ($ThinkingBudget -gt 0) { $nativeArgs += @('--default-thinking-budget', "$ThinkingBudget") }
     if ($ReasoningEffort) { $nativeArgs += @('--default-reasoning-effort', $ReasoningEffort) }
-    if ($PreserveThinking) { $nativeArgs += '--preserve-thinking' }
+    if ($PreserveThinking) { $nativeArgs += '--preserve-thinking' } # false/unset inherits the model template
 } else {
     # Legacy KvType still sets both sides. Explicit K/V values override that base;
     # emit separate native flags when either independent value was requested.
@@ -255,21 +307,41 @@ if ($Backend -eq 'ninfer') {
     if (($effectiveK -in $quantized) -ne ($effectiveV -in $quantized)) {
         throw 'llama.cpp cannot mix floating-point and quantized K/V; choose q8_0/q5_0/q4_0 for both, or f16/f32 for both'
     }
-    foreach ($name in @('StageLayers', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'ThinkingBudget', 'ReasoningEffort', 'PreserveThinking')) {
+    foreach ($name in @('StageLayers', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'DeviceProfile', 'CpuVisionIdleSeconds')) {
         if ($PSBoundParameters.ContainsKey($name)) { throw "-$name configures ninfer; use llama native options in -WorkerArgs" }
     }
     if ($SpeculativeMode -ne 'none') {
         $nativeArgsSpec = @('--spec-type', $(if ($SpeculativeMode -eq 'mtp') { 'draft-mtp' } else { 'draft-dflash' }), '--spec-draft-n-max', "$MtpDrafts")
         if ($DraftModel) { $nativeArgsSpec += @('--spec-draft-model', $DraftModel) }
     } else { $nativeArgsSpec = @() }
-    $nativeArgs = @('-m', $Model, '--host', $ListenHost, '--port', "$Port", '-c', "$Context",
-        '-n', "$MaxTokens", '--kvmem-budget', "$Budget", '--kvmem-gen-reserve', "$Reserve",
-        '-b', "$Prefill", '-ub', "$Prefill",
+    $nativeArgs = @('-m', $Model, '--host', $ListenHost, '--port', "$Port", '-c', "$resolvedContext",
+        '-n', $(if ($MaxTokens -eq 0) { '-1' } else { "$MaxTokens" }), '--kvmem-budget', "$Budget", '--kvmem-gen-reserve', "$Reserve",
+        '-b', "$Prefill", '-ub', "$llamaPhysicalPrefill",
         '--kvmem-sink-tokens', "$SinkTokens", '--kvmem-recent-tokens', "$RecentTokens")
     if ($separateKv) { $nativeArgs += @('--cache-type-k', $effectiveK, '--cache-type-v', $effectiveV) }
     else { $nativeArgs += @('--kv-dtype', $KvType) }
     $nativeArgs += @('--kvmem-host-mib', "$HostMiB", '--kvmem-sessions', "$RetainedSessions")
     if ($PSBoundParameters.ContainsKey('Concurrency')) { $nativeArgs += @('--parallel', "$Concurrency") }
+    if ($PSBoundParameters.ContainsKey('ThinkingBudget')) {
+        $nativeArgs += @('--reasoning-budget', $(if ($ThinkingBudget -eq 0) { '-1' } else { "$ThinkingBudget" }))
+    }
+    if ($ReasoningEffort) { $nativeArgs += @('--reasoning-effort', $ReasoningEffort) }
+    if ($PSBoundParameters.ContainsKey('PreserveThinking')) {
+        $nativeArgs += @('--chat-template-kwargs', (@{preserve_thinking=[bool]$PreserveThinking} | ConvertTo-Json -Compress))
+    }
+    if ($Vision) {
+        if (!$Mmproj) {
+            $folder = Split-Path -Parent $Model
+            $stem = [IO.Path]::GetFileNameWithoutExtension($Model)
+            $exact = @(@((Join-Path $folder "$stem-mmproj.gguf"), (Join-Path $folder "mmproj-$stem.gguf")) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+            $candidates = @(if ($exact.Count) { $exact } else { Get-ChildItem -LiteralPath $folder -File -Filter '*mmproj*.gguf' | ForEach-Object { $_.FullName } })
+            if ($candidates.Count -ne 1) { throw 'Vision requires -Mmproj: no unique adjacent projector was found; select the matching GGUF explicitly' }
+            $Mmproj = $candidates[0]
+        }
+        if (!(Test-Path -LiteralPath $Mmproj -PathType Leaf) -or [IO.Path]::GetExtension($Mmproj) -ne '.gguf') { throw 'Mmproj must be an existing matching GGUF file' }
+        $nativeArgs += @('--mmproj', (Resolve-Path -LiteralPath $Mmproj).Path,
+            $(if ($VisionResidency -eq 'cpu') { '--no-mmproj-offload' } else { '--mmproj-offload' }), '--image-max-tokens', "$VisionTokens")
+    }
 }
 if ($ApiKey) { $nativeArgs += @('--api-key', $ApiKey) }
 if ($ModelAlias) { $nativeArgs += @($(if ($Backend -eq 'ninfer') { '--model-id' } else { '--alias' }), $ModelAlias) }
@@ -281,16 +353,10 @@ if ($LogLevel) {
 if ($ThinkingMode -eq 'off') { $nativeArgs += $(if ($Backend -eq 'ninfer') { '--no-thinking' } else { '--no-think' }) }
 if ($ThinkingMode -eq 'on') { $nativeArgs += '--enable-thinking' }
 $nativeArgs += '--kvmem'
+if ($Backend -eq 'llamacpp') { $nativeArgs += @('--kvmem-block-tokens', "$resolvedBlock") }
 if ($Backend -eq 'llamacpp') { $nativeArgs += $nativeArgsSpec }
 if ($DiskPath) { $nativeArgs += @('--kvmem-disk-path', $DiskPath, '--kvmem-disk-mib', "$DiskMiB") }
-# Use invariant decimals because both native parsers expect a dot.
-if (!$NoLrfu) {
-    $nativeArgs += @('--kvmem-lrfu',
-        '--kvmem-lrfu-lambda', $LrfuLambda.ToString('R', [Globalization.CultureInfo]::InvariantCulture),
-        '--kvmem-lrfu-top-frac', $LrfuTopFraction.ToString('R', [Globalization.CultureInfo]::InvariantCulture))
-}
-if ($NoLrfu) { $nativeArgs += '--no-kvmem-lrfu' }
-$nativeArgs += @('--kvmem-score-agg', $ScoreAggregation)
+$nativeArgs += @(Get-KVMemQueryScoringArgs $PSBoundParameters)
 $nativeArgs += $WorkerArgs
 if ($DryRun) {
     $displayArgs = @($nativeArgs)
@@ -300,6 +366,7 @@ if ($DryRun) {
         } elseif ($displayArgs[$i] -match '^--api-key=') { $displayArgs[$i] = '--api-key=<redacted>' }
     }
     @{ backend = $Backend; argv = @($Worker) + $displayArgs; capabilities = $capabilities
+       token_settings = $tokenPlan
        environment = @{ CUDA_VISIBLE_DEVICES = $Gpu; CUDA_DEVICE_ORDER = 'PCI_BUS_ID' } } |
         ConvertTo-Json -Depth 6
     return

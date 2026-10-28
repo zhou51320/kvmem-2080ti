@@ -47,17 +47,17 @@ static std::vector<float> get(ggml_tensor * t) {
 static std::vector<double> reference_fold(
         const std::vector<float> & initial, const std::vector<float> & key,
         const std::vector<float> & value, const std::vector<float> & gate,
-        const std::vector<float> & beta, int keep) {
+        const std::vector<float> & beta, int keep, int key_heads, int value_heads) {
     std::vector<double> state(initial.begin(), initial.end());
     for (int t = 0; t < keep; ++t) {
-        for (int h = 0; h < 48; ++h) {
-            const double decay = std::exp(double(gate[t * 48 + h]));
-            const float * k = key.data() + (t * 16 + h % 16) * 128;
+        for (int h = 0; h < value_heads; ++h) {
+            const double decay = std::exp(double(gate[t * value_heads + h]));
+            const float * k = key.data() + (t * key_heads + h % key_heads) * 128;
             for (int c = 0; c < 128; ++c) {
                 double * s = state.data() + (h * 128 + c) * 128;
                 double dot = 0;
                 for (int r = 0; r < 128; ++r) dot += decay * s[r] * k[r];
-                const double delta = (value[(t * 48 + h) * 128 + c] - dot) * beta[t * 48 + h];
+                const double delta = (value[(t * value_heads + h) * 128 + c] - dot) * beta[t * value_heads + h];
                 for (int r = 0; r < 128; ++r) s[r] = decay * s[r] + k[r] * delta;
             }
         }
@@ -131,20 +131,21 @@ struct FoldCompletion {
 #endif
 
 static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fold = true, int capacity = 0,
-                         bool async = false) {
+                         bool async = false, int key_heads = 16, int value_heads = 48) {
+    const int channels = (2 * key_heads + value_heads) * 128;
     if (capacity == 0) capacity = tokens;
     auto * ctx = ggml_init({2 * 1024 * 1024, nullptr, true});
     require(ctx != nullptr, "replay context allocation failed");
-    auto * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 128, 16, tokens, 1);
+    auto * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 128, key_heads, tokens, 1);
     auto * k = ggml_dup_tensor(ctx, q);
-    auto * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 128, 48, tokens, 1);
-    auto * g = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 1, 48, tokens, 1);
+    auto * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 128, value_heads, tokens, 1);
+    auto * g = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 1, value_heads, tokens, 1);
     auto * b = ggml_dup_tensor(ctx, g);
-    auto * state_cache = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128 * 128 * 48, 1);
-    auto * s = ggml_reshape_4d(ctx, state_cache, 128, 128, 48, 1);
-    auto * conv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3 * 10240, 1);
-    auto * conv_input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 10240, tokens);
-    const int widths[] = {2048, 6144, 48, 48, 10240};
+    auto * state_cache = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128 * 128 * value_heads, 1);
+    auto * s = ggml_reshape_4d(ctx, state_cache, 128, 128, value_heads, 1);
+    auto * conv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3 * channels, 1);
+    auto * conv_input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, channels, tokens);
+    const int widths[] = {128 * key_heads, 128 * value_heads, value_heads, value_heads, channels};
     ggml_tensor * inputs[] = {k, v, g, b, conv_input};
     ggml_tensor * records[5];
     for (int i = 0; i < 5; ++i) records[i] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, widths[i], capacity);
@@ -182,7 +183,7 @@ static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fo
     const auto original_key = get(k);
     const auto original_value = get(v);
     const auto columns = get(conv_input);
-    require(ggml_backend_cuda_gdn_fold(nullptr, 0, 0, 0, nullptr), "zero Fold must not access descriptors");
+    require(ggml_backend_cuda_gdn_fold(nullptr, 0, 0, 0, key_heads, value_heads, nullptr), "zero Fold must not access descriptors");
 #ifdef KVMEM_TEST_CUDA
     std::unique_ptr<FoldCompletion> completion;
     if (async) completion = std::make_unique<FoldCompletion>(backend);
@@ -220,7 +221,7 @@ static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fo
             if (completion) stream = completion->stream;
 #endif
             require(ggml_backend_cuda_gdn_fold(static_cast<const ggml_cuda_gdn_replay_layer *>(descriptor->data),
-                        1, keep, capacity, stream), "Fold launch failed");
+                        1, keep, capacity, key_heads, value_heads, stream), "Fold launch failed");
 #ifdef KVMEM_TEST_CUDA
             if (completion) completion->order();
 #endif
@@ -233,17 +234,17 @@ static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fo
                 : snapshots.data() + output.size() + (tokens - keep) * initial.size();
             require(std::memcmp(expected, actual.data(), ggml_nbytes(s)) == 0, "Fold state differs from accepted snapshot");
             if (rounds == 1) {
-                const auto oracle = reference_fold(initial, original_key, original_value, gates, betas, keep);
+                const auto oracle = reference_fold(initial, original_key, original_value, gates, betas, keep, key_heads, value_heads);
                 for (size_t i = 0; i < actual.size(); ++i) {
                     require(std::isfinite(actual[i]) && std::fabs(actual[i] - oracle[i]) < 2e-6 + 2e-5 * std::fabs(oracle[i]),
                             "Fold differs from independent FP64 recurrence");
                 }
             }
             const auto actual_conv = get(conv);
-            for (int c = 0; c < 10240; ++c) {
+            for (int c = 0; c < channels; ++c) {
                 for (int i = 0; i < 3; ++i) {
                     const int source = keep + i;
-                    const float expected_conv = source < 3 ? history[c * 3 + source] : columns[(source - 3) * 10240 + c];
+                    const float expected_conv = source < 3 ? history[c * 3 + source] : columns[(source - 3) * channels + c];
                     require(actual_conv[c * 3 + i] == expected_conv, "Fold conv history differs");
                 }
             }
@@ -254,7 +255,7 @@ static void check_replay(ggml_backend_t backend, int tokens, int rounds, bool fo
 #endif
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
-    std::printf("PASS %s: width=%d capacity=%d rounds=%d async=%d\n", fold ? "Record/Fold (all prefixes, rejected NaNs, nonzero state)" : "CPU Record", tokens, capacity, rounds, async);
+    std::printf("PASS %s: width=%d capacity=%d rounds=%d async=%d key_heads=%d value_heads=%d\n", fold ? "Record/Fold (all prefixes, rejected NaNs, nonzero state)" : "CPU Record", tokens, capacity, rounds, async, key_heads, value_heads);
 }
 
 static void check_multilayer(ggml_backend_t backend) {
@@ -309,7 +310,7 @@ static void check_multilayer(ggml_backend_t backend) {
     ggml_backend_tensor_set(descriptors, gpu_layers.data(), 0, ggml_nbytes(descriptors));
     require(ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS, "multilayer reference failed");
     require(ggml_backend_cuda_gdn_fold(static_cast<const ggml_cuda_gdn_replay_layer *>(descriptors->data),
-                count, keep, tokens, nullptr), "multilayer fold failed");
+                count, keep, tokens, 16, 48, nullptr), "multilayer fold failed");
     for (int il = 0; il < count; ++il) {
         const auto & l = layers[il];
         const auto reference = get(l.reference), actual = get(l.s), conv = get(l.conv), input = get(l.input);
@@ -337,6 +338,15 @@ int main(int argc, char ** argv) {
         auto backend = ggml_backend_dev_init(device, nullptr);
         require(backend != nullptr, "GPU backend initialization failed");
         if (argc == 1 || cpu) {
+            // 0.8B/2B and 4B/9B head geometries, including rejected NaNs and all
+            // accepted-prefix lengths. The original 27B coverage remains below.
+            for (int heads : {16, 32}) {
+                for (int width : {1, 2, 3, 4, 5, 6})
+                    check_replay(backend, width, 1, !cpu, 6, false, 16, heads);
+#ifdef KVMEM_TEST_CUDA
+                if (!cpu) check_replay(backend, 4, 1, true, 6, true, 16, heads);
+#endif
+            }
             for (int width : {1, 2, 3, 4, 5, 6}) check_replay(backend, width, 1, !cpu);
             for (int width : {1, 2, 3, 4, 5}) check_replay(backend, width, 1, !cpu, 6);
             if (!cpu) {

@@ -69,9 +69,12 @@ public:
             std::nth_element(ranked.begin(), ranked.begin() + rank, ranked.end());
             threshold = ranked[rank];
         }
+        // The hit fraction gates positive reinforcement only. Dropping an
+        // unselected negative score to zero would reward it relative to a hit
+        // with a less-negative score, reversing relevance with no prior history.
         for (size_t i = 0; i < scores.size(); ++i)
             (*next)[i] = lambda_ * (i < state_.scores->size() ? (*state_.scores)[i] : 0) +
-                (scores[i] >= threshold ? scores[i] : 0);
+                (scores[i] >= threshold ? scores[i] : std::min(scores[i], 0.));
         candidate_ = std::move(next);
     }
     bool commit() noexcept {

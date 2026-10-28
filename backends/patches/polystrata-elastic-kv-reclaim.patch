@@ -1,0 +1,103 @@
+diff --git a/docs/BACKENDS.md b/docs/BACKENDS.md
+index ba183039..0f4a0959 100644
+--- a/docs/BACKENDS.md
++++ b/docs/BACKENDS.md
+@@ -160,6 +160,12 @@ Qualification uses `poly_elastic_test MODEL.gguf [--no-graphs]`: exact native KV
+ across map cycles, full versus narrow workspace logits with fixed expert placement, partial-admission rollback,
+ real cache growth/reclaim, Pressure and bounded Query/replay. These are functional tests, not recall-quality tests.
+ 
++For managed KVMem requests, elastic mode trims unused KV on the first shorter request after prefix/session
++admission. It retains every row of the accepted resident view and room for the current request, rather than
++the previous request's high water. Parked sessions retain their Host-backed history. KV still grows in 4096-row
++steps with 1024 rows of lookahead. `poly_elastic_test MODEL.gguf --kv-reclaim-test` checks accepted KV, recurrent
++state, statistics and restored-session logits across immediate reclamation.
++
+ ## How a backend works
+ 
+ There are two levels.
+diff --git a/src/poly/engine.cpp b/src/poly/engine.cpp
+index f30aa2c2..7b9ce000 100644
+--- a/src/poly/engine.cpp
++++ b/src/poly/engine.cpp
+@@ -854,7 +854,16 @@ size_t Engine::trim_card_kv(int64_t end) {
+     const int64_t before = kv_reach_;
+     kv_reach_ = end;
+     if (kv_.empty() || !exp_ || all_cached()) return 0;
+-    const int64_t rows = kv_rows_for(std::max(end, before));
++    int64_t needed = std::max(end, before);
++#ifdef STRATA_KVMEM
++    // Request admission has already selected/restored the accepted resident view. With elastic
++    // experts, keep that view and this request, not the previous request's physical high water.
++    // Parked sessions have Host copies; restore_prefix/enter call cover before publishing rows.
++    // Unmanaged histories retain the original two-request policy.
++    if (elastic_enabled_ && memory_ && memory_ready_)
++        needed = std::max<int64_t>(std::min<int64_t>(end, cache_capacity()), memory_->visible_tokens());
++#endif
++    const int64_t rows = kv_rows_for(needed);
+     if (rows >= kv_rows_) return 0;
+     OnCard here(device_, split_);
+     ck(cudaDeviceSynchronize(), "the attention cache");
+diff --git a/src/poly/main.cpp b/src/poly/main.cpp
+index 55e3c2c8..6d6bb2f6 100644
+--- a/src/poly/main.cpp
++++ b/src/poly/main.cpp
+@@ -472,8 +472,8 @@ struct Session {
+         if (const size_t freed = engine.trim_kv(n)) {
+             const int had = engine.cached_experts();
+             engine.mind_vram();
+-            std::fprintf(stderr, "strata-poly: the attention caches gave back %.2f GiB that this request and the one "
+-                                 "before do not reach; the expert cache %d -> %d experts\n",
++            std::fprintf(stderr, "strata-poly: the attention caches gave back %.2f GiB beyond the retained "
++                                 "request/view capacity; the expert cache %d -> %d experts\n",
+                          double(freed) / double(1ull << 30), had, engine.cached_experts());
+         }
+         asked += n;
+diff --git a/tools/poly_elastic_test.cpp b/tools/poly_elastic_test.cpp
+index 36111376..d1a21289 100644
+--- a/tools/poly_elastic_test.cpp
++++ b/tools/poly_elastic_test.cpp
+@@ -27,6 +27,32 @@ struct KvmemTestAccess {
+     }
+ };
+ struct ElasticTestAccess {
++    static void reclaim_test(Engine& e) {
++        std::vector<int32_t> prompt(128,1000);
++        for(int i=0;i<36;++i)e.eval(prompt.data(),128,false);
++        const auto cp=e.memory().checkpoint();
++        const auto kv=KvmemTestAccess::kv(e.memory());
++        const auto means=KvmemTestAccess::means(e.memory());
++        e.cover(e.cache_capacity());
++        check(e.trim_kv(64)>0,"first short trim did not reclaim high water");
++        check(e.kv_rows_>=e.memory().visible_tokens(),"trim unmapped accepted resident rows");
++        check(KvmemTestAccess::kv(e.memory())==kv,"trim changed resident KV");
++        check(KvmemTestAccess::means(e.memory())==means,"trim changed accepted statistics");
++        check(e.memory().checkpoint().state==cp.state,"trim changed recurrent state");
++        freeze(e,true);
++        const int32_t token=1000;e.eval(&token,1,true);
++        const std::vector<float> expected(e.logits(),e.logits()+e.n_vocab());
++        e.memory().restore_prefix(cp);
++        auto parked=e.memory().park(cp);e.reset();
++        check(e.trim_kv(64)>0,"first new short session retained long KV");
++        check(e.kv_rows_==4096,"short session failed to return to initial KV extent");
++        e.memory().enter(std::move(parked),cp);
++        check(KvmemTestAccess::kv(e.memory())==kv,"session restore lost trimmed KV");
++        e.eval(&token,1,true);
++        check(std::memcmp(expected.data(),e.logits(),expected.size()*sizeof(float))==0,"trim/park/restore changed logits");
++        freeze(e,false);verify(e);
++        std::cout<<"PASS first_request_KV_reclaim resident_KV statistics recurrent_state session_restore logits\n";
++    }
+     static void workspace(Engine& e, bool full) { e.elastic_workspace(full); }
+     static void freeze(Engine& e, bool frozen) { e.freeze_experts_ = frozen; }
+     static void enabled(Engine& e, bool on) { e.elastic_enabled_ = on; }
+@@ -65,8 +91,11 @@ int main(int argc, char** argv) {
+         o.memory.sink=64;o.memory.recent=64;o.memory.verify=true;
+         o.kv_format=KvFmt::kQ8_0;
+         o.graphs=!(argc>2 && std::string(argv[2])=="--no-graphs");
++        const bool reclaim=argc>2 && std::string(argv[2])=="--kv-reclaim-test";
++        if(reclaim){o.max_context=262144;o.prompt_batch=512;o.memory.budget=32768;o.memory.reserve=2048;}
+         auto e=Engine::open(o);
+         ElasticTestAccess::verify(*e);
++        if(reclaim){ElasticTestAccess::reclaim_test(*e);return 0;}
+         std::vector<int32_t> prompt(128);for(size_t i=0;i<prompt.size();++i)prompt[i]=100+int(i%32);
+         e->eval(prompt.data(),64,false);
+         const auto cp=e->memory().checkpoint();

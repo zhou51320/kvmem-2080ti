@@ -1,0 +1,414 @@
+diff --git a/src/calibration/device_calibration.cu b/src/calibration/device_calibration.cu
+index b4f00a3b5d5a6edb2738730ed9a6f877486aaec7..27511dfa9b9bd43278a9556dd63cf90c9d344fa9 100644
+--- a/src/calibration/device_calibration.cu
++++ b/src/calibration/device_calibration.cu
+@@ -128,13 +128,17 @@ SyntheticWeight row_split_weight(QType qtype, std::int32_t n, std::int32_t k) {
+     case QType::T2_G128_FP16:
+         group = 128;
+         break;
++    case QType::PTQ1_G128_FP16:
++        group = 128;
++        high_bytes = 2;
++        break;
+     default:
+         throw std::invalid_argument("calibration: unsupported synthetic weight format");
+     }
+     const auto align    = [](std::uint64_t value) { return (value + 255) / 256 * 256; };
+     const std::uint64_t groups =
+         static_cast<std::uint64_t>(n) * static_cast<std::uint64_t>(k / group);
+-    const std::uint64_t low_bytes    = groups * 32;
++    const std::uint64_t low_bytes    = groups * (qtype == QType::PTQ1_G128_FP16 ? 24 : 32);
+     const std::uint64_t high_total   = groups * static_cast<std::uint64_t>(high_bytes);
+     const std::uint64_t high_offset  = align(low_bytes);
+     const std::uint64_t scale_offset = high_offset + align(high_total);
+@@ -465,6 +469,40 @@ void calibrate_ternary(ops::DeviceRouteProfile& profile, Timer& timer,
+     }
+ }
+ 
++// PTQ1's compact planes and 128-row kernel have their own measurements. A T2
++// profile cannot steer this family, even when both artifacts describe Bonsai.
++void calibrate_ptq1(ops::DeviceRouteProfile& profile, Timer& timer,
++                    const CalibrationOptions& options) {
++    constexpr std::int32_t max_tokens = 512;
++    for (const auto [n, k] : {std::pair{4096, 5120}, std::pair{12288, 5120},
++                             std::pair{7168, 5120}, std::pair{5120, 6144},
++                             std::pair{34816, 5120}, std::pair{5120, 17408},
++                             std::pair{248320, 5120}}) {
++        const std::string key = "ptq1_i8_tile/" + std::to_string(n) + "x" + std::to_string(k);
++        if (!options.only.empty() && key.rfind(options.only, 0) != 0) { continue; }
++        auto weight = row_split_weight(QType::PTQ1_G128_FP16, n, k);
++        auto input = bf16_buffer(static_cast<std::size_t>(k) * max_tokens);
++        auto output = bf16_buffer(static_cast<std::size_t>(n) * max_tokens);
++        WorkspaceArena workspace(ops::detail::t2_a8_workspace_bytes(
++            n, k, ops::LinearPolicy::AllowA8Int, max_tokens, true));
++        const Family family{key, {33, 64, 65, 128, 256, 512},
++            [&](std::int32_t cols, cudaStream_t stream) {
++                auto scope = workspace.scope();
++                Tensor x(input.p, DType::BF16, {k, cols});
++                Tensor y(output.p, DType::BF16, {n, cols});
++                ops::detail::t2_a8_linear(x, weight.weight, y, workspace, stream);
++            },
++            [&](std::int32_t cols) {
++                return std::pair<const void*, std::size_t>{output.p, static_cast<std::size_t>(n) * cols};
++            }, {}};
++        auto bands = sweep(family, timer, options);
++        if (!bands.empty()) {
++            profile.routes[key] = std::move(bands);
++            ops::install_device_route_profile(std::make_shared<const ops::DeviceRouteProfile>(profile));
++        }
++    }
++}
++
+ // Qwen3.6/3.8-27B groupwise-int fused projections at their registered shapes.
+ void calibrate_groupwise(ops::DeviceRouteProfile& profile, Timer& timer,
+                          const CalibrationOptions& options) {
+@@ -1209,6 +1247,7 @@ ops::DeviceRouteProfile calibrate_device_routes(const CalibrationOptions& option
+     const bool projections = !ops::current_device_volta();
+     const bool attention   = projections && options.attention;
+     if (projections && options.ternary) { calibrate_ternary(profile, timer, options); }
++    if (projections && options.ternary) { calibrate_ptq1(profile, timer, options); }
+     if (projections && options.groupwise) {
+         calibrate_groupwise(profile, timer, options);
+         calibrate_cublas_prefill(profile, timer, options);
+diff --git a/src/calibration/route_catalog.cpp b/src/calibration/route_catalog.cpp
+index 33327bc8ca848f6fb85539f1cc6f7999c267df50..fcc8360b6ddcfaef7fb7827e911851d879b754aa 100644
+--- a/src/calibration/route_catalog.cpp
++++ b/src/calibration/route_catalog.cpp
+@@ -38,6 +38,10 @@ std::vector<RouteCatalogEntry> build_catalog(ops::DeviceTier tier) {
+             add(std::string("t2_i8_small/") + shape, t2_small);
+         }
+         add("t2_i8_route", {"small", "tile"});
++        for (const char* shape : {"4096x5120", "12288x5120", "7168x5120", "5120x6144",
++                                  "34816x5120", "5120x17408", "248320x5120"}) {
++            add(std::string("ptq1_i8_tile/") + shape, {"rows", "cols"});
++        }
+ 
+         // Qwen3.6/3.8 groupwise-int fused projections, and the switch of each onto the unified
+         // templates.
+diff --git a/src/models/qwen3_5/execution/parameters.cpp b/src/models/qwen3_5/execution/parameters.cpp
+index 22daef1c25ad17232ac1c4fa0bc0a56e2b0ab6fd..95efa85d8cd3f9b53b1ee4a0917a59f2cd3927dc 100644
+--- a/src/models/qwen3_5/execution/parameters.cpp
++++ b/src/models/qwen3_5/execution/parameters.cpp
+@@ -31,6 +31,12 @@ public:
+     // rather than per format, because a registered route exists only for the profiles a kernel was
+     // written for; any other projection keeps what its Use permits.
+     void integer_route(LinearParameters& p, QType format, std::int32_t n, std::int32_t k) const {
++        if (model_.options().prefill_a8 && format == QType::T2_G128_FP16 &&
++            p.weight.qtype == QType::PTQ1_G128_FP16 && p.weight.n == n && p.weight.k == k &&
++            p.policy == ops::LinearPolicy::A16Only) {
++            p.policy = ops::LinearPolicy::AllowA8Int;
++            return;
++        }
+ #if defined(NINFER_SM8X_COMPAT)
+         if (!model_.options().prefill_a8) { return; }
+         if (p.policy == ops::LinearPolicy::A16Only && (p.weight.qtype == format || (is_ternary(format) && is_ternary(p.weight.qtype))) &&
+@@ -51,6 +57,18 @@ public:
+     void integer_route_pair(ops::ProjectionWeights& projection, QType first_format,
+                             std::int32_t first_rows, QType second_format, std::int32_t second_rows,
+                             std::int32_t input_rows) const {
++        if (model_.options().prefill_a8 && first_format == QType::T2_G128_FP16 &&
++            second_format == QType::T2_G128_FP16) {
++            auto* pair = std::get_if<ops::PairedProjectionWeights>(&projection);
++            if (pair != nullptr && pair->policy == ops::LinearPolicy::A16Only &&
++                pair->first.qtype == QType::PTQ1_G128_FP16 &&
++                pair->second.qtype == QType::PTQ1_G128_FP16 &&
++                pair->first.n == first_rows && pair->second.n == second_rows &&
++                pair->first.k == input_rows && pair->second.k == input_rows) {
++                pair->policy = ops::LinearPolicy::AllowA8Int;
++                return;
++            }
++        }
+ #if defined(NINFER_SM8X_COMPAT)
+         if (!model_.options().prefill_a8) { return; }
+         auto* pair = std::get_if<ops::PairedProjectionWeights>(&projection);
+diff --git a/src/ops/linear/linear.cpp b/src/ops/linear/linear.cpp
+index 5f62cbb58ec237d2b27657c4a9c6b893296f24b9..5b2ade3fea9e10dea6da157ab4033b45e9066294 100644
+--- a/src/ops/linear/linear.cpp
++++ b/src/ops/linear/linear.cpp
+@@ -5,6 +5,7 @@
+ #include "ops/linear/fp8/fp8_dispatch.h"
+ #include "ops/linear/gguf/gguf_linear.h"
+ #include "ops/linear/nvfp4/nvfp4_dispatch.h"
++#include "ops/linear/ptq1/ptq1_dispatch.h"
+ #include "ops/linear/q4/q4_dispatch.h"
+ #include "ops/linear/q5/q5_dispatch.h"
+ #include "ops/linear/q6/q6_dispatch.h"
+@@ -130,7 +131,7 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
+             detail::t2_a8_linear(x, w, out, *workspace, stream);
+             return;
+         }
+-        detail::t2_dispatch(x, w, out, policy, stream);
++        detail::ptq1_dispatch(x, w, out, policy, stream);
+         return;
+     case QType::T2_G128_FP16:
+         if (workspace != nullptr && detail::t2_a8_admits(policy) &&
+@@ -178,8 +179,8 @@ std::size_t linear_route_workspace_bytes(QType qtype, std::int32_t output_rows,
+         (void)detail::select_q8_launch(output_rows, input_rows, max_tokens, policy);
+         return 0;
+     case QType::PTQ1_G128_FP16:
+-        (void)detail::select_t2_launch(output_rows, input_rows, min_tokens, policy);
+-        (void)detail::select_t2_launch(output_rows, input_rows, max_tokens, policy);
++        detail::validate_ptq1_shape(output_rows, input_rows, min_tokens, policy);
++        detail::validate_ptq1_shape(output_rows, input_rows, max_tokens, policy);
+         return detail::t2_a8_workspace_bytes(output_rows, input_rows, policy, max_tokens, true);
+     case QType::T2_G128_FP16:
+         (void)detail::select_t2_launch(output_rows, input_rows, min_tokens, policy);
+diff --git a/src/ops/linear/ptq1/ptq1_dispatch.cpp b/src/ops/linear/ptq1/ptq1_dispatch.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..f17e34e79d1eb6077110aaebbdd021fd0b728154
+--- /dev/null
++++ b/src/ops/linear/ptq1/ptq1_dispatch.cpp
+@@ -0,0 +1,50 @@
++#include "ops/linear/ptq1/ptq1_dispatch.h"
++
++#include <stdexcept>
++
++namespace ninfer::ops::detail {
++
++bool ptq1_a8_shape_supported(std::int32_t n, std::int32_t k) {
++    return n > 0 && n % 128 == 0 && (k == 5120 || k == 6144 || k == 17408);
++}
++
++void validate_ptq1_shape(std::int32_t n, std::int32_t k, std::int32_t tokens, LinearPolicy policy) {
++    const bool shape = k == 5120
++        ? n == 1024 || n == 4096 || n == 6144 || n == 7168 ||
++          n == 12288 || n == 14336 || n == 16384 || n == 34816 ||
++          n == 131072 || n == 248320
++        : (k == 6144 || k == 17408) && n == 5120;
++    if (!shape || tokens <= 0) {
++        throw std::invalid_argument("PTQ1 linear: unsupported shape or token count");
++    }
++    switch (policy) {
++    case LinearPolicy::A16Only:
++    case LinearPolicy::AllowA8:
++    case LinearPolicy::AllowA8Int:
++    case LinearPolicy::AllowA8IntDecode:
++    case LinearPolicy::AllowPrefillCublas:
++        return;
++    case LinearPolicy::AllowA4:
++        break;
++    }
++    throw std::invalid_argument("PTQ1 linear: unsupported policy");
++}
++
++void ptq1_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
++                   cudaStream_t stream) {
++    // Workspace planning and execution share this contract without consulting T2 routes.
++    validate_ptq1_shape(w.n, w.k, x.ne[1], policy);
++    if (w.qtype != QType::PTQ1_G128_FP16 || w.layout != QuantLayout::RowSplit ||
++        w.qdata == nullptr || w.scales == nullptr || w.qhigh == nullptr ||
++        w.high_plane_bytes == 0 || w.group != 128 || w.group_size != 128 ||
++        w.scale_dtype != DType::FP16 || w.padded_shape[1] != w.k) {
++        throw std::invalid_argument("PTQ1 linear: unsupported shape, policy or planes");
++    }
++    if (x.ne[1] <= 16) {
++        launch_t2_small_t_v2_ptq1(x, w, out, stream);
++    } else {
++        launch_t2_ptq1_wide_t(x, w, out, out.ne[0], stream);
++    }
++}
++
++} // namespace ninfer::ops::detail
+diff --git a/src/ops/linear/ptq1/ptq1_dispatch.h b/src/ops/linear/ptq1/ptq1_dispatch.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b75d3a589bdef1e9855ae0a8e8672332d1807b5
+--- /dev/null
++++ b/src/ops/linear/ptq1/ptq1_dispatch.h
+@@ -0,0 +1,14 @@
++#pragma once
++
++#include "ninfer/ops/linear.h"
++#include "ops/linear/t2/t2_launch.h"
++
++namespace ninfer::ops::detail {
++
++inline constexpr std::int32_t kPtq1TileMinTokens = 33;
++[[nodiscard]] bool ptq1_a8_shape_supported(std::int32_t n, std::int32_t k);
++void validate_ptq1_shape(std::int32_t n, std::int32_t k, std::int32_t tokens, LinearPolicy policy);
++void ptq1_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
++                   cudaStream_t stream);
++
++} // namespace ninfer::ops::detail
+diff --git a/src/ops/linear/t2/sources.cmake b/src/ops/linear/t2/sources.cmake
+index ffeb63cfb77ff752065be569bae40bdc71de6b71..f77dc200dd7f80deeec10e38179cc795062125b1 100644
+--- a/src/ops/linear/t2/sources.cmake
++++ b/src/ops/linear/t2/sources.cmake
+@@ -1,6 +1,7 @@
+ target_sources(ninfer_ops PRIVATE
+   "${CMAKE_CURRENT_LIST_DIR}/t2_a8.cu"
+   "${CMAKE_CURRENT_LIST_DIR}/t2_dispatch.cpp"
++  "${CMAKE_CURRENT_LIST_DIR}/../ptq1/ptq1_dispatch.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/t2_ptq1_wide_t.cu"
+   "${CMAKE_CURRENT_LIST_DIR}/t2_rowsplit_gemm_mma.cu"
+   "${CMAKE_CURRENT_LIST_DIR}/t2_rowsplit_gemm_simt.cu"
+diff --git a/src/ops/linear/t2/t2_a8.cu b/src/ops/linear/t2/t2_a8.cu
+index 5f40f69bd50396cdebb99520db82c174415bb175..acfa9b1608af19ed6b8436c79ff23a7fe89d99db 100644
+--- a/src/ops/linear/t2/t2_a8.cu
++++ b/src/ops/linear/t2/t2_a8.cu
+@@ -315,11 +315,12 @@ bool tile_rows_fast(std::int32_t output_rows, std::int32_t columns) {
+ template <std::int32_t kCols, class Epilogue>
+ void tile_gemm(const T2A8Activations& x, const Weight& w, Epilogue epilogue, cudaStream_t stream) {
+     if (w.qtype == QType::PTQ1_G128_FP16) {
+-        // PTQ1_0's tile: its own schedule (64 rows, a single-buffered int8 plane), and the raw high
++        // PTQ1_0's tile: its own schedule (128 rows, a single-buffered int8 plane), and the raw high
+         // plane handed to the kernel -- the only argument the T2 instantiation does not take.
+         using C                      = T2PrefillI8Ptq1;
+         const std::int32_t columns   = tile_columns(x.tokens);
+-        const bool rows_fast         = tile_rows_fast(w.n, columns);
++        const std::string key = "ptq1_i8_tile/" + std::to_string(w.n) + "x" + std::to_string(w.k);
++        const bool rows_fast = device_route_schedule(key, x.tokens) == "rows";
+         const unsigned column_blocks = static_cast<unsigned>(columns / C::kColumns);
+         const unsigned row_blocks    = static_cast<unsigned>(w.n / C::kRows);
+         const dim3 grid = rows_fast ? dim3(row_blocks, column_blocks) : dim3(column_blocks, row_blocks);
+@@ -351,7 +352,7 @@ void project(const T2A8Activations& x, const Weight& w, Epilogue epilogue, cudaS
+     if (!x.ptq1_tile && route(x.tokens) == Route::SmallT) {
+         return small_route<Epilogue>(x, {&w, epilogue}, nullptr, stream);
+     }
+-    if (prefill_tile()) {
++    if (x.ptq1_tile || prefill_tile()) {
+         by_width(w.k, [&]<std::int32_t kCols>() { tile_gemm<kCols>(x, w, epilogue, stream); });
+         return;
+     }
+@@ -417,17 +418,17 @@ bool t2_a8_supported(const Weight& w, std::int32_t tokens) {
+     const bool ptq1 = w.qtype == QType::PTQ1_G128_FP16;
+     const bool admitted = ptq1 ? w.group == 128 && w.group_size == 128 &&
+                                      w.scale_dtype == DType::FP16 &&
+-                                     prefill_tile() && tokens >= kPtq1TileMinTokens &&
++                                     tokens >= kPtq1TileMinTokens &&
+                                      w.qhigh != nullptr && w.high_plane_bytes != 0
+                               : w.qtype == QType::T2_G128_FP16 && route(tokens) != Route::None;
+     return admitted && w.layout == QuantLayout::RowSplit && w.qdata != nullptr &&
+            w.scales != nullptr && w.padded_shape[1] == w.k &&
+-           t2_a8_shape_supported(w.n, w.k);
++           (ptq1 ? ptq1_a8_shape_supported(w.n, w.k) : t2_a8_shape_supported(w.n, w.k));
+ }
+ 
+ std::size_t t2_a8_activation_bytes(std::int32_t input_rows, std::int32_t max_tokens, bool ptq1_tile) {
+     if (ptq1_tile) {
+-        if (!prefill_tile() || max_tokens < kPtq1TileMinTokens) { return 0; }
++        if (max_tokens < kPtq1TileMinTokens) { return 0; }
+         WorkspaceLayoutBuilder layout;
+         (void)t2_a8_layout_activations(layout, input_rows, max_tokens, true);
+         return layout.peak_bytes(1);
+@@ -482,14 +483,15 @@ std::size_t t2_a8_activation_bytes(std::int32_t input_rows, std::int32_t max_tok
+ 
+ std::size_t t2_a8_workspace_bytes(std::int32_t output_rows, std::int32_t input_rows,
+                                   LinearPolicy policy, std::int32_t max_tokens, bool ptq1_tile) {
+-    if (!t2_a8_admits(policy) || !t2_a8_shape_supported(output_rows, input_rows)) { return 0; }
++    if (!t2_a8_admits(policy) || !(ptq1_tile ? ptq1_a8_shape_supported(output_rows, input_rows)
++                                           : t2_a8_shape_supported(output_rows, input_rows))) { return 0; }
+     return t2_a8_activation_bytes(input_rows, max_tokens, ptq1_tile);
+ }
+ 
+ bool t2_a8_layout_activations(WorkspaceLayoutBuilder& layout, std::int32_t input_rows,
+                               std::int32_t tokens, bool ptq1_tile) {
+     if (ptq1_tile) {
+-        if (!prefill_tile() || tokens < kPtq1TileMinTokens) { return false; }
++        if (tokens < kPtq1TileMinTokens) { return false; }
+         const auto columns = static_cast<std::size_t>(tile_columns(tokens));
+         (void)layout.alloc_bytes(columns * input_rows);
+         (void)layout.alloc_bytes(columns * (input_rows / T2PrefillI8::kGroupK) * sizeof(__half));
+@@ -514,8 +516,10 @@ T2A8Activations t2_a8_quantize(const Tensor& x, WorkspaceArena& workspace, cudaS
+     const std::int32_t input_rows = x.ne[0];
+     const std::int32_t tokens     = x.ne[1];
+     if (x.dtype != DType::BF16 || x.data == nullptr || !x.is_contiguous() || x.ne[2] != 1 ||
+-        x.ne[3] != 1 || (ptq1_tile ? !prefill_tile() || tokens < kPtq1TileMinTokens
+-                                                : route(tokens) == Route::None) || !t2_a8_shape_supported(T2PrefillI8::kRows, input_rows)) {
++        x.ne[3] != 1 || (ptq1_tile ? tokens < kPtq1TileMinTokens
++                                                : route(tokens) == Route::None) ||
++        !(ptq1_tile ? ptq1_a8_shape_supported(T2PrefillI8Ptq1::kRows, input_rows)
++                    : t2_a8_shape_supported(T2PrefillI8::kRows, input_rows))) {
+         throw std::invalid_argument("t2 a8: x must be a contiguous BF16 [K, T] of a registered K");
+     }
+     if (!ptq1_tile && route(tokens) == Route::SmallT) {
+@@ -536,7 +540,7 @@ T2A8Activations t2_a8_quantize(const Tensor& x, WorkspaceArena& workspace, cudaS
+         CUDA_CHECK(cudaGetLastError());
+         return {code_data, scale_data, tokens, input_rows, ptq1_tile};
+     }
+-    if (prefill_tile()) {
++    if (ptq1_tile || prefill_tile()) {
+         using C                    = T2PrefillI8;
+         const std::int32_t columns = tile_columns(tokens);
+         const std::size_t count    = static_cast<std::size_t>(columns);
+diff --git a/src/ops/linear/t2/t2_a8.h b/src/ops/linear/t2/t2_a8.h
+index bd09c2ab1b5ccf95442e293437d1df8e6f076fbb..5c87b31defc6720f504eac1c50a9adb9198d5ed8 100644
+--- a/src/ops/linear/t2/t2_a8.h
++++ b/src/ops/linear/t2/t2_a8.h
+@@ -12,6 +12,7 @@
+ #include "core/tensor.h"
+ #include "core/weight.h"
+ #include "ninfer/ops/linear.h"
++#include "ops/linear/ptq1/ptq1_dispatch.h"
+ 
+ #include <cuda_fp16.h>
+ #include <cuda_runtime.h>
+@@ -22,7 +23,6 @@
+ namespace ninfer::ops::detail {
+ 
+ inline constexpr std::int32_t kT2A8MinTokens = 64;
+-inline constexpr std::int32_t kPtq1TileMinTokens = 33;
+ // The widths the small-T kernel takes by default; NINFER_T2_I8_SMALL=off|lo,hi overrides them.
+ // Against the 128x64 prefill tile the small-T launches stop paying from 96 columns on the RTX 3090
+ // (a GDN layer's four projections: 790 vs 918 us at 96, 1091 vs 1840 us at 192; even at 64).
+diff --git a/src/ops/linear/t2/t2_dispatch.cpp b/src/ops/linear/t2/t2_dispatch.cpp
+index 48766aabbd8fa98e4c584e3038183b33d91e2e63..49a61e4e9365f3c910364e8dd69b66c8e23c41ab 100644
+--- a/src/ops/linear/t2/t2_dispatch.cpp
++++ b/src/ops/linear/t2/t2_dispatch.cpp
+@@ -1,4 +1,5 @@
+ #include "ops/linear/t2/t2_dispatch.h"
++#include "ops/linear/ptq1/ptq1_dispatch.h"
+ 
+ #include <cstdlib>
+ #include <stdexcept>
+@@ -91,16 +92,7 @@ void t2_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy pol
+         throw std::invalid_argument("t2 linear: requires a row-split weight");
+     }
+     if (w.qtype == QType::PTQ1_G128_FP16) {
+-        (void)select_t2_launch(w.n, w.k, x.ne[1], policy);
+-        if (w.qhigh == nullptr || w.high_plane_bytes == 0 || w.group != 128 ||
+-            w.scale_dtype != DType::FP16 || w.padded_shape[1] != w.k) {
+-            throw std::invalid_argument("PTQ1 linear: invalid planes or group geometry");
+-        }
+-        if (x.ne[1] <= 16) {
+-            launch_t2_small_t_v2_ptq1(x, w, out, stream);
+-        } else {
+-            launch_t2_ptq1_wide_t(x, w, out, out.ne[0], stream);
+-        }
++        ptq1_dispatch(x, w, out, policy, stream);
+         return;
+     }
+     const T2Launch launch = select_t2_launch(w.n, w.k, x.ne[1], policy);
+diff --git a/tests/ops/linear/test_ptq1_a8.cpp b/tests/ops/linear/test_ptq1_a8.cpp
+index 1c9eeb9b465bc02aab45a48453a41fff082385e7..2198c0fcd2024c2ffa0cf213626a0ef7101d1a88 100644
+--- a/tests/ops/linear/test_ptq1_a8.cpp
++++ b/tests/ops/linear/test_ptq1_a8.cpp
+@@ -1,4 +1,5 @@
+ #include "ops/linear/linear_test_common.h"
++#include "ops/linear/ptq1/ptq1_dispatch.h"
+ 
+ #include <array>
+ #include <exception>
+@@ -18,9 +19,7 @@ constexpr Invocation a8(std::int32_t t) {
+     return {t, CallForm::Policy, ops::LinearPolicy::AllowA8Int};
+ }
+ 
+-// The ternary integer-activation routes through one policy: the small-T kernel (1..192 tokens, in
+-// launches of one, two and four column tiles) and above it the prefill GEMM, which pads T to its
+-// cheapest tile width inside.
++// PTQ1 keeps A16 below 33 tokens and uses its own padded INT8 tile above that boundary.
+ int ptq1_a8_conformance() {
+     int failures = 0;
+ 
+@@ -56,6 +55,12 @@ int main() {
+     }
+ 
+     try {
++        if (!ops::detail::ptq1_a8_shape_supported(128, 5120) ||
++            ops::detail::ptq1_a8_shape_supported(64, 5120) ||
++            ops::detail::ptq1_a8_shape_supported(129, 5120) ||
++            ops::detail::ptq1_a8_shape_supported(128, 4096)) {
++            throw std::runtime_error("PTQ1 tile shape admission mismatch");
++        }
+         const int failures = ptq1_a8_conformance();
+         std::cout << (failures == 0 ? "OK" : "FAIL") << " PTQ1_A8 Linear\n";
+         return failures == 0 ? 0 : 1;

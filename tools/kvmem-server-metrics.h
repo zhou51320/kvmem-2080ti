@@ -21,6 +21,9 @@ struct kvmem_request_metrics {
     std::vector<uint64_t> accepted_per_position;
     nlohmann::json speculative = nullptr;
     bool first_token = false, accounted = false;
+    int64_t window_start_us = 0, live_sample_us = 0, live_window_us = 0;
+    uint64_t window_tokens = 0;
+    double live_tps = 0;
     void start(int64_t now_us) { native.t_start = now_us; }
     void prefilled(uint64_t prompt, uint64_t cached, int64_t now_us) {
         native.n_prompt_cached = std::min(prompt, cached);
@@ -28,7 +31,20 @@ struct kvmem_request_metrics {
         native.t_prompt_last = now_us;
     }
     void token(uint64_t count, int64_t sampled_us) {
-        if (!first_token) { first_token = true; native.t_prompt_last = sampled_us; }
+        if (!first_token) {
+            first_token = true;
+            native.t_prompt_last = sampled_us;
+            window_start_us = sampled_us;
+            window_tokens = count;
+        }
+        const int64_t elapsed = sampled_us - window_start_us;
+        if (elapsed >= 3000000 && count >= window_tokens) {
+            live_window_us = elapsed;
+            live_tps = 1e6 * double(count - window_tokens) / double(elapsed);
+            live_sample_us = sampled_us;
+            window_start_us = sampled_us;
+            window_tokens = count;
+        }
         native.n_gen = count;
         native.t_gen_last = sampled_us;
     }

@@ -151,7 +151,7 @@ try:
                   ready['sources']['--model'] == 'env:LLAMA_ARG_MODEL' and ready['sources']['--ui'] == 'cli')
             check('auth sources and count', ready['auth'] == {'enabled': True, 'key_count': 4} and
                   ready['sources']['--api-key'] == ['env:LLAMA_API_KEY', 'cli'])
-            check('output limit diagnostics', ready['n_predict'] == -1 and ready['default_max_tokens'] == 4096)
+            check('output limit diagnostics', ready['n_predict'] == -1 and ready['default_max_tokens'] == -1)
             check('startup logs redact keys', all(k not in text for k in ['env-secret', 'cli-secret', 'file-env-secret', 'file-cli-secret']))
             with socket.socket() as occupied:
                 if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):

@@ -30,6 +30,19 @@ struct CliOptions {
     std::string payload_disk_dir;
     double lrfu_lambda = 0.5, lrfu_top_fraction = 0.9;
     int score_agg = 0;
+    QueryScorer query_scorer = QueryScorer::PageSoftmax;
+    double graph_alpha = 0.2;
+    bool score_agg_set = false, lrfu_set = false, graph_alpha_set = false, lrfu_tuning_set = false;
+
+    void resolve_query_scoring() {
+        const bool cosine = query_scorer == QueryScorer::MeanQCosine;
+        if (!score_agg_set) score_agg = cosine ? 1 : 0;
+        if (!lrfu_set) lrfu = cosine;
+        if (!graph_alpha_set) graph_alpha = cosine ? 0.0 : 0.2;
+        validate_query_scoring(query_scorer, score_agg, graph_alpha);
+        if (lrfu_tuning_set && !lrfu)
+            throw std::invalid_argument("LRFU tuning requires enabled LRFU");
+    }
     bool budget_set = false, sessions_set = false, auxiliary_set = false;
 
     static uint32_t integer(const std::string & name, const char * value, uint32_t minimum) {
@@ -73,11 +86,14 @@ struct CliOptions {
             if (payload_disk_dir.empty()) throw std::invalid_argument(arg + " must not be empty");
         } else if (arg == "--kvmem-lrfu" || arg == "--no-kvmem-lrfu") {
             lrfu = arg == "--kvmem-lrfu";
+            lrfu_set = true;
             return true;
         }
-        else if (arg == "--kvmem-lrfu-lambda") lrfu_lambda = parse_lrfu_real(need(arg.c_str()), true);
-        else if (arg == "--kvmem-lrfu-top-frac") lrfu_top_fraction = parse_lrfu_real(need(arg.c_str()), false);
-        else if (arg == "--kvmem-score-agg") score_agg = parse_score_aggregation(need(arg.c_str()));
+        else if (arg == "--kvmem-query-scorer") query_scorer = parse_query_scorer(need(arg.c_str()));
+        else if (arg == "--kvmem-graph-alpha") { graph_alpha = parse_graph_alpha(need(arg.c_str())); graph_alpha_set = true; }
+        else if (arg == "--kvmem-lrfu-lambda") { lrfu_lambda = parse_lrfu_real(need(arg.c_str()), true); lrfu_tuning_set = true; }
+        else if (arg == "--kvmem-lrfu-top-frac") { lrfu_top_fraction = parse_lrfu_real(need(arg.c_str()), false); lrfu_tuning_set = true; }
+        else if (arg == "--kvmem-score-agg") { score_agg = parse_score_aggregation(need(arg.c_str())); score_agg_set = true; }
         else return false;
         auxiliary_set = true;
         return true;
@@ -92,6 +108,7 @@ struct CliOptions {
         if (payload_disk_dir.empty() != (payload_disk_bytes == 0))
             throw std::invalid_argument("KVMem SSD requires a positive --kvmem-disk-mib and --kvmem-disk-path together; omit the path when disabled");
         if (!enabled) return;
+        resolve_query_scoring();
         if (!budget) budget = default_budget;
         if (!gen_reserve) gen_reserve = default_reserve;
         if (!payload_host_bytes) payload_host_bytes = default_host_bytes;

@@ -1,0 +1,765 @@
+diff --git a/include/strata/poly/kernels.hpp b/include/strata/poly/kernels.hpp
+index 27eb6fc0..8b77ad8d 100644
+--- a/include/strata/poly/kernels.hpp
++++ b/include/strata/poly/kernels.hpp
+@@ -229,7 +229,7 @@ void head_norm_rope_capture(const float* x, int x_stride, const float* w, float*
+                            void* stream, const float* freq = nullptr, const int32_t* axes = nullptr,
+                            int sections = 1, const long long* at = nullptr);
+ void kvmem_key_sums(const float* normalized, float* sums, int width, int rows, int64_t first,
+-                    int64_t capture_first, int groups, void* stream, const long long* at = nullptr);
++                    int64_t capture_first, int groups, int block_tokens, void* stream, const long long* at = nullptr);
+ void kvmem_query_sum(const float* normalized, float* sum, int width, int first, int last, void* stream);
+ /// An attention cache stored as ggml Q8_0: a row is `n` int8 codes and `n / 32` fp16 scales with
+ /// `n = kv_heads * dim`, row-major (`codes[row * n + blk * 32 + j]`, `scales[row * (n / 32) + blk]`).
+diff --git a/src/poly/kernels.cu b/src/poly/kernels.cu
+index b5ad3f2f..1e6fb31d 100644
+--- a/src/poly/kernels.cu
++++ b/src/poly/kernels.cu
+@@ -1129,16 +1129,17 @@ __global__ void head_norm_rope_kernel(const float* __restrict__ x, int x_stride,
+     }
+ }
+ 
++template<int BlockTokens>
+ __global__ void kvmem_key_sums_kernel(const float* __restrict__ normalized, float* __restrict__ sums,
+                                      int width, int rows, long long first, long long capture_first, int groups,
+                                      const long long* __restrict__ at) {
+     const int d = blockIdx.x * blockDim.x + threadIdx.x;
+     if (d >= width) return;
+     if (at) capture_first = first = *at;
+-    const long long block = first / 64 + blockIdx.y;
+-    const int lo = int(max(0LL, block * 64 - first));
+-    const int hi = int(min((long long)rows, block * 64 + 64 - first));
+-    const long long group = block - capture_first / 64;
++    const long long block = first / BlockTokens + blockIdx.y;
++    const int lo = int(max(0LL, block * BlockTokens - first));
++    const int hi = int(min((long long)rows, block * BlockTokens + BlockTokens - first));
++    const long long group = block - capture_first / BlockTokens;
+     if (hi <= lo || group < 0 || group >= groups) return;
+     float sum = 0.f;
+     for (int t = lo; t < hi; ++t) sum += normalized[size_t(t) * width + d];
+@@ -2873,9 +2874,14 @@ void head_norm_rope_capture(const float* x, int x_stride, const float* w, float*
+ }
+ 
+ void kvmem_key_sums(const float* normalized, float* sums, int width, int rows, int64_t first,
+-                    int64_t capture_first, int groups, void* stream, const long long* at) {
+-    kvmem_key_sums_kernel<<<dim3(grid(width, 256), (rows + 63) / 64 + 1), 256, 0, cs(stream)>>>(
+-        normalized, sums, width, rows, first, capture_first, groups, at);
++                    int64_t capture_first, int groups, int block_tokens, void* stream, const long long* at) {
++    if (block_tokens == 32)
++        kvmem_key_sums_kernel<32><<<dim3(grid(width, 256), (rows + 31) / 32 + 1), 256, 0, cs(stream)>>>(
++            normalized, sums, width, rows, first, capture_first, groups, at);
++    else if (block_tokens == 64)
++        kvmem_key_sums_kernel<64><<<dim3(grid(width, 256), (rows + 63) / 64 + 1), 256, 0, cs(stream)>>>(
++            normalized, sums, width, rows, first, capture_first, groups, at);
++    else throw std::invalid_argument("KVMem block tokens must be 32 or 64");
+ }
+ 
+ void kvmem_query_sum(const float* normalized, float* sum, int width, int first, int last, void* stream) {
+diff --git a/src/poly/kvmem.cpp b/src/poly/kvmem.cpp
+index a8d2f2de..fed083c6 100644
+--- a/src/poly/kvmem.cpp
++++ b/src/poly/kvmem.cpp
+@@ -16,7 +16,6 @@
+ namespace strata::poly {
+ namespace {
+ std::atomic<uint64_t> next_session{1};
+-uint32_t pages(uint64_t tokens) { return uint32_t((tokens + 63) / 64); }
+ void require(bool ok, const char* message) {
+     if (!ok) throw kvmem::MemoryError(kvmem::MemoryErrorCode::InvalidPlan, message);
+ }
+@@ -28,6 +27,7 @@ std::shared_ptr<kvmem::HostKvStorage> storage(const KvmemOptions& opt) {
+ }
+ 
+ void KvmemOptions::validate(int context, int batch, int window, bool draft) const {
++    require(block_tokens == 32 || block_tokens == 64, "KVMem block tokens must be 32 or 64");
+     require(sessions >= 1 && sessions <= 16 && (sessions == 1 || (history_reuse && budget)),
+             "KVMem sessions must be 1..16; multiple histories require history reuse and a nonzero budget");
+     if (!budget) {
+@@ -36,12 +36,12 @@ void KvmemOptions::validate(int context, int batch, int window, bool draft) cons
+         require(!disk_mib && disk_path.empty(), "KVMem SSD requires a nonzero KVMem budget");
+         return;
+     }
+-    require(budget >= 128 && budget % 64 == 0 && reserve >= 64 && reserve % 64 == 0,
+-            "KVMem B/R must be positive multiples of 64, B >= 128");
++    require(budget >= 128 && budget % block_tokens == 0 && reserve >= block_tokens && reserve % block_tokens == 0,
++            "KVMem B/R must align to block tokens, B >= 128 and R >= one block");
+     require(uint64_t(budget) + reserve <= uint64_t(context), "KVMem B+R exceeds the logical context");
+     require(batch > 0 && uint64_t(batch) <= reserve, "KVMem prompt batch must not exceed R");
+-    require(sink % 64 == 0 && recent >= 64 && recent % 64 == 0 && uint64_t(sink) + recent <= budget,
+-            "KVMem sink/recent must align to 64, recent >= 64, and fit B");
++    require(sink % block_tokens == 0 && recent >= block_tokens && recent % block_tokens == 0 && uint64_t(sink) + recent <= budget,
++            "KVMem sink/recent must align to block tokens, recent >= one block, and fit B");
+     require(host_mib > 0 && host_mib <= (uint64_t(1) << 24), "invalid KVMem Host MiB budget");
+     require(disk_mib <= (uint64_t(1) << 24) && (disk_mib > 0) == !disk_path.empty(),
+             "KVMem SSD requires both a directory and positive Disk MiB budget");
+@@ -60,7 +60,7 @@ void KvmemOptions::validate(int context, int batch, int window, bool draft) cons
+ 
+ KvmemMemory::KvmemMemory(Engine& engine, std::vector<KvmemPlane> planes,
+                          uint32_t heads, uint32_t kv_heads, uint32_t dim)
+-    : engine_(engine), options_(engine.opt_.memory), planes_(std::move(planes)),
++    : block_tokens(engine.opt_.memory.block_tokens), engine_(engine), options_(engine.opt_.memory), planes_(std::move(planes)),
+       heads_(heads), kv_heads_(kv_heads), dim_(dim), key_width_(kv_heads * dim), query_width_(heads * dim),
+       storage_(engine.shared_storage_ ? engine.shared_storage_ : (engine.shared_storage_=storage(options_))) {
+     require(!planes_.empty(), "KVMem requires at least one full-attention layer");
+@@ -410,7 +410,7 @@ void KvmemMemory::archive_resident() {
+             dst+=size_t(rows)*row;
+         }
+         ck(cudaStreamSynchronize(cs(engine_.st_)), "KVMem dirty archive");
+-        // Native compact pages are 64 rows except the final partial page;
++        // Native compact pages have block_tokens rows except the final partial page;
+         // the slice boundary therefore never divides a record.
+         for(size_t slot=size_t(first/block_tokens);slot<resident_.size() && slot*block_tokens<first+rows;++slot) {
+             const auto id=resident_[slot];
+@@ -485,7 +485,7 @@ public:
+     void start_restore() override {
+         require(phase_ == 1 && !finished_, "KVMem restore started before spill completed");
+         if (owner_.io_queue_) {
+-            const uint64_t bytes=2*uint64_t(owner_.capacity())*owner_.descriptor_.layout.record_bytes/KvmemMemory::block_tokens;
++            const uint64_t bytes=2*uint64_t(owner_.capacity())*owner_.descriptor_.layout.record_bytes/owner_.block_tokens;
+             read_=owner_.io_queue_->submit(bytes,[this] { fill_restore(); });
+             require(bool(read_),"KVMem cold-read queue exceeded its bounded capacity");
+             phase_=2;
+@@ -527,7 +527,7 @@ public:
+             owner_.visible_ = plan_.next.visible_tokens;
+             try { owner_.save_view(owner_.out_); } catch (...) { owner_.visible_ = old_visible; throw; }
+             owner_.visible_ = old_visible;
+-            require(std::memcmp(owner_.in_, owner_.out_, size_t(plan_.next.visible_tokens) * owner_.descriptor_.layout.record_bytes / KvmemMemory::block_tokens) == 0,
++            require(std::memcmp(owner_.in_, owner_.out_, size_t(plan_.next.visible_tokens) * owner_.descriptor_.layout.record_bytes / owner_.block_tokens) == 0,
+                     "KVMem restored native bytes differ");
+         }
+         phase_ = 3;
+diff --git a/src/poly/kvmem.hpp b/src/poly/kvmem.hpp
+index dbfd8a8b..f3d526cf 100644
+--- a/src/poly/kvmem.hpp
++++ b/src/poly/kvmem.hpp
+@@ -22,6 +22,7 @@ namespace strata::poly {
+ class Engine;
+ 
+ struct KvmemOptions {
++    uint32_t block_tokens = 64; // startup-fixed token management granularity
+     uint32_t budget = 0, reserve = 1024;
+     uint32_t sink = 64, recent = 64;
+     uint32_t sessions = 1; // total retained histories, including the GPU owner
+@@ -82,7 +83,7 @@ struct KvmemParked {
+ class KvmemMemory final : public kvmem::MemoryBackend,
+                           public std::enable_shared_from_this<KvmemMemory> {
+ public:
+-    static constexpr uint32_t block_tokens = 64;
++    const uint32_t block_tokens;
+     KvmemMemory(Engine&, std::vector<KvmemPlane>, uint32_t heads, uint32_t kv_heads, uint32_t head_dim);
+     ~KvmemMemory() override;
+     void rebind(std::vector<KvmemPlane>);
+@@ -158,6 +159,7 @@ private:
+     void truncate_catalog(const KvmemCheckpoint&);
+     uint64_t host_entitlement() const;
+ 
++    uint32_t pages(uint64_t tokens) const { return uint32_t(tokens / block_tokens + (tokens % block_tokens != 0)); }
+     Engine& engine_;
+     KvmemOptions options_;
+     std::vector<KvmemPlane> planes_;
+diff --git a/src/poly/kvmem_capture.cu b/src/poly/kvmem_capture.cu
+index 5c3cfeee..e91c2eff 100644
+--- a/src/poly/kvmem_capture.cu
++++ b/src/poly/kvmem_capture.cu
+@@ -4,6 +4,7 @@
+ #include <math_constants.h>
+ #include <cmath>
+ #include <algorithm>
++#include <stdexcept>
+ 
+ namespace strata::poly {
+ namespace {
+@@ -25,6 +26,7 @@ __device__ float max_warp(float value) {
+     for(int offset=16;offset;offset>>=1)value=fmaxf(value,__shfl_down_sync(0xffffffff,value,offset));
+     return __shfl_sync(0xffffffff,value,0);
+ }
++template<int BlockTokens>
+ __global__ void page_mass(const float* q,const uint16_t* keys,Kvq8 quant,int dim,int heads,int kv_heads,
+     const int64_t* cfg,const int32_t* map,float* mass,int stride,int layers) {
+     const int head=int(blockIdx.x),lane=int(threadIdx.x)&31,warp=int(threadIdx.x)>>5;
+@@ -74,7 +76,7 @@ __global__ void page_mass(const float* q,const uint16_t* keys,Kvq8 quant,int dim
+             dot+=query[d]*k;
+         }
+         const float weight=expf(sum_warp(dot)*scale-maximum);
+-        if(lane==0) {atomicAdd(page+key/64,weight);total+=weight;}
++        if(lane==0) {atomicAdd(page+key/BlockTokens,weight);total+=weight;}
+     }
+     if(lane==0)reduce[warp]=total;
+     __syncthreads();
+@@ -91,11 +93,11 @@ __global__ void page_mass(const float* q,const uint16_t* keys,Kvq8 quant,int dim
+ // path scanned all keys twice and exposed little parallelism for decode.
+ // Each page now reads K once and stores its stable (maximum, exp sum). A
+ // second reduction normalizes over the complete causal window, not per page.
+-template<int Dim, bool Quantized, int Group=1>
++template<int BlockTokens,int Dim, bool Quantized, int Group=1>
+ __global__ void page_mass_parts(const float* q,const uint16_t* keys,Kvq8 quant,int heads,int kv_heads,
+     const int64_t* cfg,const int32_t* map,float2* parts,int stride) {
+     const int t=int(threadIdx.x),lane=t&31,warp=t>>5,pages=int(cfg[4]);
+-    __shared__ float logits[Group][64],reduce[Group][4],maximum[Group];
++    __shared__ float logits[Group][BlockTokens],reduce[Group][4],maximum[Group];
+     // A bounded persistent grid also makes an unsampled CUDA-graph replay
+     // cheap: it exits a few CTAs rather than thousands of empty page CTAs.
+     for(int part=int(blockIdx.x);part<int(cfg[6])*(heads/Group)*pages;part+=int(gridDim.x)) {
+@@ -106,7 +108,7 @@ __global__ void page_mass_parts(const float* q,const uint16_t* keys,Kvq8 quant,i
+     if(relative<0 || relative>=cfg[3] || row<0)continue;
+     const int end=int(cfg[1])+row+1;
+     const size_t out=(size_t(local)*heads+head)*stride+page;
+-    if(page>=cfg[4] || page*64>=end) {
++    if(page>=cfg[4] || page*BlockTokens>=end) {
+         if(t<Group)parts[out+size_t(t)*stride]=make_float2(-CUDART_INF_F,0.f);
+         continue;
+     }
+@@ -119,8 +121,8 @@ __global__ void page_mass_parts(const float* q,const uint16_t* keys,Kvq8 quant,i
+         for(int d=0;d<Dim/32;++d)query[g][d]=q[(size_t(row)*heads+head+g)*Dim+lane+d*32];
+     }
+     const int kv=head/(heads/kv_heads);
+-    for(int i=warp;i<64;i+=4) {
+-        const int key=page*64+i;
++    for(int i=warp;i<BlockTokens;i+=4) {
++        const int key=page*BlockTokens+i;
+         float dot[Group]={};
+         if(key<end) {
+             const size_t base=(size_t(key)*kv_heads+kv)*Dim;
+@@ -142,7 +144,7 @@ __global__ void page_mass_parts(const float* q,const uint16_t* keys,Kvq8 quant,i
+     __syncthreads();
+     #pragma unroll
+     for(int g=0;g<Group;++g) {
+-        const float top=max_warp(t<64?logits[g][t]:-CUDART_INF_F);
++        const float top=max_warp(t<BlockTokens?logits[g][t]:-CUDART_INF_F);
+         if(lane==0)reduce[g][warp]=top;
+     }
+     __syncthreads();
+@@ -150,7 +152,7 @@ __global__ void page_mass_parts(const float* q,const uint16_t* keys,Kvq8 quant,i
+     __syncthreads();
+     #pragma unroll
+     for(int g=0;g<Group;++g) {
+-        const float sum=sum_warp(t<64?expf(logits[g][t]-maximum[g]):0.f);
++        const float sum=sum_warp(t<BlockTokens?expf(logits[g][t]-maximum[g]):0.f);
+         if(lane==0)reduce[g][warp]=sum;
+     }
+     __syncthreads();
+@@ -168,11 +170,11 @@ __device__ float sum_lane0(float value) {
+     for(int offset=16;offset;offset>>=1)value+=__shfl_down_sync(0xffffffff,value,offset);
+     return value;
+ }
+-template<int Dim,bool Quantized,int Group>
++template<int BlockTokens,int Dim,bool Quantized,int Group>
+ __global__ void page_mass_warp_parts(const float* q,const uint16_t* keys,Kvq8 quant,int heads,int kv_heads,
+     const int64_t* cfg,const int32_t* map,float2* parts,int stride) {
+     const int lane=int(threadIdx.x)&31,warp=int(threadIdx.x)>>5,pages=int(cfg[4]);
+-    __shared__ float logits[4][Group][64];
++    __shared__ float logits[4][Group][BlockTokens];
+     for(int part=int(blockIdx.x)*4+warp;part<int(cfg[6])*(heads/Group)*pages;part+=int(gridDim.x)*4) {
+         const int page=part%pages,head=((part/pages)%(heads/Group))*Group,local=part/(pages*(heads/Group));
+         const int sample=int(cfg[5])+local;
+@@ -181,7 +183,7 @@ __global__ void page_mass_warp_parts(const float* q,const uint16_t* keys,Kvq8 qu
+         if(relative<0 || relative>=cfg[3] || row<0)continue;
+         const int end=int(cfg[1])+row+1;
+         const size_t out=(size_t(local)*heads+head)*stride+page;
+-        if(page*64>=end) {
++        if(page*BlockTokens>=end) {
+             if(lane<Group)parts[out+size_t(lane)*stride]=make_float2(-CUDART_INF_F,0.f);
+             continue;
+         }
+@@ -192,8 +194,8 @@ __global__ void page_mass_warp_parts(const float* q,const uint16_t* keys,Kvq8 qu
+             for(int d=0;d<Dim/32;++d)query[g][d]=q[(size_t(row)*heads+head+g)*Dim+lane+d*32];
+         }
+         const int kv=head/(heads/kv_heads);
+-        for(int i=0;i<64;++i) {
+-            const int key=page*64+i;
++        for(int i=0;i<BlockTokens;++i) {
++            const int key=page*BlockTokens+i;
+             float dot[Group]={};
+             if(key<end) {
+                 const size_t base=(size_t(key)*kv_heads+kv)*Dim;
+@@ -215,7 +217,7 @@ __global__ void page_mass_warp_parts(const float* q,const uint16_t* keys,Kvq8 qu
+         __syncwarp();
+         #pragma unroll
+         for(int g=0;g<Group;++g) {
+-            const float a=logits[warp][g][lane],b=logits[warp][g][lane+32];
++            const float a=logits[warp][g][lane],b=BlockTokens==64?logits[warp][g][lane+32]:-CUDART_INF_F;
+             const float top=max_warp(fmaxf(a,b));
+             const float sum=sum_lane0(expf(a-top)+expf(b-top));
+             if(lane==0)parts[out+size_t(g)*stride]=make_float2(top,sum);
+@@ -267,7 +269,8 @@ void kvmem_pack_key_sums(const float* source,float* packed,int width,int groups,
+     pack_key_sums<<<unsigned((count+255)/256),256,0,static_cast<cudaStream_t>(stream)>>>(
+         source,packed,width,groups,layers,source_groups);
+ }
+-void kvmem_page_mass(const float* query,const uint16_t* keys,Kvq8 q8,int dim,int heads,int kv_heads,
++template<int BlockTokens>
++void dispatch_page_mass(const float* query,const uint16_t* keys,Kvq8 q8,int dim,int heads,int kv_heads,
+     int rows,const int64_t* cfg,const int32_t* map,float* mass,int stride,int layers,void* stream,
+     float* scratch,size_t scratch_floats) {
+     // score_ is dead after attention. Reusing it avoids a persistent allocation
+@@ -277,22 +280,30 @@ void kvmem_page_mass(const float* query,const uint16_t* keys,Kvq8 q8,int dim,int
+         const unsigned grid=unsigned(std::min(size_t(256),size_t(stride)*heads*rows));
+         const auto st=static_cast<cudaStream_t>(stream);
+         if(dim==256 && (heads/kv_heads)%8==0) {
+-            if(q8.codes)page_mass_warp_parts<256,true,8><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
+-            else page_mass_warp_parts<256,false,8><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
++            if(q8.codes)page_mass_warp_parts<BlockTokens,256,true,8><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
++            else page_mass_warp_parts<BlockTokens,256,false,8><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
+         } else if(dim==256 && (heads/kv_heads)%4==0) {
+-            if(q8.codes)page_mass_parts<256,true,4><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
+-            else page_mass_parts<256,false,4><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
++            if(q8.codes)page_mass_parts<BlockTokens,256,true,4><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
++            else page_mass_parts<BlockTokens,256,false,4><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
+         } else if(dim==256) {
+-            if(q8.codes)page_mass_parts<256,true><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
+-            else page_mass_parts<256,false><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
++            if(q8.codes)page_mass_parts<BlockTokens,256,true><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
++            else page_mass_parts<BlockTokens,256,false><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
+         } else {
+-            if(q8.codes)page_mass_parts<32,true><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
+-            else page_mass_parts<32,false><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
++            if(q8.codes)page_mass_parts<BlockTokens,32,true><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
++            else page_mass_parts<BlockTokens,32,false><<<grid,128,0,st>>>(query,keys,q8,heads,kv_heads,cfg,map,parts,stride);
+         }
+         page_mass_merge<<<dim3(heads,rows),256,0,st>>>(parts,cfg,map,mass,stride,heads,layers);
+         return;
+     }
+-    page_mass<<<dim3(heads,rows),256,size_t(dim+stride)*sizeof(float),static_cast<cudaStream_t>(stream)>>>(
++    page_mass<BlockTokens><<<dim3(heads,rows),256,size_t(dim+stride)*sizeof(float),static_cast<cudaStream_t>(stream)>>>(
+         query,keys,q8,dim,heads,kv_heads,cfg,map,mass,stride,layers);
+ }
++void kvmem_page_mass(const float* query,const uint16_t* keys,Kvq8 q8,int dim,int heads,int kv_heads,
++    int rows,const int64_t* cfg,const int32_t* map,float* mass,int stride,int layers,int block_tokens,void* stream,
++    float* scratch,size_t scratch_floats) {
++    if(block_tokens==32)dispatch_page_mass<32>(query,keys,q8,dim,heads,kv_heads,rows,cfg,map,mass,stride,layers,stream,scratch,scratch_floats);
++    else if(block_tokens==64)dispatch_page_mass<64>(query,keys,q8,dim,heads,kv_heads,rows,cfg,map,mass,stride,layers,stream,scratch,scratch_floats);
++    else throw std::invalid_argument("KVMem block tokens must be 32 or 64");
++}
++
+ }
+diff --git a/src/poly/kvmem_capture.hpp b/src/poly/kvmem_capture.hpp
+index 0dfd709d..2a9225e4 100644
+--- a/src/poly/kvmem_capture.hpp
++++ b/src/poly/kvmem_capture.hpp
+@@ -8,6 +8,6 @@ void kvmem_pack_key_sums(const float* source,float* packed,int width,int groups,
+ // cfg: logical/compact call starts, frame start/count, physical page count,
+ // first sample and sample count for this call. Indices are frame-relative rows.
+ void kvmem_page_mass(const float* query,const uint16_t* keys,Kvq8 q8,int dim,int heads,int kv_heads,
+-    int rows,const int64_t* cfg,const int32_t* map,float* mass,int stride,int layers,void* stream,
++    int rows,const int64_t* cfg,const int32_t* map,float* mass,int stride,int layers,int block_tokens,void* stream,
+     float* scratch=nullptr,size_t scratch_floats=0);
+ }
+diff --git a/src/poly/kvmem_sessions.cpp b/src/poly/kvmem_sessions.cpp
+index 2e8a6fa4..b3bd52c1 100644
+--- a/src/poly/kvmem_sessions.cpp
++++ b/src/poly/kvmem_sessions.cpp
+@@ -13,7 +13,7 @@ bool KvmemSessions::make_archive_room(const KvmemMemory& memory) {
+ }
+ void KvmemSessions::admit_active(const KvmemMemory& memory, uint64_t total_tokens) {
+     memory.admit(total_tokens); // rejects impossible requests before eviction
+-    const auto records = (total_tokens+KvmemMemory::block_tokens-1)/KvmemMemory::block_tokens+1;
++    const auto records = (total_tokens+memory.block_tokens-1)/memory.block_tokens+1;
+     const auto required = records*memory.descriptor().layout.record_bytes;
+     while (payload_bytes() > memory.payload_limit()-required)
+         if (!evict_one()) throw std::logic_error("KVMem active admission did not fit after clearing idle histories");
+diff --git a/src/poly/main.cpp b/src/poly/main.cpp
+index 2e36d5a7..735a1e86 100644
+--- a/src/poly/main.cpp
++++ b/src/poly/main.cpp
+@@ -793,9 +793,10 @@ int serve(Session& ss) {
+ #ifdef STRATA_KVMEM
+     if (engine.kvmem_enabled()) {
+         const auto& m = engine.memory_options();
++        std::fprintf(stderr,"KVMEM_BLOCKS block_tokens=%u\n",m.block_tokens);
+         std::printf("INFO backend=polystrata kvmem=1 kvmem_budget=%u kvmem_reserve=%u kvmem_host_mib=%llu "
+-                    "kvmem_block_tokens=64 kv_type=%s history_reuse=%d history_scope=%s kvmem_sessions=%u mtp=%d mtp_drafts=%d vision=%d ssd=%d kvmem_disk_mib=%llu query_scorer=%s graph_alpha=%.6g query_max_tokens=%u query_replay_max_tokens=%u batch_mtp=0 slot_cache=1 storage_scope=process gpu_scope=single\n",
+-                    m.budget, m.reserve, (unsigned long long)m.host_mib, engine.memory().descriptor().layout.format.find("q8_0")!=std::string::npos?"q8_0":"f16", int(m.history_reuse),
++                    "kvmem_block_tokens=%u kv_type=%s history_reuse=%d history_scope=%s kvmem_sessions=%u mtp=%d mtp_drafts=%d vision=%d ssd=%d kvmem_disk_mib=%llu query_scorer=%s graph_alpha=%.6g query_max_tokens=%u query_replay_max_tokens=%u batch_mtp=0 slot_cache=1 storage_scope=process gpu_scope=single\n",
++                    m.budget, m.reserve, (unsigned long long)m.host_mib,m.block_tokens, engine.memory().descriptor().layout.format.find("q8_0")!=std::string::npos?"q8_0":"f16", int(m.history_reuse),
+                     m.sessions > 1 ? "prefix_pool" : "current", m.sessions, int(m.mtp && engine.drafts()), m.mtp ? engine.max_window()-1 : 0,
+                     int(engine.sees()), int(m.disk_mib>0),(unsigned long long)m.disk_mib,
+                     kvmem::query_scorer_name(m.scorer),m.graph_alpha,m.query_max_tokens,m.replay_max_tokens);
+@@ -1335,7 +1336,8 @@ void usage() {
+     std::fprintf(stderr,
+         "KVMem (opt-in, qwen35moe, single CUDA GPU, F16/Q8 KV, native batch 1..8):\n"
+         "  --kvmem-budget B --kvmem-gen-reserve R --kvmem-host-mib H\n"
+-        "  --kvmem-sink-tokens N --kvmem-recent-tokens N (64-token alignment)\n"
++        "  --kvmem-sink-tokens N --kvmem-recent-tokens N (alignment to --kvmem-block-tokens)\n"
++        "  --kvmem-block-tokens 32|64 (default 64; fixed at startup)\n"
+         "  --kvmem-query-begin N --kvmem-query-end N (raw token prompt span)\n"
+         "  --kvmem-query-max-tokens N --kvmem-query-replay-max-tokens N (bounded Query/replay)\n"
+         "  --kvmem-query-scorer page-softmax|meanq-cosine --kvmem-graph-alpha X\n"
+@@ -1533,6 +1535,7 @@ int main(int argc, char** argv) {
+         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
+         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
+ #ifdef STRATA_KVMEM
++        else if (a == "--kvmem-block-tokens") o.memory.block_tokens = uint32_t(integer(64));
+         else if (a == "--kvmem-budget") o.memory.budget = uint32_t(integer(INT32_MAX));
+         else if (a == "--kvmem-gen-reserve") o.memory.reserve = uint32_t(integer(INT32_MAX));
+         else if (a == "--kvmem-history-reuse") o.memory.history_reuse = true;
+diff --git a/src/poly/qwen35.cpp b/src/poly/qwen35.cpp
+index b1133824..43fe59a6 100644
+--- a/src/poly/qwen35.cpp
++++ b/src/poly/qwen35.cpp
+@@ -196,7 +196,7 @@ void Qwen35::assign_scratch() {
+     if (rows_ >= kStageRows) awork_ = fbuf(heads + heads / 2 + 1 + 3 * n * n_head_);   // a prompt batch's attention
+ #ifdef STRATA_KVMEM
+     if (opt_.memory.budget) {
+-        memory_groups_ = size_t(cache_capacity()) / KvmemMemory::block_tokens + 1;
++        memory_groups_ = size_t(cache_capacity()) / opt_.memory.block_tokens + 1;
+         // Normalized Q is consumed (including its ordered D2H copy) before
+         // attn_store(), and normalized K before attention uses score_. Reuse
+         // that scratch rather than displacing routed experts from VRAM. Tiny
+@@ -286,7 +286,7 @@ void Qwen35::init_memory() {
+     memory_qsums_=memory_ksums_+memory_groups_*n_attn_*n_kv_*head_dim_;
+     h_memory_stats_=h_memory_stats_all_+size_t(bound_)*memory_stats_stride_;
+     if(memory_feedback_.empty()) {
+-        memory_page_stride_=uint32_t((cache_capacity()+63)/64);
++        memory_page_stride_=uint32_t((cache_capacity()+opt_.memory.block_tokens-1)/opt_.memory.block_tokens);
+         const size_t samples=size_t((cache_capacity()+31)/32+8);
+         memory_feedback_.resize(size_t(opt_.batch+1));
+         for(auto& capture:memory_feedback_) {
+@@ -345,7 +345,7 @@ void Qwen35::capture_reused_memory_draft() {
+             "KVMem accepted first draft key");
+     else
+         kvmem_key_sums(memory_first_draft_,memory_ksums_+size_t(n_attn_-1)*memory_groups_*width,
+-            int(width),1,pos_,memory_batch_start_,int(memory_groups_),st_);
++            int(width),1,pos_,memory_batch_start_,int(memory_groups_),int(opt_.memory.block_tokens),st_);
+ }
+ void Qwen35::clear_memory_capture() {
+     memory_capture_staged_ = false;
+@@ -353,7 +353,7 @@ void Qwen35::clear_memory_capture() {
+     ck(cudaMemsetAsync(memory_ksums_, 0, total * sizeof(float), cs(st_)), "KVMem statistics clear");
+ }
+ void Qwen35::stage_memory_capture(int n) {
+-    const size_t groups = (size_t(memory_batch_start_ % 64) + n + 63) / 64;
++    const size_t groups = (size_t(memory_batch_start_ % opt_.memory.block_tokens) + n + opt_.memory.block_tokens-1) / opt_.memory.block_tokens;
+     const size_t width = groups * n_kv_ * head_dim_;
+     // A pitched D2H copy submits a separate transfer for each attention layer.
+     // At this boundary score_ is dead; pack there and submit one small transfer.
+@@ -386,7 +386,7 @@ void Qwen35::commit_memory_capture(int n) {
+     // eval() staged these copies before its existing logits synchronization;
+     // read() reaches here without that synchronization and takes the branch
+     // above. Never publish CPU statistics from an incomplete device pass.
+-    const size_t groups = (size_t(memory_batch_start_ % 64) + n + 63) / 64;
++    const size_t groups = (size_t(memory_batch_start_ % opt_.memory.block_tokens) + n + opt_.memory.block_tokens-1) / opt_.memory.block_tokens;
+     const size_t width = groups * n_kv_ * head_dim_;
+     float* query = h_memory_stats_ + width * n_attn_;
+     const bool capture = memory_->capture_query();
+@@ -408,10 +408,10 @@ void Qwen35::commit_memory_window(int n) {
+         memory_page_stride_*sizeof(float),pages*sizeof(float),samples,cudaMemcpyDeviceToHost,cs(st_)),
+         "KVMem accepted window attention");
+     ck(cudaStreamSynchronize(cs(st_)),"KVMem accepted window");
+-    const size_t groups=(size_t(memory_batch_start_%64)+n+63)/64;
++    const size_t groups=(size_t(memory_batch_start_%opt_.memory.block_tokens)+n+opt_.memory.block_tokens-1)/opt_.memory.block_tokens;
+     std::fill_n(h_memory_stats_,size_t(n_attn_)*groups*width,0.f);
+     for(int il=0;il<n_attn_;++il)for(int row=0;row<n;++row) {
+-        const size_t group=(size_t(memory_batch_start_%64)+row)/64;
++        const size_t group=(size_t(memory_batch_start_%opt_.memory.block_tokens)+row)/opt_.memory.block_tokens;
+         float* sum=h_memory_stats_+(size_t(il)*groups+group)*width;
+         const float* key=h_memory_window_keys_+(size_t(il)*opt_.window+row)*width;
+         for(size_t d=0;d<width;++d)sum[d]+=key[d];
+@@ -613,7 +613,7 @@ void Qwen35::attn_store(Block& B, int64_t pos, int n) {
+                 cudaMemcpyDeviceToDevice,cs(st_)),"KVMem reusable first draft key");
+         if (!memory_drafting_ && !memory_window_ && !direct_sum) {
+                 kvmem_key_sums(memory_kpre_, memory_ksums_ + size_t(B.memory_layer) * memory_groups_ * n_kv_ * head_dim_,
+-                    n_kv_ * head_dim_, n, pos, memory_batch_start_, int(memory_groups_), st_, at ? at + 1 : nullptr);
++                    n_kv_ * head_dim_, n, pos, memory_batch_start_, int(memory_groups_), int(opt_.memory.block_tokens), st_, at ? at + 1 : nullptr);
+         }
+     } else
+ #endif
+@@ -721,7 +721,7 @@ void Qwen35::attn(Block& B, int64_t pos, int n) {
+         if(capture.last[6]>0)
+         kvmem_page_mass(q_,B.keys,q8?Kvq8{B.k_codes,B.k_scales}:Kvq8{},head_dim_,n_head_,n_kv_,
+             std::max(1,int(capture.last[6])),capture.config,capture.rows,capture.mass,int(memory_page_stride_),
+-            n_attn_-int(draft_),st_,score_,size_t(chunk_)*n_head_*cache_capacity());
++            n_attn_-int(draft_),int(opt_.memory.block_tokens),st_,score_,size_t(chunk_)*n_head_*cache_capacity());
+     }
+ #endif
+     mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
+@@ -749,7 +749,7 @@ void Qwen35::attn_rows(Block& B, int n) {
+             head_norm_rope_capture(kraw_+i*kv,head_dim_,fp(B.k_norm),k_+i*kv,memory_kpre_+i*kv,
+                 head_dim_,n_kv_,n_rot_,theta_scale_,0,1,rms_eps_,st_,nullptr,nullptr,sections_,ai+1);
+             kvmem_key_sums(memory_kpre_+i*kv,memory_stats_all_+size_t(r.seq)*memory_stats_stride_+
+-                size_t(B.memory_layer)*memory_groups_*kv,int(kv),1,r.pos,r.pos,int(memory_groups_),st_);
++                size_t(B.memory_layer)*memory_groups_*kv,int(kv),1,r.pos,r.pos,int(memory_groups_),int(opt_.memory.block_tokens),st_);
+         } else
+ #endif
+         head_norm_rope(kraw_+i*kv,head_dim_,fp(B.k_norm),k_+i*kv,head_dim_,n_kv_,n_rot_,theta_scale_,0,1,
+@@ -786,7 +786,7 @@ void Qwen35::attn_rows(Block& B, int n) {
+             // before recording/replaying its heads; never capture a stale setter.
+             auto& capture=memory_feedback_.at(size_t(r.seq));
+             if(capture.last[6]>0)kvmem_page_mass(q_+i*hq,kc,kq,head_dim_,n_head_,n_kv_,1,capture.config,capture.rows,
+-                capture.mass,int(memory_page_stride_),n_attn_-int(draft_),st_,score_,sf);
++                capture.mass,int(memory_page_stride_),n_attn_-int(draft_),int(opt_.memory.block_tokens),st_,score_,sf);
+         }
+ #endif
+     }
+diff --git a/tools/poly_elastic_test.cpp b/tools/poly_elastic_test.cpp
+index d8fe450e..17f1a9b6 100644
+--- a/tools/poly_elastic_test.cpp
++++ b/tools/poly_elastic_test.cpp
+@@ -14,7 +14,7 @@ static void check(bool ok, const char* what) { if (!ok) throw std::runtime_error
+ namespace strata::poly {
+ struct KvmemTestAccess {
+     static std::vector<uint8_t> kv(KvmemMemory& m) {
+-        std::vector<uint8_t> result(m.visible_ * (m.descriptor_.layout.record_bytes / KvmemMemory::block_tokens));
++        std::vector<uint8_t> result(m.visible_ * (m.descriptor_.layout.record_bytes / m.block_tokens));
+         m.save_view(result.data());
+         return result;
+     }
+@@ -170,6 +170,7 @@ int main(int argc, char** argv) {
+         if(aggressive){o.elastic_headroom_mib=512;o.elastic_physical_reserve_mib=256;}
+         if(audit||reclaim||headroom){o.max_context=262144;o.prompt_batch=512;o.memory.budget=32768;o.memory.reserve=2048;}
+         o.elastic_experts_headroom=headroom;
++        for(int i=2;i+1<argc;++i)if(std::string(argv[i])=="--block-tokens")o.memory.block_tokens=std::stoul(argv[++i]);
+         auto e=Engine::open(o);
+         ElasticTestAccess::verify(*e);
+         if(audit){ElasticTestAccess::audit(*e);return 0;}
+diff --git a/tools/poly_kvmem_kernel_test.cpp b/tools/poly_kvmem_kernel_test.cpp
+index 362caacd..40b0404a 100644
+--- a/tools/poly_kvmem_kernel_test.cpp
++++ b/tools/poly_kvmem_kernel_test.cpp
+@@ -17,8 +17,8 @@ void close(float a, float b, float tolerance, const char* label) {
+         throw std::runtime_error(label);
+ }
+ }
+-void feedback_reference_test(int dim=32,int count=128,int heads=8) {
+-    const int kvheads=2,rows=3,kw=dim*kvheads,qw=dim*heads,pages=(count+63)/64;
++void feedback_reference_test(int dim=32,int count=128,int heads=8,int block_tokens=64) {
++    const int kvheads=2,rows=3,kw=dim*kvheads,qw=dim*heads,pages=(count+block_tokens-1)/block_tokens;
+     std::vector<float> queries(rows*qw),keys(count*kw);
+     for(size_t i=0;i<queries.size();++i)queries[i]=float(int(i%29)-14)/20;
+     for(size_t i=0;i<keys.size();++i)keys[i]=float(int(i%43)-21)/18;
+@@ -52,7 +52,7 @@ void feedback_reference_test(int dim=32,int count=128,int heads=8) {
+             check(cudaMemset(mass,0,2*pages*sizeof(float)));
+             strata::poly::kvmem_page_mass(dq,quantized?nullptr:hk,
+                 quantized?strata::poly::Kvq8{codes,scales}:strata::poly::Kvq8{},
+-                dim,heads,kvheads,2,config,samples,mass,pages,1,nullptr,fast?scratch:nullptr,scratch_count);
++                dim,heads,kvheads,2,config,samples,mass,pages,1,block_tokens,nullptr,fast?scratch:nullptr,scratch_count);
+             std::vector<float> got(2*pages);check(cudaMemcpy(got.data(),mass,got.size()*4,cudaMemcpyDeviceToHost));
+             for(int sample=0;sample<2;++sample) {
+                 std::vector<double> expected(pages,0.);const int row=sample_rows[sample],end=compact+row+1;
+@@ -64,7 +64,7 @@ void feedback_reference_test(int dim=32,int count=128,int heads=8) {
+                         weights[key]=dot/std::sqrt(double(dim));top=std::max(top,weights[key]);
+                     }
+                     for(auto& value:weights){value=std::exp(value-top);total+=value;}
+-                    for(int key=0;key<end;++key)expected[key/64]+=weights[key]/total/heads;
++                    for(int key=0;key<end;++key)expected[key/block_tokens]+=weights[key]/total/heads;
+                 }
+                 for(int page=0;page<pages;++page)close(got[sample*pages+page],float(expected[page]),3e-5f,
+                     "native sampled attention differs from independent causal softmax");
+@@ -74,8 +74,8 @@ void feedback_reference_test(int dim=32,int count=128,int heads=8) {
+     cudaFree(dq);cudaFree(dk);cudaFree(hk);cudaFree(codes);cudaFree(scales);cudaFree(config);cudaFree(samples);cudaFree(mass);cudaFree(scratch);
+ }
+ 
+-void feedback_benchmark() {
+-    constexpr int dim=256,heads=16,kvheads=2,rows=16,count=34816,pages=count/64;
++void feedback_benchmark(int block_tokens) {
++    const int dim=256,heads=16,kvheads=2,rows=16,count=34816,pages=count/block_tokens;
+     auto* q=allocate<float>(rows*heads*dim);auto* k=allocate<int8_t>(count*kvheads*dim);
+     auto* scales=allocate<uint16_t>(count*kvheads*dim/32);auto* cfg=allocate<int64_t>(7);
+     auto* map=allocate<int32_t>(rows);auto* mass=allocate<float>(rows*pages);
+@@ -86,34 +86,34 @@ void feedback_benchmark() {
+     check(cudaMemcpy(map,host_map,sizeof(host_map),cudaMemcpyHostToDevice));
+     cudaEvent_t start,stop;check(cudaEventCreate(&start));check(cudaEventCreate(&stop));
+     for(int context:{2048,8192,16384,32768})for(int samples:{1,16})for(bool fast:{false,true}) {
+-        const int64_t config[7]={context-samples,context-samples,context-samples,samples,(context+63)/64,0,samples};
++        const int64_t config[7]={context-samples,context-samples,context-samples,samples,(context+block_tokens-1)/block_tokens,0,samples};
+         strata::poly::kvmem_capture_config(cfg,config,nullptr);
+         auto run=[&] {strata::poly::kvmem_page_mass(q,nullptr,{k,scales},dim,heads,kvheads,samples,
+-            cfg,map,mass,pages,10,nullptr,fast?scratch:nullptr,size_t(rows)*heads*pages*2);};
++            cfg,map,mass,pages,10,block_tokens,nullptr,fast?scratch:nullptr,size_t(rows)*heads*pages*2);};
+         for(int i=0;i<3;++i)run();check(cudaEventRecord(start));
+         for(int i=0;i<20;++i)run();check(cudaEventRecord(stop));check(cudaEventSynchronize(stop));
+         float ms=0;check(cudaEventElapsedTime(&ms,start,stop));
+-        std::printf("feedback context=%d samples=%d fast=%d ms=%.5f\n",context,samples,int(fast),ms/20);
++        std::printf("feedback block_tokens=%d context=%d samples=%d fast=%d ms=%.5f\n",block_tokens,context,samples,int(fast),ms/20);
+     }
+     cudaEventDestroy(start);cudaEventDestroy(stop);cudaFree(q);cudaFree(k);cudaFree(scales);cudaFree(cfg);
+     cudaFree(map);cudaFree(mass);cudaFree(scratch);
+ }
+ 
+-void feedback_graph_test() {
++void feedback_graph_test(int block_tokens) {
+     constexpr int dim=256,heads=4,kvheads=2,pages=4,rows=3;
+-    auto* q=allocate<float>(rows*heads*dim);auto* k=allocate<uint16_t>(pages*64*kvheads*dim);
++    auto* q=allocate<float>(rows*heads*dim);auto* k=allocate<uint16_t>(pages*block_tokens*kvheads*dim);
+     auto* config=allocate<int64_t>(7);auto* samples=allocate<int32_t>(4);
+     auto* mass=allocate<float>(4*pages);auto* scratch=allocate<float>(2*heads*pages*2);
+-    check(cudaMemset(q,0,rows*heads*dim*4));check(cudaMemset(k,0,pages*64*kvheads*dim*2));
++    check(cudaMemset(q,0,rows*heads*dim*4));check(cudaMemset(k,0,pages*block_tokens*kvheads*dim*2));
+     const int32_t indices[4]={0,2,-1,99};check(cudaMemcpy(samples,indices,sizeof(indices),cudaMemcpyHostToDevice));
+     cudaStream_t stream;check(cudaStreamCreate(&stream));cudaGraph_t graph;cudaGraphExec_t exec;
+     check(cudaStreamBeginCapture(stream,cudaStreamCaptureModeThreadLocal));
+-    strata::poly::kvmem_page_mass(q,k,{},dim,heads,kvheads,2,config,samples,mass,pages,2,stream,scratch,2*heads*pages*2);
++    strata::poly::kvmem_page_mass(q,k,{},dim,heads,kvheads,2,config,samples,mass,pages,2,block_tokens,stream,scratch,2*heads*pages*2);
+     check(cudaStreamEndCapture(stream,&graph));check(cudaGraphInstantiate(&exec,graph,nullptr,nullptr,0));
+     // Update device coordinates outside a reused graph, as split MTP windows
+     // and interleaved sequences do. Zero/invalid samples must not publish mass.
+-    const int64_t cases[][7]={{40,70,40,3,pages,0,2},{42,126,40,3,pages,1,1},
+-        {42,126,40,3,pages,0,0},{40,70,40,3,pages,2,1},{40,70,40,3,pages,3,1}};
++    const int64_t cases[][7]={{40,2*block_tokens+6,40,3,pages,0,2},{42,4*block_tokens-2,40,3,pages,1,1},
++        {42,4*block_tokens-2,40,3,pages,0,0},{40,2*block_tokens+6,40,3,pages,2,1},{40,2*block_tokens+6,40,3,pages,3,1}};
+     for(const auto& cfg:cases) {
+         strata::poly::kvmem_capture_config(config,cfg,stream);
+         check(cudaMemsetAsync(mass,0,4*pages*sizeof(float),stream));check(cudaGraphLaunch(exec,stream));
+@@ -123,7 +123,7 @@ void feedback_graph_test() {
+             const int row=indices[sample]-int(cfg[0]-cfg[2]);
+             const bool captured=sample>=cfg[5] && sample<cfg[5]+cfg[6] && indices[sample]>=0 && indices[sample]<cfg[3] && row>=0;
+             const int end=int(cfg[1])+row+1;
+-            const float expected=captured?float(std::clamp(end-page*64,0,64))/float(end*2):0.f;
++            const float expected=captured?float(std::clamp(end-page*block_tokens,0,block_tokens))/float(end*2):0.f;
+             close(got[sample*pages+page],expected,2e-6f,"replayed attention capture changed sample/causal/layer coordinates");
+         }
+     }
+@@ -133,12 +133,16 @@ void feedback_graph_test() {
+ 
+ int main() {
+     try {
+-        feedback_reference_test();
+-        feedback_reference_test(256,256);
+-        feedback_reference_test(256,32768,16);
+-        feedback_graph_test();
+-        feedback_benchmark();
+-        constexpr int dim = 256, heads = 2, width = dim * heads, max_rows = 129, groups = 5;
++        for(int block_tokens:{32,64}) {
++            for(int count:{block_tokens-1,block_tokens,block_tokens+1,2*block_tokens-1,2*block_tokens,2*block_tokens+1}) {
++                feedback_reference_test(32,count,8,block_tokens);
++                for(int heads:{4,8,16}) feedback_reference_test(256,count,heads,block_tokens);
++            }
++            feedback_reference_test(256,32768,16,block_tokens);
++            feedback_graph_test(block_tokens);
++            feedback_benchmark(block_tokens);
++        }
++        constexpr int dim = 256, heads = 2, width = dim * heads, max_rows = 129, groups = 6;
+         std::vector<float> input(width * max_rows), weight(dim), native(input.size()), rotated(input.size()), raw(input.size());
+         for (size_t i = 0; i < input.size(); ++i) input[i] = float(int(i % 67) - 33) / 64.f;
+         for (int i = 0; i < dim; ++i) weight[i] = 1.f + float(i % 5 - 2) / 8.f;
+@@ -147,7 +151,7 @@ int main() {
+               *s = allocate<float>(groups * width), *q = allocate<float>(width);
+         check(cudaMemcpy(x, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
+         check(cudaMemcpy(w, weight.data(), dim * sizeof(float), cudaMemcpyHostToDevice));
+-        for (int rows : {1, 17, 65, 129}) {
++        for (int rows : {1, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129}) {
+             strata::poly::head_norm_rope(x, dim, w, a, dim, heads, 64, 0.9f, 4097, rows, 1e-6f, nullptr);
+             strata::poly::head_norm_rope_capture(x, dim, w, b, r, dim, heads, 64, 0.9f, 4097, rows, 1e-6f, nullptr);
+             check(cudaMemcpy(native.data(), a, size_t(rows) * width * sizeof(float), cudaMemcpyDeviceToHost));
+@@ -163,16 +167,16 @@ int main() {
+                     close(raw[i], input[i] * scale * weight[d], 2e-6f, "pre-RoPE normalization differs");
+                 }
+             }
+-            for (long long first : {63LL, 4097LL}) {
++            for (int block_tokens : {32,64}) for (long long first : {31LL,32LL,33LL,63LL,64LL,65LL,4097LL}) {
+                 check(cudaMemset(s, 0, groups * width * sizeof(float)));
+                 check(cudaMemset(q, 0, width * sizeof(float)));
+-                strata::poly::kvmem_key_sums(r, s, width, rows, first, first, groups, nullptr);
++                strata::poly::kvmem_key_sums(r, s, width, rows, first, first, groups, block_tokens, nullptr);
+                 strata::poly::kvmem_query_sum(r, q, width, std::min(7, rows), std::min(29, rows), nullptr);
+                 std::vector<float> sums(groups * width), query(width), expected(groups * width, 0.f);
+                 check(cudaMemcpy(sums.data(), s, sums.size() * sizeof(float), cudaMemcpyDeviceToHost));
+                 check(cudaMemcpy(query.data(), q, width * sizeof(float), cudaMemcpyDeviceToHost));
+                 for (int t = 0; t < rows; ++t)
+-                    for (int d = 0; d < width; ++d) expected[size_t((first+t)/64-first/64) * width+d] += raw[size_t(t)*width+d];
++                    for (int d = 0; d < width; ++d) expected[size_t((first+t)/block_tokens-first/block_tokens) * width+d] += raw[size_t(t)*width+d];
+                 for (size_t i = 0; i < sums.size(); ++i) close(sums[i], expected[i], 2e-5f, "partial-block key sum differs");
+                 for (int d = 0; d < width; ++d) {
+                     float value = 0.f;
+@@ -186,13 +190,14 @@ int main() {
+         uint16_t *cache = allocate<uint16_t>(256 * width);
+         cudaStream_t stream = nullptr;
+         check(cudaStreamCreate(&stream));
++        for(int block_tokens:{32,64}) {
+         cudaGraph_t graph = nullptr;
+         cudaGraphExec_t executable = nullptr;
+         check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+         strata::poly::head_norm_rope_capture(x, dim, w, b, r, dim, heads, 64, 0.9f, 0, 1, 1e-6f, stream,
+                                             nullptr, nullptr, 1, at+1);
+         strata::poly::store_f16_at(b, cache, width, at, 1, 0, stream);
+-        strata::poly::kvmem_key_sums(r, s, width, 1, 0, 0, groups, stream, at+1);
++        strata::poly::kvmem_key_sums(r, s, width, 1, 0, 0, groups, block_tokens, stream, at+1);
+         check(cudaStreamEndCapture(stream, &graph));
+         check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
+         for (auto positions : {std::vector<long long>{0, 1000}, std::vector<long long>{128, 30000}}) {
+@@ -210,7 +215,9 @@ int main() {
+             check(cudaMemcpy(actual.data(), cache+positions[0]*width, width*sizeof(uint16_t), cudaMemcpyDeviceToHost));
+             if (actual != expected) throw std::runtime_error("graph wrote KV to an original rather than compact row");
+         }
+-        cudaGraphExecDestroy(executable); cudaGraphDestroy(graph); cudaStreamDestroy(stream);
++        cudaGraphExecDestroy(executable); cudaGraphDestroy(graph);
++        }
++        cudaStreamDestroy(stream);
+         for (auto p : {x,w,a,b,r,s,q}) cudaFree(p);
+         cudaFree(at); cudaFree(cache);
+         {
+@@ -230,7 +237,7 @@ int main() {
+                     throw std::runtime_error("packed MeanK statistics changed layer/group layout");
+             cudaFree(device);cudaFree(compact);
+         }
+-        std::puts("PASS: normalized capture, partial blocks, query spans, independent graph positions, F16/Q8 causal page-mass reference, packed MeanK layout");
++        std::puts("PASS: normalized capture, 32/64 partial blocks, query spans, independent graph positions, F16/Q8 causal page-mass reference, packed MeanK layout");
+         return 0;
+     } catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
+ }
+diff --git a/tools/poly_kvmem_mtp_test.cpp b/tools/poly_kvmem_mtp_test.cpp
+index edac9967..45437906 100644
+--- a/tools/poly_kvmem_mtp_test.cpp
++++ b/tools/poly_kvmem_mtp_test.cpp
+@@ -49,7 +49,7 @@ struct KvmemTestAccess {
+         }
+     }
+     static std::vector<uint8_t> kv(KvmemMemory& m) {
+-        std::vector<uint8_t> bytes(m.visible_ * (m.descriptor_.layout.record_bytes/KvmemMemory::block_tokens));
++        std::vector<uint8_t> bytes(m.visible_ * (m.descriptor_.layout.record_bytes/m.block_tokens));
+         m.save_view(bytes.data());
+         return bytes;
+     }
+@@ -113,6 +113,7 @@ int main(int argc,char** argv) {
+                 opt.elastic_experts=true; opt.elastic_experts_headroom=true;
+                 opt.elastic_headroom_mib=512; opt.elastic_physical_reserve_mib=512;
+             }
++            else if(arg=="--block-tokens" && i+1<argc) opt.memory.block_tokens=std::atoi(argv[++i]);
+             else if(arg=="--q8")opt.kv_format=KvFmt::kQ8_0;
+             else if (arg == "--window" && i+1 < argc) {
+                 opt.window=std::atoi(argv[++i]);
+@@ -132,11 +133,13 @@ int main(int argc,char** argv) {
+         check(engine->drafts(),"model has no usable MTP block");
+         if(opt.elastic_experts) {
+             check(ElasticTestAccess::enabled(*engine),"MTP silently disabled elastic experts");
+-            // Hold placement fixed for numerical comparisons; exercise real growth separately below.
+             // Leave room for lazily captured graphs while the headroom admission guard cannot evict experts.
+             if(opt.elastic_experts_headroom)ElasticTestAccess::comparison_room(*engine);
+-            ElasticTestAccess::freeze(*engine,true);
+         }
++        // Both independent prefix evaluations need the same expert placement
++        // and scheduling. Auto-tuned CPU/GPU routing can otherwise change even
++        // old prefix KV bytes. Exercise actual elastic growth separately below.
++        ElasticTestAccess::freeze(*engine,true);
+         if(archive_chunks) {
+             std::vector<int32_t> tokens(4161);
+             for(size_t i=0;i<tokens.size();++i)tokens[i]=100+int(i%32);
+@@ -147,7 +150,7 @@ int main(int argc,char** argv) {
+             engine->memory().checkpoint();
+             KvmemTestAccess::check_archive(engine->memory());
+             const auto bytes=KvmemTestAccess::staging_bytes(engine->memory());
+-            check(bytes==4096*(engine->memory().descriptor().layout.record_bytes/64),"archive staging grew beyond its slice");
++            check(bytes==4096*(engine->memory().descriptor().layout.record_bytes/engine->memory().block_tokens),"archive staging grew beyond its slice");
+             engine->eval(tokens.data(),1,true);
+             engine->memory().checkpoint();
+             KvmemTestAccess::check_archive(engine->memory());
+@@ -165,7 +168,7 @@ int main(int argc,char** argv) {
+         // independent of the model's guesses so every accepted-prefix branch runs.
+         const int32_t w[4]={1000,1001,1002,1003};
+         struct Case { int prefix, window, accepted; };
+-        const Case cases[]={{63,2,1},{191,2,2},{63,3,3},{191,3,1},{191,3,2},
++        const Case cases[]={{31,2,1},{159,4,2},{63,2,1},{191,2,2},{63,3,3},{191,3,1},{191,3,2},
+                             {63,4,4},{191,4,1},{191,4,2},{191,4,3},{319,4,4}};
+         const auto draft=[&](int window) {
+             for (int i=0;i<window-1;++i) { float p=0; engine->draft(w[i],i,&p); }
+@@ -204,6 +207,12 @@ int main(int argc,char** argv) {
+             engine->memory().before(opt.window); // same view as MTP's maximum-window reservation
+             for (int i=0;i<accepted;++i) engine->eval(w+i,1,true);
+             const auto serial=engine->memory().checkpoint();
++            auto wrong_layout=serial;
++            wrong_layout.identity.layout.block_tokens=opt.memory.block_tokens==32?64:32;
++            bool wrong_layout_rejected=false;
++            try { engine->memory().restore_prefix(wrong_layout); }
++            catch(const std::exception&) { wrong_layout_rejected=true; }
++            check(wrong_layout_rejected,"checkpoint accepted a different block size");
+             check(selected == engine->memory().selected(),"comparison did not preserve the sparse view");
+             const auto serial_kv=KvmemTestAccess::kv(engine->memory());
+             if(kv!=serial_kv)KvmemTestAccess::diagnose(engine->memory(),kv,serial_kv);

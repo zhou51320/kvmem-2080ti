@@ -1,0 +1,564 @@
+{
+  "date": "2026-10-22",
+  "scope": "Revert common feedback batching; specialize NVFP4 feedback and decode pairs with shared G16 scales",
+  "upstream": "db8c114802a070a7903f84d01142fda0b00fa7df",
+  "patch": {
+    "path": "backends/ninfer",
+    "upstream": "https://github.com/iamwavecut/ninfer-all.git",
+    "base_commit": "db8c114802a070a7903f84d01142fda0b00fa7df",
+    "license_file": "backends/ninfer/LICENSE",
+    "local_changes": "KVMem integration is maintained in the versioned patch; the submodule remains pinned to base_commit",
+    "patch": "backends/patches/ninfer-kvmem.patch",
+    "patch_sha256": "ea40cf50c0695c83aa60514b0930ff2c86ccf04a5f919126421d0261a7f53969",
+    "patched_tree": "d32f165020a4c2f1dacf2a9f83cfdba4a2b7c99d"
+  },
+  "gpu_uuid": "GPU-A",
+  "workload": "Qwen3.8-27B IQ3_S; pp36864/tg256; KV capacity53248; MTP4; ngram0; default C; warmup1/reps3; wall throughput",
+  "order": [
+    "before",
+    "after"
+  ],
+  "samples": {
+    "before": {
+      "prefill_tok_s": [
+        672.0002714251096,
+        672.085585198651,
+        672.0722540679897
+      ],
+      "decode_tok_s": [
+        73.65436354919203,
+        73.67554183540452,
+        73.626492744785
+      ]
+    },
+    "after": {
+      "prefill_tok_s": [
+        680.7231202195458,
+        680.9152140312273,
+        680.7406408683039
+      ],
+      "decode_tok_s": [
+        75.50433058627343,
+        75.47760592699694,
+        75.49091580359564
+      ]
+    }
+  },
+  "medians": {
+    "before": {
+      "prefill_tok_s": 672.0722540679897,
+      "decode_tok_s": 73.65436354919203
+    },
+    "after": {
+      "prefill_tok_s": 680.7406408683039,
+      "decode_tok_s": 75.49091580359564
+    }
+  },
+  "change_percent": {
+    "prefill_tok_s": 1.289799831468308,
+    "decode_tok_s": 2.4934737955844666
+  },
+  "equal_generated_tokens": true,
+  "equal_speculative_work": true,
+  "equal_reported_allocations": true,
+  "memory": {
+    "before": {
+      "device": 0,
+      "max_context": 53248,
+      "kv_capacity_mode": "explicit",
+      "kv_capacity": 53248,
+      "kv_capacity_page_groups": 832,
+      "kv_capacity_max_page_groups": 832,
+      "kv_cache": "nvfp4",
+      "weights": {
+        "capacity_bytes": 12481729536,
+        "used_bytes": 12481729536,
+        "peak_used_bytes": 12481729536
+      },
+      "sequence": {
+        "capacity_bytes": 1336899328,
+        "used_bytes": 1336899328,
+        "peak_used_bytes": 1336899328
+      },
+      "workspace": {
+        "capacity_bytes": 74600704,
+        "used_bytes": 0,
+        "peak_used_bytes": 0
+      },
+      "vision_workspace": null,
+      "minimum_runtime_reservation_bytes": 1497483264,
+      "kv_capacity_increment_bytes": 0,
+      "runtime_reservation_bytes": 1497483264,
+      "available_after_weights_bytes": 3426746368,
+      "available_after_startup_bytes": 2004877312,
+      "kv_capacity_headroom_bytes": 0,
+      "planned_slack_bytes": 1929263104,
+      "cuda_graph_allowance_bytes": 85983232,
+      "kv_payload_bytes": 1042882560,
+      "kvmem": {
+        "enabled": true,
+        "selected_tokens": 36864,
+        "reserve_tokens": 16384,
+        "host_payload_bytes": 0,
+        "disk_payload_bytes": 0
+      }
+    },
+    "after": {
+      "device": 0,
+      "max_context": 53248,
+      "kv_capacity_mode": "explicit",
+      "kv_capacity": 53248,
+      "kv_capacity_page_groups": 832,
+      "kv_capacity_max_page_groups": 832,
+      "kv_cache": "nvfp4",
+      "weights": {
+        "capacity_bytes": 12481729536,
+        "used_bytes": 12481729536,
+        "peak_used_bytes": 12481729536
+      },
+      "sequence": {
+        "capacity_bytes": 1336899328,
+        "used_bytes": 1336899328,
+        "peak_used_bytes": 1336899328
+      },
+      "workspace": {
+        "capacity_bytes": 74600704,
+        "used_bytes": 0,
+        "peak_used_bytes": 0
+      },
+      "vision_workspace": null,
+      "minimum_runtime_reservation_bytes": 1497483264,
+      "kv_capacity_increment_bytes": 0,
+      "runtime_reservation_bytes": 1497483264,
+      "available_after_weights_bytes": 3426746368,
+      "available_after_startup_bytes": 2004877312,
+      "kv_capacity_headroom_bytes": 0,
+      "planned_slack_bytes": 1929263104,
+      "cuda_graph_allowance_bytes": 85983232,
+      "kv_payload_bytes": 1042882560,
+      "kvmem": {
+        "enabled": true,
+        "selected_tokens": 36864,
+        "reserve_tokens": 16384,
+        "host_payload_bytes": 0,
+        "disk_payload_bytes": 0
+      }
+    }
+  },
+  "metadata": {
+    "before": {
+      "label": "nvfp4-before",
+      "upstream": "db8c114802a070a7903f84d01142fda0b00fa7df",
+      "variant": "before",
+      "gpu_uuid": "GPU-A",
+      "kv_dtype": "nvfp4",
+      "baseline_instrumentation": "benchmark uses Aggregate observation phase_timings and exports existing Engine wall timings; native engine unchanged",
+      "budget": 36864,
+      "reserve": 16384,
+      "prompt_tokens": 36864,
+      "timed_decode_tokens": 256,
+      "requested_output_tokens": 257,
+      "native_main_capacity": null,
+      "main_capacity": 53248,
+      "max_context": 53248,
+      "mtp": true,
+      "ngram_draft_tokens": 0,
+      "adaptive_mtp": false,
+      "repetitions": 3,
+      "warmup": 1,
+      "validation_run": false,
+      "verify_transfers": false,
+      "equal_input": true,
+      "command": [
+        "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\before.exe",
+        "--weights",
+        "$ARTIFACTS\\models\\ninfer\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+        "--corpus",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\native\\bench\\fixtures\\bench_corpus.ids",
+        "-pg",
+        "36864,256",
+        "--max-ctx",
+        "53248",
+        "--prefill-chunk",
+        "256",
+        "--kv-dtype",
+        "nvfp4",
+        "--device",
+        "0",
+        "--ngram-draft-tokens",
+        "0",
+        "--warmup",
+        "1",
+        "-r",
+        "3",
+        "-o",
+        "json",
+        "--output-file",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\nvfp4-specialization\\before.json",
+        "--spec",
+        "mtp",
+        "--draft-tokens",
+        "4",
+        "--ngram-draft-tokens",
+        "0",
+        "--kvmem-budget",
+        "36864",
+        "--kvmem-gen-reserve",
+        "16384",
+        "--kvmem-host-mib",
+        "12288",
+        "--kvmem-sessions",
+        "1",
+        "--no-kvmem-lrfu",
+        "--kvmem-query-scorer",
+        "page-softmax",
+        "--kvmem-score-agg",
+        "mean",
+        "--kvmem-graph-alpha",
+        "0.2",
+        "--kvmem-sink-tokens",
+        "12288",
+        "--kvmem-recent-tokens",
+        "1024"
+      ],
+      "kvmem_scoring": "default C: page-softmax, mean, graph alpha 0.2, no LRFU",
+      "binary_sha256": "b86dc3fc2e87f72e519e20c966bd00893e615c3e7edbb978b8d639230e34c09f",
+      "model_file_size": 12790639360,
+      "model_mtime_ns": 1790956005766642300,
+      "corpus_sha256": "054f7f732f6f75c7d8cc16f8d76a05aa0af91d7c7533ed2dab0afb41884b988d",
+      "exit_code": 0,
+      "wall_seconds": 241.70300000009593
+    },
+    "after": {
+      "label": "nvfp4-after",
+      "upstream": "db8c114802a070a7903f84d01142fda0b00fa7df",
+      "variant": "after",
+      "gpu_uuid": "GPU-A",
+      "kv_dtype": "nvfp4",
+      "baseline_instrumentation": "benchmark uses Aggregate observation phase_timings and exports existing Engine wall timings; native engine unchanged",
+      "budget": 36864,
+      "reserve": 16384,
+      "prompt_tokens": 36864,
+      "timed_decode_tokens": 256,
+      "requested_output_tokens": 257,
+      "native_main_capacity": null,
+      "main_capacity": 53248,
+      "max_context": 53248,
+      "mtp": true,
+      "ngram_draft_tokens": 0,
+      "adaptive_mtp": false,
+      "repetitions": 3,
+      "warmup": 1,
+      "validation_run": false,
+      "verify_transfers": false,
+      "equal_input": true,
+      "command": [
+        "$ARTIFACTS\\ninfer-upstream-20261022\\build-kvmem\\bench\\ninfer_bench.exe",
+        "--weights",
+        "$ARTIFACTS\\models\\ninfer\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+        "--corpus",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\native\\bench\\fixtures\\bench_corpus.ids",
+        "-pg",
+        "36864,256",
+        "--max-ctx",
+        "53248",
+        "--prefill-chunk",
+        "256",
+        "--kv-dtype",
+        "nvfp4",
+        "--device",
+        "0",
+        "--ngram-draft-tokens",
+        "0",
+        "--warmup",
+        "1",
+        "-r",
+        "3",
+        "-o",
+        "json",
+        "--output-file",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\nvfp4-specialization\\after.json",
+        "--spec",
+        "mtp",
+        "--draft-tokens",
+        "4",
+        "--ngram-draft-tokens",
+        "0",
+        "--kvmem-budget",
+        "36864",
+        "--kvmem-gen-reserve",
+        "16384",
+        "--kvmem-host-mib",
+        "12288",
+        "--kvmem-sessions",
+        "1",
+        "--no-kvmem-lrfu",
+        "--kvmem-query-scorer",
+        "page-softmax",
+        "--kvmem-score-agg",
+        "mean",
+        "--kvmem-graph-alpha",
+        "0.2",
+        "--kvmem-sink-tokens",
+        "12288",
+        "--kvmem-recent-tokens",
+        "1024"
+      ],
+      "kvmem_scoring": "default C: page-softmax, mean, graph alpha 0.2, no LRFU",
+      "binary_sha256": "21c7f72a73409cac9113d76f996081cde0ad61b69ac909e5cacc70a1d206c18a",
+      "model_file_size": 12790639360,
+      "model_mtime_ns": 1790956005766642300,
+      "corpus_sha256": "054f7f732f6f75c7d8cc16f8d76a05aa0af91d7c7533ed2dab0afb41884b988d",
+      "exit_code": 0,
+      "wall_seconds": 238.1720000000205
+    }
+  },
+  "qualifications": [
+    {
+      "name": "oracle",
+      "exit_code": 0,
+      "command": [
+        "$ARTIFACTS\\ninfer-upstream-20261022\\build-kvmem\\tests\\ninfer_attention_page_mass.exe"
+      ],
+      "gpu": "GPU-B"
+    },
+    {
+      "name": "feedback-http",
+      "exit_code": 0,
+      "command": [
+        "$ARTIFACTS\\ninfer-upstream-20261022\\python\\cpython-3.11.15-windows-x86_64-none\\python.exe",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\kvmem\\tests\\ninfer-assistant-prefill-regression.py",
+        "--argv-json",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\nvfp4-specialization\\argv.json",
+        "--output",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\nvfp4-specialization\\feedback-http",
+        "--gpu",
+        "GPU-B"
+      ],
+      "gpu": "GPU-B"
+    },
+    {
+      "name": "query-pressure",
+      "exit_code": 0,
+      "command": [
+        "$ARTIFACTS\\ninfer-upstream-20261022\\python\\cpython-3.11.15-windows-x86_64-none\\python.exe",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\kvmem\\tests\\query-pressure-regression.py",
+        "--backend",
+        "ninfer",
+        "--argv-json",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\nvfp4-specialization\\argv.json",
+        "--output",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\nvfp4-specialization\\query-pressure",
+        "--gpu",
+        "GPU-B"
+      ],
+      "gpu": "GPU-B"
+    }
+  ],
+  "historical_native_reference": {
+    "medians": {
+      "prefill_tok_s": 687.6144717262205,
+      "decode_tok_s": 76.77215320458963
+    },
+    "after_change_percent": {
+      "prefill_tok_s": -0.9996634946702332,
+      "decode_tok_s": -1.6688829836250973
+    },
+    "note": "Same-day earlier run, not rerun with this pair"
+  },
+  "fork": {
+    "merged": false,
+    "head": "c480077bf7410e0ebf23437522b89aae721233c4",
+    "base": "db8c114802a070a7903f84d01142fda0b00fa7df",
+    "direct_kv_changes": [
+      "src/ops/kv_cache/nvfp4_group16_codec.cuh",
+      "src/ops/kv_cache/fp8_e4m3_row_codec.cuh"
+    ],
+    "note": "Separate weight and KV decoder changes; KV changes could affect IQ3_S + NVFP4 KV, but no gain measured on this GPU"
+  },
+  "limitations": [
+    "Only one 36K MTP4 performance workload on RTX 5060 Ti; three repetitions in fixed order",
+    "No multi-GPU, other architecture runtime or long-context quality campaign",
+    "Changed FP32 reduction order is qualified against independent FP64 oracle, not promised bitwise identical"
+  ],
+  "raw_evidence_directory": "$ARTIFACTS\\ninfer-upstream-20261022\\nvfp4-specialization",
+  "profile": {
+    "purpose": "Feedback kernel attribution only; trace overhead invalidates end-to-end speed claims",
+    "same_tokens_and_mtp": true,
+    "measurements": {
+      "before": {
+        "prefill": [
+          {
+            "kernel": "ninfer::ops::<unnamed>::average_heads(const float *, const float *, int, int, float *)",
+            "count": 108,
+            "gpu_ms": 0.272921,
+            "registers_min": 40,
+            "registers_max": 40,
+            "local_memory_per_thread": 0
+          },
+          {
+            "kernel": "ninfer::ops::<unnamed>::normalize_lse(const float *, int, float *)",
+            "count": 108,
+            "gpu_ms": 0.370931,
+            "registers_min": 38,
+            "registers_max": 38,
+            "local_memory_per_thread": 0
+          },
+          {
+            "kernel": "void ninfer::ops::<unnamed>::page_lse<(bool)0>(const __nv_bfloat16 *, const int *, const int *, const int *, const void *, const void *, ninfer::KvCacheStorage, int, int, int, int, float *)",
+            "count": 108,
+            "gpu_ms": 966.464907,
+            "registers_min": 90,
+            "registers_max": 90,
+            "local_memory_per_thread": 0
+          }
+        ],
+        "decode": [
+          {
+            "kernel": "ninfer::ops::<unnamed>::average_heads(const float *, const float *, int, int, float *)",
+            "count": 48,
+            "gpu_ms": 0.118013,
+            "registers_min": 40,
+            "registers_max": 40,
+            "local_memory_per_thread": 0
+          },
+          {
+            "kernel": "ninfer::ops::<unnamed>::normalize_lse(const float *, int, float *)",
+            "count": 48,
+            "gpu_ms": 0.120925,
+            "registers_min": 38,
+            "registers_max": 38,
+            "local_memory_per_thread": 0
+          },
+          {
+            "kernel": "void ninfer::ops::<unnamed>::page_lse<(bool)0>(const __nv_bfloat16 *, const int *, const int *, const int *, const void *, const void *, ninfer::KvCacheStorage, int, int, int, int, float *)",
+            "count": 48,
+            "gpu_ms": 115.415682,
+            "registers_min": 90,
+            "registers_max": 90,
+            "local_memory_per_thread": 0
+          }
+        ]
+      },
+      "after": {
+        "prefill": [
+          {
+            "kernel": "ninfer::ops::<unnamed>::average_heads(const float *, const float *, int, int, float *)",
+            "count": 108,
+            "gpu_ms": 0.266494,
+            "registers_min": 40,
+            "registers_max": 40,
+            "local_memory_per_thread": 0
+          },
+          {
+            "kernel": "ninfer::ops::<unnamed>::normalize_lse(const float *, int, float *)",
+            "count": 108,
+            "gpu_ms": 0.355158,
+            "registers_min": 38,
+            "registers_max": 38,
+            "local_memory_per_thread": 0
+          },
+          {
+            "kernel": "void ninfer::ops::<unnamed>::page_lse<(bool)0, (bool)1>(const __nv_bfloat16 *, const int *, const int *, const int *, const void *, const void *, ninfer::KvCacheStorage, int, int, int, int, float *)",
+            "count": 108,
+            "gpu_ms": 271.626747,
+            "registers_min": 40,
+            "registers_max": 40,
+            "local_memory_per_thread": 0
+          }
+        ],
+        "decode": [
+          {
+            "kernel": "ninfer::ops::<unnamed>::average_heads(const float *, const float *, int, int, float *)",
+            "count": 48,
+            "gpu_ms": 0.111965,
+            "registers_min": 40,
+            "registers_max": 40,
+            "local_memory_per_thread": 0
+          },
+          {
+            "kernel": "ninfer::ops::<unnamed>::normalize_lse(const float *, int, float *)",
+            "count": 48,
+            "gpu_ms": 0.11446,
+            "registers_min": 38,
+            "registers_max": 38,
+            "local_memory_per_thread": 0
+          },
+          {
+            "kernel": "void ninfer::ops::<unnamed>::page_lse<(bool)0, (bool)1>(const __nv_bfloat16 *, const int *, const int *, const int *, const void *, const void *, ninfer::KvCacheStorage, int, int, int, int, float *)",
+            "count": 48,
+            "gpu_ms": 31.220636,
+            "registers_min": 40,
+            "registers_max": 40,
+            "local_memory_per_thread": 0
+          }
+        ]
+      }
+    },
+    "command": [
+      "C:\\Program Files\\NVIDIA Corporation\\Nsight Systems 2025.6.3\\target-windows-x64\\nsys.exe",
+      "profile",
+      "--trace=cuda,nvtx",
+      "--sample=none",
+      "--cpuctxsw=none",
+      "--cuda-graph-trace=graph:host-only",
+      "--export=sqlite",
+      "--output=$ARTIFACTS\\ninfer-upstream-20261022\\nvfp4-specialization\\profile\\trace",
+      "$ARTIFACTS\\ninfer-upstream-20261022\\build-kvmem\\bench\\ninfer_bench.exe",
+      "--weights",
+      "$ARTIFACTS\\models\\ninfer\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+      "--corpus",
+      "$ARTIFACTS\\ninfer-upstream-20261022\\native\\bench\\fixtures\\bench_corpus.ids",
+      "-pg",
+      "36864,256",
+      "--max-ctx",
+      "53248",
+      "--prefill-chunk",
+      "256",
+      "--kv-dtype",
+      "nvfp4",
+      "--device",
+      "0",
+      "--ngram-draft-tokens",
+      "0",
+      "--warmup",
+      "0",
+      "-r",
+      "1",
+      "-o",
+      "json",
+      "--output-file",
+      "$ARTIFACTS\\ninfer-upstream-20261022\\nvfp4-specialization\\profile\\report.json",
+      "--spec",
+      "mtp",
+      "--draft-tokens",
+      "4",
+      "--ngram-draft-tokens",
+      "0",
+      "--kvmem-budget",
+      "36864",
+      "--kvmem-gen-reserve",
+      "16384",
+      "--kvmem-host-mib",
+      "12288",
+      "--kvmem-sessions",
+      "1",
+      "--no-kvmem-lrfu",
+      "--kvmem-query-scorer",
+      "page-softmax",
+      "--kvmem-score-agg",
+      "mean",
+      "--kvmem-graph-alpha",
+      "0.2",
+      "--kvmem-sink-tokens",
+      "12288",
+      "--kvmem-recent-tokens",
+      "1024"
+    ]
+  },
+  "_sanitization": {
+    "version": 1,
+    "original_sha256": "a26bd6c65b8dd0cecde21b670cdcd51cc133cdac8adb650099ddb306863d35c5",
+    "scope": "Device identities/private paths anonymized, credential fields redacted; measurements unchanged."
+  }
+}

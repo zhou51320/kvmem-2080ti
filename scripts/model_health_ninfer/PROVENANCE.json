@@ -1,0 +1,28 @@
+{
+  "repository": "https://github.com/iamwavecut/ninfer-all",
+  "revision": "db8c114802a070a7903f84d01142fda0b00fa7df",
+  "source": "tools/artifact",
+  "purpose": "CPU-only static inspection, not worker compatibility certification",
+  "sha256": {
+    "reader.py": "5fbff7696b229be638287caa8a8943b3fcba7becc02bba0553e9a967d95cc2f2",
+    "schema.py": "70e0ce75660c63f2d9fa27ae37321865e91ead22283ae9b809680a689b567edc",
+    "layouts.py": "b385b4d1148f1ccb25f7a61310ddf65dc6c49e9f7dd335edd6157470398a70f1",
+    "formats.py": "cf5dbba6aca8b2fe66bcc848450648b60272877cff6e81eca432eccadaccdb00",
+    "framing.py": "db8792006a1c5457b03b80fb83922dde287073d9c597025546fcc3cd55326e77",
+    "file_io.py": "13836ef9ba539b6fdd0b1cf0f9109a4e47faa26d9c08fd4f1a470705f293acf5"
+  },
+  "local_extensions": [
+    {
+      "id": "ptq1",
+      "sha256": "c02a1ba47b17230010a4c42f936341fd1977584cd74cf2e4aff04f3a13e91bc9"
+    },
+    {
+      "id": "ptq1-performance",
+      "sha256": "960ec0ea605abeb858fa41a56af410cc26bbefb153c6e14205b00c7433ee2842"
+    },
+    {
+      "id": "t5-performance",
+      "sha256": "45f0f1276e54032d4267c1f917e64a752caedd40a0afd726c78b3cf5ef0969a8"
+    }
+  ]
+}

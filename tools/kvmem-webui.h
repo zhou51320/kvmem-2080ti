@@ -32,20 +32,36 @@ inline bool kvmem_output_limit(const nlohmann::json & body, int limit, int & val
     if (body.contains(key)) {
         const auto & n = body[key];
         if (!n.is_number_integer() || (!n.is_number_unsigned() && n.get<int64_t>() < -1)) {
-            error = std::string(key) + " must be -1 (server default) or a non-negative integer";
+            error = std::string(key) + " must be -1 (no extra cap) or a non-negative integer";
             return false;
         }
-        // Keep -1/0 as the configured default. Clamp before narrowing, including uint64 inputs.
+        // -1 explicitly removes the default cap; 0 retains the legacy server-default meaning.
+        // Keep the unlimited sentinel until the prompt is tokenized. Clamp before narrowing.
         if (n.is_number_unsigned()) {
             const auto requested = n.get<uint64_t>();
             if (requested > 0) value = static_cast<int>(std::min<uint64_t>(requested, limit));
         } else {
             const auto requested = n.get<int64_t>();
+            if (requested == -1) value = -1;
             if (requested > 0) value = static_cast<int>(std::min<int64_t>(requested, limit));
         }
     }
-    if (value < 1) value = limit;
+    if (value < 1) value = -1;
     value = std::min(value, limit);
+    return true;
+}
+
+inline bool kvmem_resolve_output_limit(int context, size_t prompt, int & value, std::string & error) {
+    if (context <= 0 || prompt >= static_cast<size_t>(context)) {
+        error = "prompt leaves no output room in n_ctx";
+        return false;
+    }
+    const int remaining = context - static_cast<int>(prompt);
+    if (value < 0) value = remaining;
+    if (value > remaining) {
+        error = "prompt + max_tokens exceeds n_ctx";
+        return false;
+    }
     return true;
 }
 

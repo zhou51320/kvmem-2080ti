@@ -13,6 +13,7 @@ __pycache__/
 *.pyc
 
 /build-ui*/
+/ui/node_modules/
 
 /build-win*/
 /build-session*/
@@ -40,3 +41,4 @@ CLAUDE.md
 # Private validation preferences and original unsanitized evidence.
 /.kvmem-local.json
 /private-evidence/
+/ui/dist/

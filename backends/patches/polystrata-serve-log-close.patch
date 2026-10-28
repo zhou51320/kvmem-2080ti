@@ -1,0 +1,62 @@
+diff --git a/serve/images.py b/serve/images.py
+index bd62fa4d2958d010355dbb0c406421d18a336f8a..caaf8e8a642c096d623e4daf541abdf51a47c7ff 100644
+--- a/serve/images.py
++++ b/serve/images.py
+@@ -203,6 +203,14 @@ class ImageGen:
+             except (OSError, ValueError):
+                 pass
+ 
++    def close(self) -> None:
++        """The server ends: release the shared log's handle (the config's "log" is opened for this object's life).
++        Without it the handle outlives the server and Windows refuses to remove the log's temporary directory."""
++        log, self.log = self.log, None
++        if log is not None:
++            with contextlib.suppress(OSError):
++                log.close()
++
+     def _prune(self) -> None:
+         """Keep the newest keep_files PNGs of response_format url (the oldest go)."""
+         files = sorted((p for p in self.dir.glob("*.png") if FILE_NAME.match(p.name)), key=lambda p: p.stat().st_mtime)
+diff --git a/serve/server.py b/serve/server.py
+index 22bd47507267b702e37b7f7974c41ab99c5e4712..241ac7c2d7ba941c7cabe6f3aa28a127fc35682f 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -2611,6 +2611,10 @@ class Vision:
+         """#914: close() for good: the server ends, so the encoder's directory (one ~10 MB .sve per image, on a tmpfs
+         /tmp that is RAM) goes with it instead of piling up with every start.  unload() keeps it for the restart."""
+         self.close()
++        log = self.spawn[1]
++        if log is not None:                             # the shared log's handle: unload() keeps it, the end releases it
++            with contextlib.suppress(OSError):
++                log.close()
+         shutil.rmtree(self.dir, ignore_errors=True)
+ 
+ 
+@@ -7689,7 +7693,7 @@ def shutdown(svc: Service, httpd, hub=None) -> None:
+     ones the server started with (#37) - and the MCP servers PolyStrata started."""
+     engine, vision = svc.engine, svc.vision
+     closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
+-               hub.close if hub is not None else None]
++               svc.images.close if svc.images else None, hub.close if hub is not None else None]
+     for close in filter(None, closers):
+         try:
+             close()
+diff --git a/serve/test_server.py b/serve/test_server.py
+index 0ef431aa71db0c2d6fe0922b084b14d81db447a2..b66d12997991f7f96c255b6cdd8fb685b2384c0c 100644
+--- a/serve/test_server.py
++++ b/serve/test_server.py
+@@ -5981,10 +5981,14 @@ class VisionShutdown(unittest.TestCase):
+                 def kill(self):
+                     pass
+ 
++            log = io.StringIO()
++            v.spawn = ([], log, None)
+             v.proc = Proc()
+             v.close()
++            self.assertFalse(log.closed)
+             self.assertTrue((d / "k.sve").exists())
+             v.shutdown()
++            self.assertTrue(log.closed)
+             self.assertFalse(d.exists())
+ 
+ 

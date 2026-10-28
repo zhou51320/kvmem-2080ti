@@ -22,7 +22,7 @@ module.exports=async({browser,base,info})=>{
   assert.equal(previews.length,before+1);const result=previews.at(-1);await closeCheck();return result;
  }
  try{
-  await page.goto(base+'/monitor/');await field('KvTypeK').waitFor();
+  await page.goto(base+'/monitor/#config');await field('KvTypeK').waitFor();
   await page.locator('[data-language-select]').selectOption('zh-CN');
   assert.equal(await field('KvType').count(),0,'llama has two controls, no competing combined override');
   assert.deepEqual(await pair(),['q5_0','q5_0'],'legacy KvType initializes both sides');
@@ -57,7 +57,8 @@ module.exports=async({browser,base,info})=>{
   await saved();await page.reload();await field('KvTypeK').waitFor();
   const beforeRestart=previews.length;await page.locator('[data-action=preview]').click();
   assert.ok((await page.locator('[data-dialog=check]').textContent()).includes('重新启动控制台'));assert.equal(previews.length,beforeRestart);
-  assert.ok(mutations.every(url=>url==='/api/launcher/preview'));assert.deepEqual(errors,[]);
+  assert.ok(mutations.every(url=>['/api/launcher/preview','/api/launcher/inspect-model'].includes(url)),
+   'KV edits may preview/inspect but never start, stop or save a service');assert.deepEqual(errors,[]);
   console.log('PASS: independent K/V selection, mixed-bit payload, native pair limits, drafts/templates/reload, legacy migration, backend isolation and restart guidance (no inference)');
  }finally{await context.close();}
 };

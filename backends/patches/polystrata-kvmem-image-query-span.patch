@@ -1,0 +1,23 @@
+diff --git a/serve/server.py b/serve/server.py
+index 241ac7c2..66d728e7 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -4545,6 +4545,9 @@ class Service:
+             literal = self.tok.encode(mark, parse_special=False)
+             begin, end = ([one(around[0])], [one(around[1])]) if around else ([], [])
+             query = getattr(ids, "kvmem_query", None)
++            no_query = query == (0, 0)  # an assistant-final continuation: (0, 0) means "no Query", not a span
++            if no_query:
++                query = None
+             query_begin = query_end = None
+             out, k = [], 0
+             for j, t in enumerate(ids):
+@@ -4568,6 +4571,8 @@ class Service:
+                 if query_begin is None or query_end is None or query_begin >= query_end:
+                     raise ValueError("the expanded image prompt lost its KVMem query span")
+                 ids = kvmem.Prompt(out, (query_begin, query_end))
++            elif no_query:
++                ids = kvmem.Prompt(out, (0, 0))     # the engine's turn key still needs the sentinel
+             else:
+                 ids = out
+         ctx = self.engine.max_context

@@ -4,9 +4,9 @@ const assert=require('node:assert/strict');
 const path=require('node:path');
 module.exports=async({browser,base,info})=>{
  const context=await browser.newContext({viewport:{width:1366,height:900}});
- const page=await context.newPage(),errors=[],mutations=[],previews=[];
+ const page=await context.newPage(),errors=[],posts=[],previews=[];
  page.on('pageerror',error=>errors.push(error.message));
- page.on('request',request=>{if(request.method()==='POST')mutations.push(new URL(request.url()).pathname);});
+ page.on('request',request=>{if(request.method()==='POST')posts.push(new URL(request.url()).pathname);});
  const gpus=[{uuid:'GPU-switch-first',name:'NVIDIA GeForce Test GPU A'},{uuid:'GPU-switch-second',name:'NVIDIA GeForce Test GPU B'}];
  const initial={Backend:'ninfer',Model:'C:/models/switch.ninfer',Worker:'C:/workers/ninfer.exe',
   Gpu:gpus.map(g=>g.uuid).reverse().join(','),StageLayers:[24,40],Context:8192,Budget:2048,
@@ -30,10 +30,10 @@ module.exports=async({browser,base,info})=>{
  const values=async()=>Object.fromEntries(await Promise.all(sharedKeys.map(async key=>[key,await field(key).inputValue()])));
  const closeCheck=()=>page.locator('[data-dialog=check] [data-dialog-close]').click();
  try{
-  await page.goto(base+'/monitor/');await field('Backend').waitFor();
+  await page.goto(base+'/monitor/#config');await field('Backend').waitFor();
   await page.locator('[data-language-select]').selectOption('zh-CN');
   await field('Context').fill('123456');
-  await page.locator('.l-native > summary').click();await page.locator('[data-native]').fill('["--threads",');
+  await page.locator('.l-native > summary').click();await page.locator('[data-engine-arguments] > summary').click();await page.locator('[data-native]').fill('["--threads",');
   const shared=await values(),originalOrder=await order();
   assert.deepEqual(originalOrder,[gpus[1].uuid,gpus[0].uuid]);
   const cardShape=()=>page.locator('.l-gpu-choice').evaluateAll(cards=>cards.map(card=>({tag:card.tagName,type:card.querySelector('input').type,text:card.textContent})));
@@ -41,7 +41,9 @@ module.exports=async({browser,base,info})=>{
   await field('Backend').selectOption('llamacpp');
   assert.deepEqual(await cardShape(),ninferShape,'the same GPU cards appear for both engines');
   assert.deepEqual(await order(),originalOrder,'switching must not replace a multi-GPU selection with the first GPU');
-  assert.deepEqual(await values(),shared,'common settings must survive the first switch');
+  assert.equal(await field('Context').inputValue(),'262144','first switch uses engine default');
+  assert.equal(await field('Budget').inputValue(),'47104');assert.equal(await field('MaxTokens').inputValue(),'0');
+  assert.equal(await field('Port').inputValue(),shared.Port);assert.equal(await page.locator('[data-preset]').count(),1);assert.equal(await page.locator('[data-preset]').getAttribute('data-preset'),'llamacpp-default');
   assert.ok((await page.locator('[data-gpu-limit]').textContent()).includes('已保留原选择'));
   assert.equal(await page.locator('[data-gpu-choice]').first().evaluate(el=>el.checkValidity()),false);
   assert.equal(await field('Model').inputValue(),'','model assets are backend-specific');
@@ -49,8 +51,8 @@ module.exports=async({browser,base,info})=>{
   assert.equal(await field('KvTypeK').inputValue(),'q8_0','native KV names are backend-specific');
   assert.equal(await field('KvTypeV').inputValue(),'q8_0');
   await field('Model').fill('C:/models/switch.gguf');
-  await page.locator('.l-native > summary').click();
-  await field('Worker').fill('C:/workers/llama.exe');await page.locator('[data-native]').fill('["--threads-batch","2"]');
+  await page.locator('.l-native > summary').click();await page.locator('[data-engine-arguments] > summary').click();
+  await page.locator('[data-engine-environment] > summary').click();await field('Worker').fill('C:/workers/llama.exe');await page.locator('[data-native]').fill('["--threads-batch","2"]');
   await group(0);await field('KvTypeK').selectOption('q8_0');await field('KvTypeV').selectOption('q4_0');
   await group(4);await field('Port').fill('18521');
   await page.locator('.l-service-fields').locator('..').locator('summary').click();await field('LogLevel').selectOption('trace');
@@ -66,7 +68,7 @@ module.exports=async({browser,base,info})=>{
   await field('Backend').selectOption('ninfer');
   assert.deepEqual(await order(),[gpus[0].uuid,gpus[1].uuid]);
   assert.equal(await field('StageLayers').inputValue(),'40,24');
-  assert.deepEqual(await values(),changed,'the latest shared values win on a return switch');
+  assert.deepEqual(await values(),{...shared,Port:changed.Port},'resource edits belong to each engine, listener follows the last edit');
   assert.equal(await field('Model').inputValue(),initial.Model);assert.equal(await field('Worker').inputValue(),initial.Worker);
   assert.equal(await field('KvType').inputValue(),'rk4v4');
   assert.equal(await page.locator('[data-native]').inputValue(),'["--threads",','incomplete backend-specific edits survive switching');
@@ -76,11 +78,12 @@ module.exports=async({browser,base,info})=>{
   assert.equal(await field('Worker').inputValue(),'C:/workers/llama.exe');assert.equal(await field('KvTypeK').inputValue(),'q8_0');assert.equal(await field('KvTypeV').inputValue(),'q4_0');
   assert.deepEqual(await order(),[gpus[0].uuid]);assert.equal(await page.locator('[data-gpu-limit]').isVisible(),false);
   assert.equal(await page.locator('[data-gpu-order]').isVisible(),false,'single-GPU mode has no unnecessary order controls');
-  for(const key of ['StageLayers','DraftTokens','Vision','ThinkingBudget'])assert.equal(await field(key).isDisabled(),true,key);
+  assert.equal(await field('StageLayers').isDisabled(),true);
+  for(const key of ['DraftTokens','Vision','ThinkingBudget','ReasoningEffort','PreserveThinking'])assert.equal(await field(key).isDisabled(),false,key);
   await page.locator('[data-language-select]').selectOption('en');assert.deepEqual(await order(),[gpus[0].uuid]);
   await page.locator('[data-language-select]').selectOption('zh-CN');
   await group(4);await field('Concurrency').fill('9');
-  await field('Backend').selectOption('ninfer');assert.equal(await field('Concurrency').inputValue(),'9');
+  await field('Backend').selectOption('ninfer');assert.equal(await field('Concurrency').inputValue(),'1');
   await field('Backend').selectOption('llamacpp');assert.equal(await field('Concurrency').inputValue(),'9','switching backends must retain invalid user input');
   await page.locator('[data-action=preview]').click();await page.locator('[data-check-summary]').waitFor();
   assert.ok((await page.locator('[data-check-summary]').textContent()).includes('需要补全'));assert.equal(previews.length,0);
@@ -89,7 +92,8 @@ module.exports=async({browser,base,info})=>{
   await page.waitForFunction(()=>document.querySelector('[data-check-summary]')?.textContent.includes('检查通过'));
   assert.equal(previews.length,1);assert.equal(previews[0].Gpu,gpus[0].uuid);
   assert.equal(previews[0].KvTypeK,'q8_0');assert.equal(previews[0].KvTypeV,'q4_0');assert.equal(Object.hasOwn(previews[0],'KvType'),false);
-  for(const key of ['StageLayers','DraftTokens','Vision','ThinkingBudget'])assert.equal(Object.hasOwn(previews[0],key),false,key+' must not reach llama');
+  assert.equal(Object.hasOwn(previews[0],'StageLayers'),false);
+  for(const [key,value] of Object.entries({DraftTokens:3,Vision:true,ThinkingBudget:16384,ReasoningEffort:'xhigh',PreserveThinking:true,MaxTokens:0}))assert.equal(previews[0][key],value,key+' reaches llama');
   await closeCheck();
   if(process.env.SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'backend-switch-llama.png'),fullPage:true});
   await field('Backend').selectOption('ninfer');
@@ -102,10 +106,15 @@ module.exports=async({browser,base,info})=>{
   assert.deepEqual(await order(),[gpus[1].uuid]);await field('Backend').selectOption('llamacpp');assert.deepEqual(await order(),[gpus[1].uuid]);
   await page.waitForFunction(()=>document.querySelector('[data-draft-state]').textContent.includes('已自动保存'));
   await page.reload();await field('Backend').waitFor();assert.deepEqual(await order(),[gpus[1].uuid]);
-  await page.setViewportSize({width:390,height:900});
+  await field('Backend').selectOption('ninfer');assert.equal(await field('Context').inputValue(),'123456','other engine draft survives a reload');
+  await field('Backend').selectOption('polystrata');assert.equal(await field('Prefill').inputValue(),'512');assert.equal(await field('DraftTokens').inputValue(),'2');assert.equal(await field('ReasoningEffort').inputValue(),'xhigh');assert.equal(await field('Vision').isChecked(),false);assert.equal(await page.locator('[data-preset]').getAttribute('data-preset'),'polystrata-default');
+  await field('Backend').selectOption('llamacpp');await page.setViewportSize({width:390,height:900});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'GPU cards fit a narrow screen');
   if(process.env.SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'backend-switch-mobile.png'),fullPage:true});
-  assert.ok(mutations.every(url=>url==='/api/launcher/preview'),'switches never mutate a running service');
+  // Preview and model inspection are read-only POSTs; start/stop and every other
+  // mutation must remain absent while switching backends.
+  assert.ok(posts.every(url=>['/api/launcher/preview','/api/launcher/inspect-model'].includes(url)),
+   'switches never mutate a running service');
   assert.deepEqual(errors,[]);
   console.log('PASS: identical GPU cards, shared settings, explicit capability validation, per-engine assets/raw edits, GPU/layer identity, language/reload and no inference');
  }finally{await context.close();}

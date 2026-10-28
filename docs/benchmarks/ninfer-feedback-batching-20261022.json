@@ -1,0 +1,1073 @@
+{
+  "date": "2026-10-22",
+  "scope": "Third optimization only: batch per-device feedback transfers; kernels and sampling policy unchanged",
+  "upstream": "db8c114802a070a7903f84d01142fda0b00fa7df",
+  "gpu_uuid": "GPU-A",
+  "workload": "Qwen3.8-27B IQ3_S; pp36864/tg256; capacity53248; MTP4; ngram0; default C; warmup1/reps3; wall-throughput medians",
+  "execution_order": [
+    "int8-before",
+    "int8-after",
+    "nvfp4-after",
+    "nvfp4-before"
+  ],
+  "extra_device_bytes_per_rank": 425984,
+  "extra_pinned_host_bytes": 638976,
+  "qualifications": [
+    {
+      "name": "oracle",
+      "exit_code": 0,
+      "command": [
+        "$ARTIFACTS\\ninfer-upstream-20261022\\build-kvmem\\tests\\ninfer_attention_page_mass.exe"
+      ],
+      "gpu": "GPU-B"
+    },
+    {
+      "name": "int8-feedback-http",
+      "exit_code": 0,
+      "command": [
+        "$ARTIFACTS\\ninfer-upstream-20261022\\python\\cpython-3.11.15-windows-x86_64-none\\python.exe",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\kvmem\\tests\\ninfer-assistant-prefill-regression.py",
+        "--argv-json",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\int8-argv.json",
+        "--output",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\int8-feedback-http",
+        "--gpu",
+        "GPU-B"
+      ],
+      "gpu": "GPU-B"
+    },
+    {
+      "name": "nvfp4-feedback-http",
+      "exit_code": 0,
+      "command": [
+        "$ARTIFACTS\\ninfer-upstream-20261022\\python\\cpython-3.11.15-windows-x86_64-none\\python.exe",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\kvmem\\tests\\ninfer-assistant-prefill-regression.py",
+        "--argv-json",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\nvfp4-argv.json",
+        "--output",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\nvfp4-feedback-http",
+        "--gpu",
+        "GPU-B"
+      ],
+      "gpu": "GPU-B"
+    },
+    {
+      "name": "query-pressure",
+      "exit_code": 0,
+      "command": [
+        "$ARTIFACTS\\ninfer-upstream-20261022\\python\\cpython-3.11.15-windows-x86_64-none\\python.exe",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\kvmem\\tests\\query-pressure-regression.py",
+        "--backend",
+        "ninfer",
+        "--argv-json",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\int8-argv.json",
+        "--output",
+        "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\query-pressure",
+        "--gpu",
+        "GPU-B"
+      ],
+      "gpu": "GPU-B"
+    }
+  ],
+  "cases": [
+    {
+      "kv_dtype": "int8",
+      "samples": {
+        "before": {
+          "prefill_tok_s": [
+            688.8317915648814,
+            688.3560942260676,
+            688.4741616874136
+          ],
+          "decode_tok_s": [
+            78.63622183425622,
+            78.66595809943783,
+            78.57458821697931
+          ]
+        },
+        "after": {
+          "prefill_tok_s": [
+            688.9527081753708,
+            689.0782282189707,
+            688.6786038695749
+          ],
+          "decode_tok_s": [
+            78.52289117113763,
+            78.67339447116574,
+            78.64084293890782
+          ]
+        }
+      },
+      "medians": {
+        "before": {
+          "prefill_tok_s": 688.4741616874136,
+          "decode_tok_s": 78.63622183425622
+        },
+        "after": {
+          "prefill_tok_s": 688.9527081753708,
+          "decode_tok_s": 78.64084293890782
+        }
+      },
+      "change_percent": {
+        "prefill_tok_s": 0.06950827127403247,
+        "decode_tok_s": 0.0058765598649257456
+      },
+      "equal_generated_tokens": true,
+      "equal_speculative_work": true,
+      "speculative": {
+        "before": [
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          },
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          },
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          }
+        ],
+        "after": [
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          },
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          },
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          }
+        ]
+      },
+      "memory": {
+        "before": {
+          "device": 0,
+          "max_context": 53248,
+          "kv_capacity_mode": "explicit",
+          "kv_capacity": 53248,
+          "kv_capacity_page_groups": 832,
+          "kv_capacity_max_page_groups": 832,
+          "kv_cache": "int8-group64",
+          "weights": {
+            "capacity_bytes": 12481729536,
+            "used_bytes": 12481729536,
+            "peak_used_bytes": 12481729536
+          },
+          "sequence": {
+            "capacity_bytes": 2205968128,
+            "used_bytes": 2205968128,
+            "peak_used_bytes": 2205968128
+          },
+          "workspace": {
+            "capacity_bytes": 74600704,
+            "used_bytes": 0,
+            "peak_used_bytes": 0
+          },
+          "vision_workspace": null,
+          "minimum_runtime_reservation_bytes": 2366552064,
+          "kv_capacity_increment_bytes": 0,
+          "runtime_reservation_bytes": 2366552064,
+          "available_after_weights_bytes": 3426746368,
+          "available_after_startup_bytes": 1136656384,
+          "kv_capacity_headroom_bytes": 0,
+          "planned_slack_bytes": 1060194304,
+          "cuda_graph_allowance_bytes": 85983232,
+          "kv_payload_bytes": 1911951360,
+          "kvmem": {
+            "enabled": true,
+            "selected_tokens": 36864,
+            "reserve_tokens": 16384,
+            "host_payload_bytes": 0,
+            "disk_payload_bytes": 0
+          }
+        },
+        "after": {
+          "device": 0,
+          "max_context": 53248,
+          "kv_capacity_mode": "explicit",
+          "kv_capacity": 53248,
+          "kv_capacity_page_groups": 832,
+          "kv_capacity_max_page_groups": 832,
+          "kv_cache": "int8-group64",
+          "weights": {
+            "capacity_bytes": 12481729536,
+            "used_bytes": 12481729536,
+            "peak_used_bytes": 12481729536
+          },
+          "sequence": {
+            "capacity_bytes": 2206394112,
+            "used_bytes": 2206394112,
+            "peak_used_bytes": 2206394112
+          },
+          "workspace": {
+            "capacity_bytes": 74600704,
+            "used_bytes": 0,
+            "peak_used_bytes": 0
+          },
+          "vision_workspace": null,
+          "minimum_runtime_reservation_bytes": 2366978048,
+          "kv_capacity_increment_bytes": 0,
+          "runtime_reservation_bytes": 2366978048,
+          "available_after_weights_bytes": 3426746368,
+          "available_after_startup_bytes": 1134559232,
+          "kv_capacity_headroom_bytes": 0,
+          "planned_slack_bytes": 1059768320,
+          "cuda_graph_allowance_bytes": 85983232,
+          "kv_payload_bytes": 1911951360,
+          "kvmem": {
+            "enabled": true,
+            "selected_tokens": 36864,
+            "reserve_tokens": 16384,
+            "host_payload_bytes": 0,
+            "disk_payload_bytes": 0
+          }
+        }
+      },
+      "metadata": {
+        "before": {
+          "label": "int8-before",
+          "upstream": "db8c114802a070a7903f84d01142fda0b00fa7df",
+          "variant": "before",
+          "gpu_uuid": "GPU-A",
+          "baseline_instrumentation": "benchmark uses Aggregate observation phase_timings and exports existing Engine wall timings; native engine unchanged",
+          "budget": 36864,
+          "reserve": 16384,
+          "prompt_tokens": 36864,
+          "timed_decode_tokens": 256,
+          "requested_output_tokens": 257,
+          "native_main_capacity": null,
+          "main_capacity": 53248,
+          "max_context": 53248,
+          "mtp": true,
+          "ngram_draft_tokens": 0,
+          "adaptive_mtp": false,
+          "repetitions": 3,
+          "warmup": 1,
+          "validation_run": false,
+          "verify_transfers": false,
+          "equal_input": true,
+          "command": [
+            "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\before.exe",
+            "--weights",
+            "$ARTIFACTS\\models\\ninfer\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+            "--corpus",
+            "$ARTIFACTS\\ninfer-upstream-20261022\\native\\bench\\fixtures\\bench_corpus.ids",
+            "-pg",
+            "36864,256",
+            "--max-ctx",
+            "53248",
+            "--prefill-chunk",
+            "256",
+            "--kv-dtype",
+            "int8",
+            "--device",
+            "0",
+            "--ngram-draft-tokens",
+            "0",
+            "--warmup",
+            "1",
+            "-r",
+            "3",
+            "-o",
+            "json",
+            "--output-file",
+            "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\int8-before.json",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "4",
+            "--ngram-draft-tokens",
+            "0",
+            "--kvmem-budget",
+            "36864",
+            "--kvmem-gen-reserve",
+            "16384",
+            "--kvmem-host-mib",
+            "12288",
+            "--kvmem-sessions",
+            "1",
+            "--no-kvmem-lrfu",
+            "--kvmem-query-scorer",
+            "page-softmax",
+            "--kvmem-score-agg",
+            "mean",
+            "--kvmem-graph-alpha",
+            "0.2",
+            "--kvmem-sink-tokens",
+            "12288",
+            "--kvmem-recent-tokens",
+            "1024"
+          ],
+          "kvmem_scoring": "default C: page-softmax, mean, graph alpha 0.2, no LRFU",
+          "binary_sha256": "b86dc3fc2e87f72e519e20c966bd00893e615c3e7edbb978b8d639230e34c09f",
+          "model_file_size": 12790639360,
+          "model_mtime_ns": 1790956005766642300,
+          "corpus_sha256": "054f7f732f6f75c7d8cc16f8d76a05aa0af91d7c7533ed2dab0afb41884b988d",
+          "exit_code": 0,
+          "wall_seconds": 238.71899999992456
+        },
+        "after": {
+          "label": "int8-after",
+          "upstream": "db8c114802a070a7903f84d01142fda0b00fa7df",
+          "variant": "after",
+          "gpu_uuid": "GPU-A",
+          "baseline_instrumentation": "benchmark uses Aggregate observation phase_timings and exports existing Engine wall timings; native engine unchanged",
+          "budget": 36864,
+          "reserve": 16384,
+          "prompt_tokens": 36864,
+          "timed_decode_tokens": 256,
+          "requested_output_tokens": 257,
+          "native_main_capacity": null,
+          "main_capacity": 53248,
+          "max_context": 53248,
+          "mtp": true,
+          "ngram_draft_tokens": 0,
+          "adaptive_mtp": false,
+          "repetitions": 3,
+          "warmup": 1,
+          "validation_run": false,
+          "verify_transfers": false,
+          "equal_input": true,
+          "command": [
+            "$ARTIFACTS\\ninfer-upstream-20261022\\build-kvmem\\bench\\ninfer_bench.exe",
+            "--weights",
+            "$ARTIFACTS\\models\\ninfer\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+            "--corpus",
+            "$ARTIFACTS\\ninfer-upstream-20261022\\native\\bench\\fixtures\\bench_corpus.ids",
+            "-pg",
+            "36864,256",
+            "--max-ctx",
+            "53248",
+            "--prefill-chunk",
+            "256",
+            "--kv-dtype",
+            "int8",
+            "--device",
+            "0",
+            "--ngram-draft-tokens",
+            "0",
+            "--warmup",
+            "1",
+            "-r",
+            "3",
+            "-o",
+            "json",
+            "--output-file",
+            "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\int8-after.json",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "4",
+            "--ngram-draft-tokens",
+            "0",
+            "--kvmem-budget",
+            "36864",
+            "--kvmem-gen-reserve",
+            "16384",
+            "--kvmem-host-mib",
+            "12288",
+            "--kvmem-sessions",
+            "1",
+            "--no-kvmem-lrfu",
+            "--kvmem-query-scorer",
+            "page-softmax",
+            "--kvmem-score-agg",
+            "mean",
+            "--kvmem-graph-alpha",
+            "0.2",
+            "--kvmem-sink-tokens",
+            "12288",
+            "--kvmem-recent-tokens",
+            "1024"
+          ],
+          "kvmem_scoring": "default C: page-softmax, mean, graph alpha 0.2, no LRFU",
+          "binary_sha256": "7d35864b838f372fb80bc5fd9f970e13b4afc3def24f27277a20c0fb2d5e0fe7",
+          "model_file_size": 12790639360,
+          "model_mtime_ns": 1790956005766642300,
+          "corpus_sha256": "054f7f732f6f75c7d8cc16f8d76a05aa0af91d7c7533ed2dab0afb41884b988d",
+          "exit_code": 0,
+          "wall_seconds": 236.32800000009593
+        }
+      }
+    },
+    {
+      "kv_dtype": "nvfp4",
+      "samples": {
+        "before": {
+          "prefill_tok_s": [
+            671.5311860665819,
+            671.6266714174147,
+            671.3932088052404
+          ],
+          "decode_tok_s": [
+            73.61188473080465,
+            73.64198145257657,
+            73.6241042556429
+          ]
+        },
+        "after": {
+          "prefill_tok_s": [
+            671.8341276530185,
+            671.9285577210445,
+            671.8482537989739
+          ],
+          "decode_tok_s": [
+            73.63328850523389,
+            73.65603769762045,
+            73.67885608510507
+          ]
+        }
+      },
+      "medians": {
+        "before": {
+          "prefill_tok_s": 671.5311860665819,
+          "decode_tok_s": 73.6241042556429
+        },
+        "after": {
+          "prefill_tok_s": 671.8482537989739,
+          "decode_tok_s": 73.65603769762045
+        }
+      },
+      "change_percent": {
+        "prefill_tok_s": 0.04721563777987381,
+        "decode_tok_s": 0.04337362376138909
+      },
+      "equal_generated_tokens": true,
+      "equal_speculative_work": true,
+      "speculative": {
+        "before": [
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          },
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          },
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          }
+        ],
+        "after": [
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          },
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          },
+          {
+            "backend": "mtp",
+            "enabled": true,
+            "draft_window": 4,
+            "rounds": 56,
+            "drafted_tokens": 221,
+            "accepted_tokens": 200,
+            "fallback_steps": 0,
+            "ngram_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_accepted_tokens": 0,
+            "acceptance_rate": 0.9049773756,
+            "acceptance_length": 4.571428571,
+            "accepted_per_position": [
+              55,
+              50,
+              48,
+              47
+            ]
+          }
+        ]
+      },
+      "memory": {
+        "before": {
+          "device": 0,
+          "max_context": 53248,
+          "kv_capacity_mode": "explicit",
+          "kv_capacity": 53248,
+          "kv_capacity_page_groups": 832,
+          "kv_capacity_max_page_groups": 832,
+          "kv_cache": "nvfp4",
+          "weights": {
+            "capacity_bytes": 12481729536,
+            "used_bytes": 12481729536,
+            "peak_used_bytes": 12481729536
+          },
+          "sequence": {
+            "capacity_bytes": 1336899328,
+            "used_bytes": 1336899328,
+            "peak_used_bytes": 1336899328
+          },
+          "workspace": {
+            "capacity_bytes": 74600704,
+            "used_bytes": 0,
+            "peak_used_bytes": 0
+          },
+          "vision_workspace": null,
+          "minimum_runtime_reservation_bytes": 1497483264,
+          "kv_capacity_increment_bytes": 0,
+          "runtime_reservation_bytes": 1497483264,
+          "available_after_weights_bytes": 3426746368,
+          "available_after_startup_bytes": 2004877312,
+          "kv_capacity_headroom_bytes": 0,
+          "planned_slack_bytes": 1929263104,
+          "cuda_graph_allowance_bytes": 85983232,
+          "kv_payload_bytes": 1042882560,
+          "kvmem": {
+            "enabled": true,
+            "selected_tokens": 36864,
+            "reserve_tokens": 16384,
+            "host_payload_bytes": 0,
+            "disk_payload_bytes": 0
+          }
+        },
+        "after": {
+          "device": 0,
+          "max_context": 53248,
+          "kv_capacity_mode": "explicit",
+          "kv_capacity": 53248,
+          "kv_capacity_page_groups": 832,
+          "kv_capacity_max_page_groups": 832,
+          "kv_cache": "nvfp4",
+          "weights": {
+            "capacity_bytes": 12481729536,
+            "used_bytes": 12481729536,
+            "peak_used_bytes": 12481729536
+          },
+          "sequence": {
+            "capacity_bytes": 1337325312,
+            "used_bytes": 1337325312,
+            "peak_used_bytes": 1337325312
+          },
+          "workspace": {
+            "capacity_bytes": 74600704,
+            "used_bytes": 0,
+            "peak_used_bytes": 0
+          },
+          "vision_workspace": null,
+          "minimum_runtime_reservation_bytes": 1497909248,
+          "kv_capacity_increment_bytes": 0,
+          "runtime_reservation_bytes": 1497909248,
+          "available_after_weights_bytes": 3426746368,
+          "available_after_startup_bytes": 2004877312,
+          "kv_capacity_headroom_bytes": 0,
+          "planned_slack_bytes": 1928837120,
+          "cuda_graph_allowance_bytes": 85983232,
+          "kv_payload_bytes": 1042882560,
+          "kvmem": {
+            "enabled": true,
+            "selected_tokens": 36864,
+            "reserve_tokens": 16384,
+            "host_payload_bytes": 0,
+            "disk_payload_bytes": 0
+          }
+        }
+      },
+      "metadata": {
+        "before": {
+          "label": "nvfp4-before",
+          "upstream": "db8c114802a070a7903f84d01142fda0b00fa7df",
+          "variant": "before",
+          "gpu_uuid": "GPU-A",
+          "kv_dtype": "nvfp4",
+          "baseline_instrumentation": "benchmark uses Aggregate observation phase_timings and exports existing Engine wall timings; native engine unchanged",
+          "budget": 36864,
+          "reserve": 16384,
+          "prompt_tokens": 36864,
+          "timed_decode_tokens": 256,
+          "requested_output_tokens": 257,
+          "native_main_capacity": null,
+          "main_capacity": 53248,
+          "max_context": 53248,
+          "mtp": true,
+          "ngram_draft_tokens": 0,
+          "adaptive_mtp": false,
+          "repetitions": 3,
+          "warmup": 1,
+          "validation_run": false,
+          "verify_transfers": false,
+          "equal_input": true,
+          "command": [
+            "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\before.exe",
+            "--weights",
+            "$ARTIFACTS\\models\\ninfer\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+            "--corpus",
+            "$ARTIFACTS\\ninfer-upstream-20261022\\native\\bench\\fixtures\\bench_corpus.ids",
+            "-pg",
+            "36864,256",
+            "--max-ctx",
+            "53248",
+            "--prefill-chunk",
+            "256",
+            "--kv-dtype",
+            "nvfp4",
+            "--device",
+            "0",
+            "--ngram-draft-tokens",
+            "0",
+            "--warmup",
+            "1",
+            "-r",
+            "3",
+            "-o",
+            "json",
+            "--output-file",
+            "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\nvfp4-before.json",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "4",
+            "--ngram-draft-tokens",
+            "0",
+            "--kvmem-budget",
+            "36864",
+            "--kvmem-gen-reserve",
+            "16384",
+            "--kvmem-host-mib",
+            "12288",
+            "--kvmem-sessions",
+            "1",
+            "--no-kvmem-lrfu",
+            "--kvmem-query-scorer",
+            "page-softmax",
+            "--kvmem-score-agg",
+            "mean",
+            "--kvmem-graph-alpha",
+            "0.2",
+            "--kvmem-sink-tokens",
+            "12288",
+            "--kvmem-recent-tokens",
+            "1024"
+          ],
+          "kvmem_scoring": "default C: page-softmax, mean, graph alpha 0.2, no LRFU",
+          "binary_sha256": "b86dc3fc2e87f72e519e20c966bd00893e615c3e7edbb978b8d639230e34c09f",
+          "model_file_size": 12790639360,
+          "model_mtime_ns": 1790956005766642300,
+          "corpus_sha256": "054f7f732f6f75c7d8cc16f8d76a05aa0af91d7c7533ed2dab0afb41884b988d",
+          "exit_code": 0,
+          "wall_seconds": 241.4529999999795
+        },
+        "after": {
+          "label": "nvfp4-after",
+          "upstream": "db8c114802a070a7903f84d01142fda0b00fa7df",
+          "variant": "after",
+          "gpu_uuid": "GPU-A",
+          "kv_dtype": "nvfp4",
+          "baseline_instrumentation": "benchmark uses Aggregate observation phase_timings and exports existing Engine wall timings; native engine unchanged",
+          "budget": 36864,
+          "reserve": 16384,
+          "prompt_tokens": 36864,
+          "timed_decode_tokens": 256,
+          "requested_output_tokens": 257,
+          "native_main_capacity": null,
+          "main_capacity": 53248,
+          "max_context": 53248,
+          "mtp": true,
+          "ngram_draft_tokens": 0,
+          "adaptive_mtp": false,
+          "repetitions": 3,
+          "warmup": 1,
+          "validation_run": false,
+          "verify_transfers": false,
+          "equal_input": true,
+          "command": [
+            "$ARTIFACTS\\ninfer-upstream-20261022\\build-kvmem\\bench\\ninfer_bench.exe",
+            "--weights",
+            "$ARTIFACTS\\models\\ninfer\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+            "--corpus",
+            "$ARTIFACTS\\ninfer-upstream-20261022\\native\\bench\\fixtures\\bench_corpus.ids",
+            "-pg",
+            "36864,256",
+            "--max-ctx",
+            "53248",
+            "--prefill-chunk",
+            "256",
+            "--kv-dtype",
+            "nvfp4",
+            "--device",
+            "0",
+            "--ngram-draft-tokens",
+            "0",
+            "--warmup",
+            "1",
+            "-r",
+            "3",
+            "-o",
+            "json",
+            "--output-file",
+            "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\nvfp4-after.json",
+            "--spec",
+            "mtp",
+            "--draft-tokens",
+            "4",
+            "--ngram-draft-tokens",
+            "0",
+            "--kvmem-budget",
+            "36864",
+            "--kvmem-gen-reserve",
+            "16384",
+            "--kvmem-host-mib",
+            "12288",
+            "--kvmem-sessions",
+            "1",
+            "--no-kvmem-lrfu",
+            "--kvmem-query-scorer",
+            "page-softmax",
+            "--kvmem-score-agg",
+            "mean",
+            "--kvmem-graph-alpha",
+            "0.2",
+            "--kvmem-sink-tokens",
+            "12288",
+            "--kvmem-recent-tokens",
+            "1024"
+          ],
+          "kvmem_scoring": "default C: page-softmax, mean, graph alpha 0.2, no LRFU",
+          "binary_sha256": "7d35864b838f372fb80bc5fd9f970e13b4afc3def24f27277a20c0fb2d5e0fe7",
+          "model_file_size": 12790639360,
+          "model_mtime_ns": 1790956005766642300,
+          "corpus_sha256": "054f7f732f6f75c7d8cc16f8d76a05aa0af91d7c7533ed2dab0afb41884b988d",
+          "exit_code": 0,
+          "wall_seconds": 241.40700000000652
+        }
+      }
+    }
+  ],
+  "raw_evidence_directory": "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching",
+  "limitations": [
+    "Single-GPU execution measured; owning-rank grouping retained but multi-GPU runtime not tested",
+    "Only INT8/NVFP4 36K MTP4 performance tested; other formats share implementation but gains are not measured",
+    "No dedicated long-context recall quality campaign; unchanged math verified by independent oracle and core state tests"
+  ],
+  "transfer_count_validation": {
+    "purpose": "Verify transfer/sync count reduction with unchanged sampled kernel count; not a speed benchmark",
+    "same_tokens_and_mtp": true,
+    "counts": {
+      "before": {
+        "prefill": {
+          "page_lse_launches": 108,
+          "all_phase_copies": [
+            {
+              "direction": "Device-to-Device",
+              "count": 583,
+              "bytes": 1359163396
+            },
+            {
+              "direction": "Device-to-Host",
+              "count": 254,
+              "bytes": 50061332
+            },
+            {
+              "direction": "Host-to-Device",
+              "count": 1376,
+              "bytes": 310552
+            }
+          ],
+          "all_phase_stream_syncs": 397
+        },
+        "decode": {
+          "page_lse_launches": 48,
+          "all_phase_copies": [
+            {
+              "direction": "Device-to-Host",
+              "count": 160,
+              "bytes": 18510848
+            },
+            {
+              "direction": "Host-to-Device",
+              "count": 112,
+              "bytes": 448
+            }
+          ],
+          "all_phase_stream_syncs": 216
+        }
+      },
+      "after": {
+        "prefill": {
+          "page_lse_launches": 108,
+          "all_phase_copies": [
+            {
+              "direction": "Device-to-Device",
+              "count": 583,
+              "bytes": 1359163396
+            },
+            {
+              "direction": "Device-to-Host",
+              "count": 182,
+              "bytes": 50061332
+            },
+            {
+              "direction": "Host-to-Device",
+              "count": 1232,
+              "bytes": 305944
+            }
+          ],
+          "all_phase_stream_syncs": 325
+        },
+        "decode": {
+          "page_lse_launches": 48,
+          "all_phase_copies": [
+            {
+              "direction": "Device-to-Host",
+              "count": 128,
+              "bytes": 18510848
+            },
+            {
+              "direction": "Host-to-Device",
+              "count": 48,
+              "bytes": 192
+            }
+          ],
+          "all_phase_stream_syncs": 184
+        }
+      }
+    },
+    "command": [
+      "C:\\Program Files\\NVIDIA Corporation\\Nsight Systems 2025.6.3\\target-windows-x64\\nsys.exe",
+      "profile",
+      "--trace=cuda,nvtx",
+      "--sample=none",
+      "--cpuctxsw=none",
+      "--cuda-graph-trace=graph:host-only",
+      "--export=sqlite",
+      "--output=$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\profile-after\\trace",
+      "$ARTIFACTS\\ninfer-upstream-20261022\\build-kvmem\\bench\\ninfer_bench.exe",
+      "--weights",
+      "$ARTIFACTS\\models\\ninfer\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp\\Qwen3.8-27B-GSQ-RCO-IQ3_S-vision-mtp.ninfer",
+      "--corpus",
+      "$ARTIFACTS\\ninfer-upstream-20261022\\native\\bench\\fixtures\\bench_corpus.ids",
+      "-pg",
+      "36864,256",
+      "--max-ctx",
+      "53248",
+      "--prefill-chunk",
+      "256",
+      "--kv-dtype",
+      "nvfp4",
+      "--device",
+      "0",
+      "--ngram-draft-tokens",
+      "0",
+      "--warmup",
+      "0",
+      "-r",
+      "1",
+      "-o",
+      "json",
+      "--output-file",
+      "$ARTIFACTS\\ninfer-upstream-20261022\\feedback-batching\\profile-after\\report.json",
+      "--spec",
+      "mtp",
+      "--draft-tokens",
+      "4",
+      "--ngram-draft-tokens",
+      "0",
+      "--kvmem-budget",
+      "36864",
+      "--kvmem-gen-reserve",
+      "16384",
+      "--kvmem-host-mib",
+      "12288",
+      "--kvmem-sessions",
+      "1",
+      "--no-kvmem-lrfu",
+      "--kvmem-query-scorer",
+      "page-softmax",
+      "--kvmem-score-agg",
+      "mean",
+      "--kvmem-graph-alpha",
+      "0.2",
+      "--kvmem-sink-tokens",
+      "12288",
+      "--kvmem-recent-tokens",
+      "1024"
+    ]
+  },
+  "_sanitization": {
+    "version": 1,
+    "original_sha256": "197ffba8894b722b12b91b7e7e83d66048ea1e8a31a8050e7c6f9e4c94675dd1",
+    "scope": "Device identities/private paths anonymized, credential fields redacted; measurements unchanged."
+  }
+}

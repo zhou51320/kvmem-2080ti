@@ -250,9 +250,12 @@ class LauncherTests(unittest.TestCase):
                                 ('--kvmem-gen-reserve', reserve), ('-n', reserve)]:
                 self.assertEqual(argv[argv.index(flag) + 1], value)
         argv = json.loads(self.run_recipe('iq3', '--dry-run', overrides={
-            'KVMEM_QUERY_REPLAY': 'legacy', 'KVMEM_QUERY_POLICY': 'legacy'}).stdout)['argv']
-        for flag in ('--kvmem-query-replay', '--kvmem-query-policy'):
-            self.assertEqual(argv[argv.index(flag) + 1], 'legacy')
+            'KVMEM_QUERY_REPLAY': 'legacy', 'KVMEM_QUERY_POLICY': 'user'}).stdout)['argv']
+        self.assertEqual(argv[argv.index('--kvmem-query-replay') + 1], 'legacy')
+        self.assertEqual(argv[argv.index('--kvmem-query-policy') + 1], 'user')
+        result = self.run_recipe('iq3', '--dry-run', overrides={
+            'KVMEM_QUERY_POLICY': 'legacy'}, success=False)
+        self.assertIn('legacy has been removed', result.stderr)
 
     def test_reuse_and_switch(self):
         self.run_recipe()

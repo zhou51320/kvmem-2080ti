@@ -1,0 +1,4311 @@
+{
+  "date": "2026-10-23",
+  "raw_artifact_root": "$ARTIFACTS\\bonsai-integration-20261023",
+  "repository_head": "3acbf46 (local uncommitted implementation; pre-existing changes retained)",
+  "sources": {
+    "layout": "git-submodules-with-patches",
+    "llamacpp": {
+      "path": "backends/llamacpp",
+      "upstream": "https://github.com/ggml-org/llama.cpp.git",
+      "base_commit": "620d2225cc436ab0b001e3200e590e3b286ef9ab",
+      "license_file": "backends/llamacpp/LICENSE",
+      "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
+      "patched_tree": "060a4dfcea26c3e86df2d7109eb8f0538a078c5c",
+      "patches": [
+        {
+          "id": "kvmem",
+          "path": "backends/patches/llamacpp-kvmem.patch",
+          "sha256": "8f2b3a6da6c86866c2a0f0a17cdb8eb344d7b3e66a197a050b4121ad544a1555",
+          "requires": [],
+          "after_tree": "82ba95255615c2537ca2caae1364658d6216aa7f"
+        },
+        {
+          "id": "pq2",
+          "path": "backends/patches/llamacpp-pq2.patch",
+          "sha256": "4a02193d548a3f3a6f28780420abd6957fb7561bab72f749a19601e2e8c58396",
+          "requires": [
+            "kvmem"
+          ],
+          "after_tree": "7c84746653b0c3c3e4e70b3c721e5ab1dd9b89c7",
+          "source": "Prism llama.cpp 9a9394a895b96003ca842a6041cb28ac49a108f7: isolated PQ2 format/CPU/CUDA support"
+        },
+        {
+          "id": "ptq1",
+          "path": "backends/patches/llamacpp-ptq1.patch",
+          "sha256": "3b80a63b830201b068934e94ae78f9903fa1b424485831b7987c6f97c16e3b77",
+          "requires": [
+            "pq2"
+          ],
+          "after_tree": "265fd71110156dcb91c065914baf0ec92e140b20",
+          "source": "Prism llama.cpp 9a9394a895b96003ca842a6041cb28ac49a108f7: isolated PTQ1 format/CPU/CUDA support"
+        },
+        {
+          "id": "ptq1-performance",
+          "path": "backends/patches/llamacpp-ptq1-performance.patch",
+          "sha256": "154efca7a29ccc431fd6282fded87b8bdbf3ca1bb961afcc0047d64826bc6707",
+          "requires": [
+            "ptq1"
+          ],
+          "after_tree": "060a4dfcea26c3e86df2d7109eb8f0538a078c5c",
+          "source": "Prism PR218 PTQ1 planar matvec with the PDL consumer sync fix; scoped to dense CUDA 2D calls, current upstream fusion API retained"
+        }
+      ]
+    },
+    "ninfer": {
+      "path": "backends/ninfer",
+      "upstream": "https://github.com/iamwavecut/ninfer-all.git",
+      "base_commit": "db8c114802a070a7903f84d01142fda0b00fa7df",
+      "license_file": "backends/ninfer/LICENSE",
+      "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
+      "patched_tree": "475b19dba84e9a4d282c144adbfd37377df35c5e",
+      "patch_sources": [
+        {
+          "repository": "https://github.com/13thblade/ninfer-all-nvfp4.git",
+          "base_commit": "db8c114802a070a7903f84d01142fda0b00fa7df",
+          "commit": "c480077bf7410e0ebf23437522b89aae721233c4",
+          "scope": "NVFP4 W4A16/W4A8 kernels, routing, calibration, CLI switches and NVFP4/FP8 KV decoding; upstream README overlay excluded"
+        }
+      ],
+      "patches": [
+        {
+          "id": "kvmem",
+          "path": "backends/patches/ninfer-kvmem.patch",
+          "sha256": "29d60e56162f279116fc5953544f77dd42ba5b7ecd71d814f7e3cdd508e0b574",
+          "requires": [],
+          "after_tree": "34af6bae4418dcc7ade3121fbf9db20ba636051e"
+        },
+        {
+          "id": "ptq1",
+          "path": "backends/patches/ninfer-ptq1.patch",
+          "sha256": "ebbeaf0920f6cb3eadc678a27a1060e9dfb26381a38ac2d80ff3bd46bfa5a454",
+          "requires": [
+            "kvmem"
+          ],
+          "after_tree": "61afc695aea70d5f30a73aa262fcd5758c76a334",
+          "source": "1314521gjy/ninfer-fusion-kvmem@b6e6c20deb93fe5ed84e5715642dad21c0455ef0; local qualified port a81ebf9031c167a29f418093e8a7253a4811cd01"
+        },
+        {
+          "id": "ptq1-performance",
+          "path": "backends/patches/ninfer-ptq1-performance.patch",
+          "sha256": "0aaac3513709af65f149a1d65cf3497f74b7ac8df29ed0e2bcfce4dc0428731d",
+          "requires": [
+            "ptq1"
+          ],
+          "after_tree": "aa7efd5e3b52847cba06a33a4776428d58f2d09b",
+          "source": "Local PTQ1 routing and calibration over the compact native port, without changing SM120 policy"
+        },
+        {
+          "id": "native-prefix-summary",
+          "path": "backends/patches/ninfer-native-prefix-summary.patch",
+          "sha256": "551973fb656089b1ae403835a6f47182f2f55d5a041a7e24e68cf9a5baae2750",
+          "requires": [
+            "kvmem"
+          ],
+          "after_tree": "475b19dba84e9a4d282c144adbfd37377df35c5e",
+          "source": "Local inherited KVMem integration fix: preserve native hybrid admission reuse path"
+        }
+      ]
+    }
+  },
+  "models": [
+    {
+      "path": "$ARTIFACTS\\bonsai-integration-20261023\\Bonsai2-PTQ1-r3-Q4-MTP.gguf",
+      "bytes": 6185633120,
+      "sha256": "4b0e0f9b252d1b77ace4e197f913dbb8729a13c2a0174d4eb8b2b80c22918832"
+    },
+    {
+      "path": "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0.ninfer",
+      "bytes": 6182359808,
+      "sha256": "ef4add0bca393141fd5743af43912328718dae4e63c486f90b203a68f555515d"
+    }
+  ],
+  "final_binaries": [
+    {
+      "path": "$ARTIFACTS\\bonsai-integration-20261023\\build-llama\\bin\\llama-kvmem-server.exe",
+      "bytes": 1346048,
+      "sha256": "57ddc573f09dfe6cc8b55eff1ffcb96335ffec373087183d4f0b0e923141c947"
+    },
+    {
+      "path": "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\apps\\ninfer-serve.exe",
+      "bytes": 597039104,
+      "sha256": "76a18c6134d7649ddff4d11b89fad0a43de3d7f183a9acd75683555faa11c537"
+    }
+  ],
+  "capacity_gpu": "GPU-A",
+  "performance_gpu": "GPU-B",
+  "capacity": [
+    {
+      "backend": "llamacpp",
+      "budget": 20480,
+      "reserve": 2048,
+      "gpu_uuid": "GPU-A",
+      "short_only": false,
+      "purpose": "8GB functional capacity qualification; timings are diagnostic, not benchmarks.",
+      "pid": 27944,
+      "startup_seconds": 14.085198399960063,
+      "startup_pass": true,
+      "short_seconds": 2.179659800021909,
+      "short_usage": {
+        "completion_tokens": 19,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 25,
+        "prompt_tokens": 25,
+        "total_tokens": 44
+      },
+      "short_pass": true,
+      "document_raw_tokens": 22000,
+      "document_seconds": 104.98280899995007,
+      "document_usage": {
+        "completion_tokens": 2,
+        "prompt_cache_hit_tokens": 2,
+        "prompt_cache_miss_tokens": 22009,
+        "prompt_tokens": 22011,
+        "total_tokens": 22013
+      },
+      "question_seconds": 2.438931899960153,
+      "question_usage": {
+        "completion_tokens": 21,
+        "prompt_cache_hit_tokens": 22013,
+        "prompt_cache_miss_tokens": 44,
+        "prompt_tokens": 22057,
+        "total_tokens": 22078
+      },
+      "recall_pass": true,
+      "long_context_completed": true,
+      "continuation_seconds": 14.454709400073625,
+      "continuation_usage": {
+        "completion_tokens": 235,
+        "prompt_cache_hit_tokens": 22017,
+        "prompt_cache_miss_tokens": 99,
+        "prompt_tokens": 22116,
+        "total_tokens": 22351
+      },
+      "continuation_pass": true,
+      "test_pass": true,
+      "elapsed_seconds": 159.04662359994836,
+      "raw_directory": "capacity-llamacpp-20480-full",
+      "command": [
+        "$ARTIFACTS\\bonsai-integration-20261023\\build-llama\\bin\\llama-kvmem-server.exe",
+        "-m",
+        "$ARTIFACTS\\bonsai-integration-20261023\\Bonsai2-PTQ1-r3-Q4-MTP.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8699",
+        "-c",
+        "131072",
+        "-ngl",
+        "999",
+        "-b",
+        "256",
+        "-ub",
+        "256",
+        "-fa",
+        "on",
+        "--no-ui",
+        "--no-think",
+        "--kvmem",
+        "--kvmem-budget",
+        "20480",
+        "--kvmem-gen-reserve",
+        "2048",
+        "--kvmem-host-mib",
+        "4096",
+        "--kv-dtype",
+        "q4_0",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "3",
+        "--spec-kv-dtype",
+        "q4_0",
+        "--kvmem-trace"
+      ],
+      "peak_nvidia_smi_mib": 7100,
+      "windows_memory": {
+        "continuation-windows-memory": [
+          {
+            "Name": "pid_27944_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7445176320,
+            "SharedUsage": 452984832,
+            "TotalCommitted": 7898161152
+          },
+          {
+            "Name": "pid_27944_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "document-windows-memory": [
+          {
+            "Name": "pid_27944_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7445176320,
+            "SharedUsage": 452984832,
+            "TotalCommitted": 7898161152
+          },
+          {
+            "Name": "pid_27944_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "question-windows-memory": [
+          {
+            "Name": "pid_27944_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7445176320,
+            "SharedUsage": 452984832,
+            "TotalCommitted": 7898161152
+          },
+          {
+            "Name": "pid_27944_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "short-windows-memory": [
+          {
+            "Name": "pid_27944_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7060807680,
+            "SharedUsage": 153092096,
+            "TotalCommitted": 7213899776
+          },
+          {
+            "Name": "pid_27944_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "startup-windows-memory": [
+          {
+            "Name": "pid_27944_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 6934933504,
+            "SharedUsage": 136314880,
+            "TotalCommitted": 7071248384
+          },
+          {
+            "Name": "pid_27944_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ]
+      },
+      "native_query_plans": []
+    },
+    {
+      "backend": "llamacpp",
+      "budget": 49152,
+      "reserve": 2048,
+      "gpu_uuid": "GPU-A",
+      "short_only": false,
+      "purpose": "8GB functional capacity qualification; timings are diagnostic, not benchmarks.",
+      "started_at": "2026-10-23T17:26:42+0800",
+      "pid": 42996,
+      "startup_seconds": 5.048954199999571,
+      "startup_pass": true,
+      "short_seconds": 1.6946870000101626,
+      "short_usage": {
+        "completion_tokens": 19,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 25,
+        "prompt_tokens": 25,
+        "total_tokens": 44
+      },
+      "short_pass": true,
+      "document_raw_tokens": 50679,
+      "document_seconds": 272.2709350999212,
+      "document_usage": {
+        "completion_tokens": 2,
+        "prompt_cache_hit_tokens": 2,
+        "prompt_cache_miss_tokens": 50688,
+        "prompt_tokens": 50690,
+        "total_tokens": 50692
+      },
+      "question_seconds": 3.4492658999515697,
+      "question_usage": {
+        "completion_tokens": 21,
+        "prompt_cache_hit_tokens": 50692,
+        "prompt_cache_miss_tokens": 44,
+        "prompt_tokens": 50736,
+        "total_tokens": 50757
+      },
+      "recall_pass": true,
+      "long_context_completed": true,
+      "continuation_seconds": 22.17764739994891,
+      "continuation_usage": {
+        "completion_tokens": 256,
+        "prompt_cache_hit_tokens": 50696,
+        "prompt_cache_miss_tokens": 99,
+        "prompt_tokens": 50795,
+        "total_tokens": 51051
+      },
+      "continuation_pass": true,
+      "test_pass": true,
+      "elapsed_seconds": 324.9970862000482,
+      "finished_at": "2026-10-23T17:32:08+0800",
+      "raw_directory": "capacity-llamacpp-49152-full-exclusive2",
+      "command": [
+        "$ARTIFACTS\\bonsai-integration-20261023\\build-llama\\bin\\llama-kvmem-server.exe",
+        "-m",
+        "$ARTIFACTS\\bonsai-integration-20261023\\Bonsai2-PTQ1-r3-Q4-MTP.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5207",
+        "-c",
+        "131072",
+        "-ngl",
+        "999",
+        "-b",
+        "256",
+        "-ub",
+        "256",
+        "-fa",
+        "on",
+        "--no-ui",
+        "--no-think",
+        "--kvmem",
+        "--kvmem-budget",
+        "49152",
+        "--kvmem-gen-reserve",
+        "2048",
+        "--kvmem-host-mib",
+        "4096",
+        "--kv-dtype",
+        "q4_0",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "3",
+        "--spec-kv-dtype",
+        "q4_0",
+        "--kvmem-trace"
+      ],
+      "peak_nvidia_smi_mib": 7840,
+      "windows_memory": {
+        "continuation-windows-memory": [
+          {
+            "Name": "pid_42996_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 8221282304,
+            "SharedUsage": 532676608,
+            "TotalCommitted": 8753958912
+          },
+          {
+            "Name": "pid_42996_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "document-windows-memory": [
+          {
+            "Name": "pid_42996_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 8221282304,
+            "SharedUsage": 532676608,
+            "TotalCommitted": 8753958912
+          },
+          {
+            "Name": "pid_42996_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "question-windows-memory": [
+          {
+            "Name": "pid_42996_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 8221282304,
+            "SharedUsage": 532676608,
+            "TotalCommitted": 8753958912
+          },
+          {
+            "Name": "pid_42996_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "short-windows-memory": [
+          {
+            "Name": "pid_42996_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7887147008,
+            "SharedUsage": 182452224,
+            "TotalCommitted": 8069599232
+          },
+          {
+            "Name": "pid_42996_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "startup-windows-memory": [
+          {
+            "Name": "pid_42996_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7761276928,
+            "SharedUsage": 165675008,
+            "TotalCommitted": 7926951936
+          },
+          {
+            "Name": "pid_42996_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ]
+      },
+      "native_query_plans": []
+    },
+    {
+      "backend": "llamacpp",
+      "budget": 53248,
+      "reserve": 2048,
+      "gpu_uuid": "GPU-A",
+      "short_only": false,
+      "purpose": "8GB functional capacity qualification; timings are diagnostic, not benchmarks.",
+      "started_at": "2026-10-23T17:32:58+0800",
+      "pid": 39444,
+      "startup_seconds": 5.032564799999818,
+      "startup_pass": true,
+      "short_seconds": 1.6989610999589786,
+      "short_usage": {
+        "completion_tokens": 19,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 25,
+        "prompt_tokens": 25,
+        "total_tokens": 44
+      },
+      "short_pass": true,
+      "document_raw_tokens": 54776,
+      "document_seconds": 305.40828120009974,
+      "document_usage": {
+        "completion_tokens": 2,
+        "prompt_cache_hit_tokens": 2,
+        "prompt_cache_miss_tokens": 54785,
+        "prompt_tokens": 54787,
+        "total_tokens": 54789
+      },
+      "question_seconds": 3.428582699969411,
+      "question_usage": {
+        "completion_tokens": 21,
+        "prompt_cache_hit_tokens": 54789,
+        "prompt_cache_miss_tokens": 44,
+        "prompt_tokens": 54833,
+        "total_tokens": 54854
+      },
+      "recall_pass": true,
+      "long_context_completed": true,
+      "continuation_seconds": 23.925644799950533,
+      "continuation_usage": {
+        "completion_tokens": 253,
+        "prompt_cache_hit_tokens": 54793,
+        "prompt_cache_miss_tokens": 99,
+        "prompt_tokens": 54892,
+        "total_tokens": 55145
+      },
+      "continuation_pass": true,
+      "test_pass": true,
+      "elapsed_seconds": 356.64380489999894,
+      "finished_at": "2026-10-23T17:38:56+0800",
+      "raw_directory": "capacity-llamacpp-53248-full",
+      "command": [
+        "$ARTIFACTS\\bonsai-integration-20261023\\build-llama\\bin\\llama-kvmem-server.exe",
+        "-m",
+        "$ARTIFACTS\\bonsai-integration-20261023\\Bonsai2-PTQ1-r3-Q4-MTP.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "7859",
+        "-c",
+        "131072",
+        "-ngl",
+        "999",
+        "-b",
+        "256",
+        "-ub",
+        "256",
+        "-fa",
+        "on",
+        "--no-ui",
+        "--no-think",
+        "--kvmem",
+        "--kvmem-budget",
+        "53248",
+        "--kvmem-gen-reserve",
+        "2048",
+        "--kvmem-host-mib",
+        "4096",
+        "--kv-dtype",
+        "q4_0",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "3",
+        "--spec-kv-dtype",
+        "q4_0",
+        "--kvmem-trace"
+      ],
+      "peak_nvidia_smi_mib": 7890,
+      "windows_memory": {
+        "continuation-windows-memory": [
+          {
+            "Name": "pid_39444_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 8271753216,
+            "SharedUsage": 603979776,
+            "TotalCommitted": 8875732992
+          },
+          {
+            "Name": "pid_39444_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "document-windows-memory": [
+          {
+            "Name": "pid_39444_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 8271753216,
+            "SharedUsage": 603979776,
+            "TotalCommitted": 8875732992
+          },
+          {
+            "Name": "pid_39444_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "question-windows-memory": [
+          {
+            "Name": "pid_39444_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 8271753216,
+            "SharedUsage": 603979776,
+            "TotalCommitted": 8875732992
+          },
+          {
+            "Name": "pid_39444_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "short-windows-memory": [
+          {
+            "Name": "pid_39444_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 8004595712,
+            "SharedUsage": 186646528,
+            "TotalCommitted": 8191242240
+          },
+          {
+            "Name": "pid_39444_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "startup-windows-memory": [
+          {
+            "Name": "pid_39444_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7878725632,
+            "SharedUsage": 169869312,
+            "TotalCommitted": 8048594944
+          },
+          {
+            "Name": "pid_39444_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ]
+      },
+      "native_query_plans": []
+    },
+    {
+      "backend": "llamacpp",
+      "budget": 65536,
+      "reserve": 2048,
+      "gpu_uuid": "GPU-A",
+      "short_only": true,
+      "purpose": "8GB functional capacity qualification; timings are diagnostic, not benchmarks.",
+      "pid": 20688,
+      "startup_seconds": 5.57264800008852,
+      "startup_pass": true,
+      "short_seconds": 1.7322297000791878,
+      "short_usage": {
+        "completion_tokens": 19,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 25,
+        "prompt_tokens": 25,
+        "total_tokens": 44
+      },
+      "short_pass": true,
+      "test_pass": true,
+      "elapsed_seconds": 9.150151200010441,
+      "raw_directory": "capacity-llamacpp-65536",
+      "command": [
+        "$ARTIFACTS\\bonsai-integration-20261023\\build-llama\\bin\\llama-kvmem-server.exe",
+        "-m",
+        "$ARTIFACTS\\bonsai-integration-20261023\\Bonsai2-PTQ1-r3-Q4-MTP.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5490",
+        "-c",
+        "131072",
+        "-ngl",
+        "999",
+        "-b",
+        "256",
+        "-ub",
+        "256",
+        "-fa",
+        "on",
+        "--no-ui",
+        "--no-think",
+        "--kvmem",
+        "--kvmem-budget",
+        "65536",
+        "--kvmem-gen-reserve",
+        "2048",
+        "--kvmem-host-mib",
+        "4096",
+        "--kv-dtype",
+        "q4_0",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "3",
+        "--spec-kv-dtype",
+        "q4_0",
+        "--kvmem-trace"
+      ],
+      "peak_nvidia_smi_mib": 7908,
+      "windows_memory": {
+        "short-windows-memory": [
+          {
+            "Name": "pid_20688_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 8292065280,
+            "SharedUsage": 266338304,
+            "TotalCommitted": 8558403584
+          },
+          {
+            "Name": "pid_20688_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "startup-windows-memory": [
+          {
+            "Name": "pid_20688_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 8233172992,
+            "SharedUsage": 182452224,
+            "TotalCommitted": 8415625216
+          },
+          {
+            "Name": "pid_20688_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ]
+      },
+      "native_query_plans": []
+    },
+    {
+      "backend": "ninfer",
+      "budget": 20480,
+      "reserve": 2048,
+      "gpu_uuid": "GPU-A",
+      "short_only": false,
+      "purpose": "8GB functional capacity qualification; timings are diagnostic, not benchmarks.",
+      "started_at": "2026-10-23T17:48:25+0800",
+      "pid": 42700,
+      "startup_seconds": 4.620217100018635,
+      "startup_pass": true,
+      "short_seconds": 1.9471341000171378,
+      "short_usage": {
+        "completion_tokens": 20,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 25,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 45
+      },
+      "short_pass": true,
+      "document_raw_tokens": 22000,
+      "document_seconds": 75.85716170002706,
+      "document_usage": {
+        "completion_tokens": 3,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 22011,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 22014
+      },
+      "question_seconds": 2.388502600020729,
+      "question_usage": {
+        "completion_tokens": 22,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 22057,
+        "prompt_tokens_details": {
+          "cached_tokens": 22013
+        },
+        "total_tokens": 22079
+      },
+      "recall_pass": true,
+      "long_context_completed": true,
+      "continuation_seconds": 18.718002699897625,
+      "continuation_usage": {
+        "completion_tokens": 253,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 22116,
+        "prompt_tokens_details": {
+          "cached_tokens": 22078
+        },
+        "total_tokens": 22369
+      },
+      "continuation_pass": true,
+      "test_pass": true,
+      "elapsed_seconds": 107.61419089999981,
+      "finished_at": "2026-10-23T17:50:13+0800",
+      "raw_directory": "capacity-ninfer-20480-full2",
+      "command": [
+        "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\apps\\ninfer-serve.exe",
+        "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0.ninfer",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "7726",
+        "--model-id",
+        "bonsai-2-27b",
+        "--max-context",
+        "131072",
+        "--max-concurrency",
+        "1",
+        "--kvmem",
+        "--kvmem-budget",
+        "20480",
+        "--kvmem-gen-reserve",
+        "2048",
+        "--kvmem-host-mib",
+        "4096",
+        "--kv-dtype",
+        "rk4v4",
+        "--gdn-state-fp16",
+        "--device-profile",
+        "off",
+        "--prefill-chunk",
+        "256",
+        "--spec",
+        "mtp",
+        "--draft-tokens",
+        "3",
+        "--ngram-draft-tokens",
+        "0",
+        "--lookup-ngram",
+        "0",
+        "--greedy",
+        "--no-thinking",
+        "--log-colours",
+        "off",
+        "--log-level",
+        "debug",
+        "--request-log-jsonl",
+        "$ARTIFACTS\\bonsai-integration-20261023\\capacity-ninfer-20480-full2\\requests.jsonl"
+      ],
+      "peak_nvidia_smi_mib": 6630,
+      "windows_memory": {
+        "continuation-windows-memory": [
+          {
+            "Name": "pid_42700_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 6953025536,
+            "SharedUsage": 807403520,
+            "TotalCommitted": 7760429056
+          },
+          {
+            "Name": "pid_42700_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "document-windows-memory": [
+          {
+            "Name": "pid_42700_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 6953025536,
+            "SharedUsage": 807403520,
+            "TotalCommitted": 7760429056
+          },
+          {
+            "Name": "pid_42700_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "question-windows-memory": [
+          {
+            "Name": "pid_42700_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 6953025536,
+            "SharedUsage": 807403520,
+            "TotalCommitted": 7760429056
+          },
+          {
+            "Name": "pid_42700_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "short-windows-memory": [
+          {
+            "Name": "pid_42700_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 6952267776,
+            "SharedUsage": 421527552,
+            "TotalCommitted": 7373795328
+          },
+          {
+            "Name": "pid_42700_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "startup-windows-memory": [
+          {
+            "Name": "pid_42700_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 6951800832,
+            "SharedUsage": 182452224,
+            "TotalCommitted": 7134253056
+          },
+          {
+            "Name": "pid_42700_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ]
+      },
+      "native_query_plans": [],
+      "native_requests": [
+        {
+          "request": {
+            "effective_thinking_budget": null,
+            "enable_thinking": false,
+            "has_tool_history": false,
+            "media_item_count": 0,
+            "message_count": 1,
+            "model": "bonsai-2-27b",
+            "preserve_thinking": null,
+            "preserve_thinking_semantic_change": false,
+            "protocol": "openai_chat_completions",
+            "request_id": 1,
+            "requested_output_tokens": 64,
+            "requested_output_tokens_source": "client",
+            "requested_reasoning_effort": null,
+            "sampling": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "seed": 18037661735611370931,
+              "temperature": 0.0,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "stream": false,
+            "thinking_budget": null,
+            "tool_choice": "auto",
+            "tool_count": 0
+          },
+          "result": {
+            "completion_tokens": 20,
+            "computed_prefill_tokens": 25,
+            "effective_thinking_budget": null,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "post_thinking_sampling": false,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 25,
+            "reasoning_loop_coverage": 0.0,
+            "reasoning_loop_detected": false,
+            "reasoning_loop_thinking_tokens": 0,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "duplicate_parameters_repaired": 0,
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "forced_call_closed": false,
+              "malformed_call_reported": false,
+              "marker_seen": false,
+              "recovered": false,
+              "recovered_call_count": 0,
+              "recovered_from_reasoning": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0,
+              "trailing_content_dropped": false
+            }
+          },
+          "timings_seconds": {
+            "decode": 1.0420871,
+            "prefill": 0.8607872,
+            "prepare": 0.0005036,
+            "total": 1.944469,
+            "ttft": 0.8618729,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              8,
+              3,
+              2
+            ],
+            "accepted_tokens": 13,
+            "backend": "mtp",
+            "draft_window": 3,
+            "drafted_tokens": 24,
+            "fallback_steps": 0,
+            "ngram_accepted_tokens": 0,
+            "ngram_archive": {
+              "bound": false,
+              "enabled": false,
+              "generation": 0,
+              "published": false,
+              "sampling_seed": null,
+              "session_bytes": 0,
+              "sources": 0,
+              "total_bytes": 0
+            },
+            "ngram_archive_accepted_tokens": 0,
+            "ngram_archive_drafted_tokens": 0,
+            "ngram_archive_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_rounds": 0,
+            "rounds": 8
+          }
+        },
+        {
+          "request": {
+            "effective_thinking_budget": null,
+            "enable_thinking": false,
+            "has_tool_history": false,
+            "media_item_count": 0,
+            "message_count": 1,
+            "model": "bonsai-2-27b",
+            "preserve_thinking": null,
+            "preserve_thinking_semantic_change": false,
+            "protocol": "openai_chat_completions",
+            "request_id": 2,
+            "requested_output_tokens": 16,
+            "requested_output_tokens_source": "client",
+            "requested_reasoning_effort": null,
+            "sampling": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "seed": 18169548535552177573,
+              "temperature": 0.0,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "stream": false,
+            "thinking_budget": null,
+            "tool_choice": "auto",
+            "tool_count": 0
+          },
+          "result": {
+            "completion_tokens": 3,
+            "computed_prefill_tokens": 22011,
+            "effective_thinking_budget": null,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "post_thinking_sampling": false,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 22011,
+            "reasoning_loop_coverage": 0.0,
+            "reasoning_loop_detected": false,
+            "reasoning_loop_thinking_tokens": 0,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "duplicate_parameters_repaired": 0,
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "forced_call_closed": false,
+              "malformed_call_reported": false,
+              "marker_seen": false,
+              "recovered": false,
+              "recovered_call_count": 0,
+              "recovered_from_reasoning": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0,
+              "trailing_content_dropped": false
+            }
+          },
+          "timings_seconds": {
+            "decode": 0.2476807,
+            "prefill": 75.52000439999998,
+            "prepare": 0.0332486,
+            "total": 75.83518219999999,
+            "ttft": 75.559399,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              1,
+              1,
+              0
+            ],
+            "accepted_tokens": 2,
+            "backend": "mtp",
+            "draft_window": 3,
+            "drafted_tokens": 6,
+            "fallback_steps": 0,
+            "ngram_accepted_tokens": 0,
+            "ngram_archive": {
+              "bound": false,
+              "enabled": false,
+              "generation": 0,
+              "published": false,
+              "sampling_seed": null,
+              "session_bytes": 0,
+              "sources": 0,
+              "total_bytes": 0
+            },
+            "ngram_archive_accepted_tokens": 0,
+            "ngram_archive_drafted_tokens": 0,
+            "ngram_archive_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_rounds": 0,
+            "rounds": 2
+          }
+        },
+        {
+          "request": {
+            "effective_thinking_budget": null,
+            "enable_thinking": false,
+            "has_tool_history": false,
+            "media_item_count": 0,
+            "message_count": 3,
+            "model": "bonsai-2-27b",
+            "preserve_thinking": null,
+            "preserve_thinking_semantic_change": false,
+            "protocol": "openai_chat_completions",
+            "request_id": 3,
+            "requested_output_tokens": 128,
+            "requested_output_tokens_source": "client",
+            "requested_reasoning_effort": null,
+            "sampling": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "seed": 1470933746718318563,
+              "temperature": 0.0,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "stream": false,
+            "thinking_budget": null,
+            "tool_choice": "auto",
+            "tool_count": 0
+          },
+          "result": {
+            "completion_tokens": 22,
+            "computed_prefill_tokens": 44,
+            "effective_thinking_budget": null,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "post_thinking_sampling": false,
+            "prefix_cache_hit_tokens": 22013,
+            "prefix_reuse_path": "private_endpoint",
+            "prompt_tokens": 22057,
+            "reasoning_loop_coverage": 0.0,
+            "reasoning_loop_detected": false,
+            "reasoning_loop_thinking_tokens": 0,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "duplicate_parameters_repaired": 0,
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "forced_call_closed": false,
+              "malformed_call_reported": false,
+              "marker_seen": false,
+              "recovered": false,
+              "recovered_call_count": 0,
+              "recovered_from_reasoning": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0,
+              "trailing_content_dropped": false
+            }
+          },
+          "timings_seconds": {
+            "decode": 0.9023465999999999,
+            "prefill": 1.3885919999999998,
+            "prepare": 0.0224375,
+            "total": 2.3672872000000003,
+            "ttft": 1.4116949,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              6,
+              6,
+              5
+            ],
+            "accepted_tokens": 17,
+            "backend": "mtp",
+            "draft_window": 3,
+            "drafted_tokens": 18,
+            "fallback_steps": 0,
+            "ngram_accepted_tokens": 0,
+            "ngram_archive": {
+              "bound": false,
+              "enabled": false,
+              "generation": 0,
+              "published": false,
+              "sampling_seed": null,
+              "session_bytes": 0,
+              "sources": 0,
+              "total_bytes": 0
+            },
+            "ngram_archive_accepted_tokens": 0,
+            "ngram_archive_drafted_tokens": 0,
+            "ngram_archive_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_rounds": 0,
+            "rounds": 6
+          }
+        },
+        {
+          "request": {
+            "effective_thinking_budget": null,
+            "enable_thinking": false,
+            "has_tool_history": false,
+            "media_item_count": 0,
+            "message_count": 5,
+            "model": "bonsai-2-27b",
+            "preserve_thinking": null,
+            "preserve_thinking_semantic_change": false,
+            "protocol": "openai_chat_completions",
+            "request_id": 4,
+            "requested_output_tokens": 256,
+            "requested_output_tokens_source": "client",
+            "requested_reasoning_effort": null,
+            "sampling": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "seed": 3899150396835801318,
+              "temperature": 0.0,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "stream": false,
+            "thinking_budget": null,
+            "tool_choice": "auto",
+            "tool_count": 0
+          },
+          "result": {
+            "completion_tokens": 253,
+            "computed_prefill_tokens": 38,
+            "effective_thinking_budget": null,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "post_thinking_sampling": false,
+            "prefix_cache_hit_tokens": 22078,
+            "prefix_reuse_path": "private_endpoint",
+            "prompt_tokens": 22116,
+            "reasoning_loop_coverage": 0.0,
+            "reasoning_loop_detected": false,
+            "reasoning_loop_thinking_tokens": 0,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "duplicate_parameters_repaired": 0,
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "forced_call_closed": false,
+              "malformed_call_reported": false,
+              "marker_seen": false,
+              "recovered": false,
+              "recovered_call_count": 0,
+              "recovered_from_reasoning": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0,
+              "trailing_content_dropped": false
+            }
+          },
+          "timings_seconds": {
+            "decode": 16.932854500000005,
+            "prefill": 1.025928,
+            "prepare": 0.0202583,
+            "total": 18.7132506,
+            "ttft": 1.0474383,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              76,
+              44,
+              21
+            ],
+            "accepted_tokens": 141,
+            "backend": "mtp",
+            "draft_window": 3,
+            "drafted_tokens": 339,
+            "fallback_steps": 0,
+            "ngram_accepted_tokens": 0,
+            "ngram_archive": {
+              "bound": false,
+              "enabled": false,
+              "generation": 0,
+              "published": false,
+              "sampling_seed": null,
+              "session_bytes": 0,
+              "sources": 0,
+              "total_bytes": 0
+            },
+            "ngram_archive_accepted_tokens": 0,
+            "ngram_archive_drafted_tokens": 0,
+            "ngram_archive_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_rounds": 0,
+            "rounds": 113
+          }
+        }
+      ]
+    },
+    {
+      "backend": "ninfer",
+      "budget": 45056,
+      "reserve": 2048,
+      "gpu_uuid": "GPU-A",
+      "short_only": false,
+      "purpose": "8GB functional capacity qualification; timings are diagnostic, not benchmarks.",
+      "started_at": "2026-10-23T17:56:25+0800",
+      "pid": 48508,
+      "startup_seconds": 5.599357799976133,
+      "startup_pass": true,
+      "short_seconds": 1.970223500044085,
+      "short_usage": {
+        "completion_tokens": 20,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 25,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 45
+      },
+      "short_pass": true,
+      "document_raw_tokens": 46582,
+      "document_seconds": 179.57450470002368,
+      "document_usage": {
+        "completion_tokens": 3,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 46593,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 46596
+      },
+      "question_seconds": 2.665017299936153,
+      "question_usage": {
+        "completion_tokens": 22,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 46639,
+        "prompt_tokens_details": {
+          "cached_tokens": 46595
+        },
+        "total_tokens": 46661
+      },
+      "recall_pass": true,
+      "long_context_completed": true,
+      "continuation_seconds": 20.391803200007416,
+      "continuation_usage": {
+        "completion_tokens": 241,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 46698,
+        "prompt_tokens_details": {
+          "cached_tokens": 46660
+        },
+        "total_tokens": 46939
+      },
+      "continuation_pass": true,
+      "test_pass": true,
+      "elapsed_seconds": 213.90537529997528,
+      "finished_at": "2026-10-23T18:00:00+0800",
+      "raw_directory": "capacity-ninfer-45056-full-verify",
+      "command": [
+        "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\apps\\ninfer-serve.exe",
+        "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0.ninfer",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9339",
+        "--model-id",
+        "bonsai-2-27b",
+        "--max-context",
+        "131072",
+        "--max-concurrency",
+        "1",
+        "--kvmem",
+        "--kvmem-budget",
+        "45056",
+        "--kvmem-gen-reserve",
+        "2048",
+        "--kvmem-host-mib",
+        "4096",
+        "--kv-dtype",
+        "rk4v4",
+        "--gdn-state-fp16",
+        "--device-profile",
+        "off",
+        "--prefill-chunk",
+        "256",
+        "--spec",
+        "mtp",
+        "--draft-tokens",
+        "3",
+        "--ngram-draft-tokens",
+        "0",
+        "--lookup-ngram",
+        "0",
+        "--greedy",
+        "--no-thinking",
+        "--log-colours",
+        "off",
+        "--log-level",
+        "debug",
+        "--kvmem-verify-transfers",
+        "--request-log-jsonl",
+        "$ARTIFACTS\\bonsai-integration-20261023\\capacity-ninfer-45056-full-verify\\requests.jsonl"
+      ],
+      "peak_nvidia_smi_mib": 7080,
+      "windows_memory": {
+        "continuation-windows-memory": [
+          {
+            "Name": "pid_48508_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7424888832,
+            "SharedUsage": 807403520,
+            "TotalCommitted": 8232292352
+          },
+          {
+            "Name": "pid_48508_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "document-windows-memory": [
+          {
+            "Name": "pid_48508_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7424888832,
+            "SharedUsage": 807403520,
+            "TotalCommitted": 8232292352
+          },
+          {
+            "Name": "pid_48508_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "question-windows-memory": [
+          {
+            "Name": "pid_48508_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7424888832,
+            "SharedUsage": 807403520,
+            "TotalCommitted": 8232292352
+          },
+          {
+            "Name": "pid_48508_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "short-windows-memory": [
+          {
+            "Name": "pid_48508_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7424131072,
+            "SharedUsage": 421527552,
+            "TotalCommitted": 7845658624
+          },
+          {
+            "Name": "pid_48508_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ],
+        "startup-windows-memory": [
+          {
+            "Name": "pid_48508_luid_0x00000000_0x00014973_phys_0",
+            "DedicatedUsage": 7423664128,
+            "SharedUsage": 182452224,
+            "TotalCommitted": 7606116352
+          },
+          {
+            "Name": "pid_48508_luid_0x00000000_0x000159B2_phys_0",
+            "DedicatedUsage": 270336,
+            "SharedUsage": 0,
+            "TotalCommitted": 270336
+          }
+        ]
+      },
+      "native_query_plans": [
+        "KVMEM_PREFILL_PLAN path=all_resident reason=bounded_replay query_begin=3 query_end=4 planned_replay_rows=0 replay_cap=2048 capture_query=0",
+        "KVMEM_PREFILL_PLAN path=all_resident reason=bounded_replay query_begin=3 query_end=16 planned_replay_rows=0 replay_cap=2048 capture_query=0",
+        "KVMEM_PREFILL_PLAN path=all_resident reason=bounded_replay query_begin=3 query_end=16 planned_replay_rows=0 replay_cap=2048 capture_query=0",
+        "KVMEM_PREFILL_PLAN path=all_resident reason=bounded_replay query_begin=46072 query_end=46584 planned_replay_rows=0 replay_cap=2048 capture_query=0",
+        "KVMEM_PREFILL_PLAN path=all_resident reason=bounded_replay query_begin=46072 query_end=46584 planned_replay_rows=0 replay_cap=2048 capture_query=0",
+        "KVMEM_PREFILL_PLAN path=all_resident reason=bounded_replay query_begin=46600 query_end=46630 planned_replay_rows=0 replay_cap=2048 capture_query=0",
+        "KVMEM_PREFILL_PLAN path=all_resident reason=bounded_replay query_begin=46665 query_end=46689 planned_replay_rows=0 replay_cap=2048 capture_query=0"
+      ],
+      "native_requests": [
+        {
+          "request": {
+            "effective_thinking_budget": null,
+            "enable_thinking": false,
+            "has_tool_history": false,
+            "media_item_count": 0,
+            "message_count": 1,
+            "model": "bonsai-2-27b",
+            "preserve_thinking": null,
+            "preserve_thinking_semantic_change": false,
+            "protocol": "openai_chat_completions",
+            "request_id": 1,
+            "requested_output_tokens": 64,
+            "requested_output_tokens_source": "client",
+            "requested_reasoning_effort": null,
+            "sampling": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "seed": 15676603222461698296,
+              "temperature": 0.0,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "stream": false,
+            "thinking_budget": null,
+            "tool_choice": "auto",
+            "tool_count": 0
+          },
+          "result": {
+            "completion_tokens": 20,
+            "computed_prefill_tokens": 25,
+            "effective_thinking_budget": null,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "post_thinking_sampling": false,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 25,
+            "reasoning_loop_coverage": 0.0,
+            "reasoning_loop_detected": false,
+            "reasoning_loop_thinking_tokens": 0,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "duplicate_parameters_repaired": 0,
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "forced_call_closed": false,
+              "malformed_call_reported": false,
+              "marker_seen": false,
+              "recovered": false,
+              "recovered_call_count": 0,
+              "recovered_from_reasoning": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0,
+              "trailing_content_dropped": false
+            }
+          },
+          "timings_seconds": {
+            "decode": 1.1006285,
+            "prefill": 0.8172325,
+            "prepare": 0.0005751,
+            "total": 1.9484158,
+            "ttft": 0.8186401000000001,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              8,
+              3,
+              2
+            ],
+            "accepted_tokens": 13,
+            "backend": "mtp",
+            "draft_window": 3,
+            "drafted_tokens": 24,
+            "fallback_steps": 0,
+            "ngram_accepted_tokens": 0,
+            "ngram_archive": {
+              "bound": false,
+              "enabled": false,
+              "generation": 0,
+              "published": false,
+              "sampling_seed": null,
+              "session_bytes": 0,
+              "sources": 0,
+              "total_bytes": 0
+            },
+            "ngram_archive_accepted_tokens": 0,
+            "ngram_archive_drafted_tokens": 0,
+            "ngram_archive_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_rounds": 0,
+            "rounds": 8
+          }
+        },
+        {
+          "request": {
+            "effective_thinking_budget": null,
+            "enable_thinking": false,
+            "has_tool_history": false,
+            "media_item_count": 0,
+            "message_count": 1,
+            "model": "bonsai-2-27b",
+            "preserve_thinking": null,
+            "preserve_thinking_semantic_change": false,
+            "protocol": "openai_chat_completions",
+            "request_id": 2,
+            "requested_output_tokens": 16,
+            "requested_output_tokens_source": "client",
+            "requested_reasoning_effort": null,
+            "sampling": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "seed": 1744398295829541214,
+              "temperature": 0.0,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "stream": false,
+            "thinking_budget": null,
+            "tool_choice": "auto",
+            "tool_count": 0
+          },
+          "result": {
+            "completion_tokens": 3,
+            "computed_prefill_tokens": 46593,
+            "effective_thinking_budget": null,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "post_thinking_sampling": false,
+            "prefix_cache_hit_tokens": 0,
+            "prefix_reuse_path": "root",
+            "prompt_tokens": 46593,
+            "reasoning_loop_coverage": 0.0,
+            "reasoning_loop_detected": false,
+            "reasoning_loop_thinking_tokens": 0,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "duplicate_parameters_repaired": 0,
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "forced_call_closed": false,
+              "malformed_call_reported": false,
+              "marker_seen": false,
+              "recovered": false,
+              "recovered_call_count": 0,
+              "recovered_from_reasoning": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0,
+              "trailing_content_dropped": false
+            }
+          },
+          "timings_seconds": {
+            "decode": 0.2677925,
+            "prefill": 179.17576729999993,
+            "prepare": 0.0698815,
+            "total": 179.54945650000002,
+            "ttft": 179.25860690000002,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              1,
+              1,
+              0
+            ],
+            "accepted_tokens": 2,
+            "backend": "mtp",
+            "draft_window": 3,
+            "drafted_tokens": 6,
+            "fallback_steps": 0,
+            "ngram_accepted_tokens": 0,
+            "ngram_archive": {
+              "bound": false,
+              "enabled": false,
+              "generation": 0,
+              "published": false,
+              "sampling_seed": null,
+              "session_bytes": 0,
+              "sources": 0,
+              "total_bytes": 0
+            },
+            "ngram_archive_accepted_tokens": 0,
+            "ngram_archive_drafted_tokens": 0,
+            "ngram_archive_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_rounds": 0,
+            "rounds": 2
+          }
+        },
+        {
+          "request": {
+            "effective_thinking_budget": null,
+            "enable_thinking": false,
+            "has_tool_history": false,
+            "media_item_count": 0,
+            "message_count": 3,
+            "model": "bonsai-2-27b",
+            "preserve_thinking": null,
+            "preserve_thinking_semantic_change": false,
+            "protocol": "openai_chat_completions",
+            "request_id": 3,
+            "requested_output_tokens": 128,
+            "requested_output_tokens_source": "client",
+            "requested_reasoning_effort": null,
+            "sampling": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "seed": 6032785653011798298,
+              "temperature": 0.0,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "stream": false,
+            "thinking_budget": null,
+            "tool_choice": "auto",
+            "tool_count": 0
+          },
+          "result": {
+            "completion_tokens": 22,
+            "computed_prefill_tokens": 44,
+            "effective_thinking_budget": null,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "post_thinking_sampling": false,
+            "prefix_cache_hit_tokens": 46595,
+            "prefix_reuse_path": "private_endpoint",
+            "prompt_tokens": 46639,
+            "reasoning_loop_coverage": 0.0,
+            "reasoning_loop_detected": false,
+            "reasoning_loop_thinking_tokens": 0,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "duplicate_parameters_repaired": 0,
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "forced_call_closed": false,
+              "malformed_call_reported": false,
+              "marker_seen": false,
+              "recovered": false,
+              "recovered_call_count": 0,
+              "recovered_from_reasoning": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0,
+              "trailing_content_dropped": false
+            }
+          },
+          "timings_seconds": {
+            "decode": 0.9398069999999998,
+            "prefill": 1.5839006000000002,
+            "prepare": 0.0387188,
+            "total": 2.6440387999999997,
+            "ttft": 1.6236363,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              6,
+              6,
+              5
+            ],
+            "accepted_tokens": 17,
+            "backend": "mtp",
+            "draft_window": 3,
+            "drafted_tokens": 18,
+            "fallback_steps": 0,
+            "ngram_accepted_tokens": 0,
+            "ngram_archive": {
+              "bound": false,
+              "enabled": false,
+              "generation": 0,
+              "published": false,
+              "sampling_seed": null,
+              "session_bytes": 0,
+              "sources": 0,
+              "total_bytes": 0
+            },
+            "ngram_archive_accepted_tokens": 0,
+            "ngram_archive_drafted_tokens": 0,
+            "ngram_archive_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_rounds": 0,
+            "rounds": 6
+          }
+        },
+        {
+          "request": {
+            "effective_thinking_budget": null,
+            "enable_thinking": false,
+            "has_tool_history": false,
+            "media_item_count": 0,
+            "message_count": 5,
+            "model": "bonsai-2-27b",
+            "preserve_thinking": null,
+            "preserve_thinking_semantic_change": false,
+            "protocol": "openai_chat_completions",
+            "request_id": 4,
+            "requested_output_tokens": 256,
+            "requested_output_tokens_source": "client",
+            "requested_reasoning_effort": null,
+            "sampling": {
+              "frequency_penalty": 0.0,
+              "min_p": 0.0,
+              "presence_penalty": 1.5,
+              "seed": 5744459494729283041,
+              "temperature": 0.0,
+              "top_k": 20,
+              "top_p": 0.800000011920929
+            },
+            "stream": false,
+            "thinking_budget": null,
+            "tool_choice": "auto",
+            "tool_count": 0
+          },
+          "result": {
+            "completion_tokens": 241,
+            "computed_prefill_tokens": 38,
+            "effective_thinking_budget": null,
+            "finish_reason": "stop_token",
+            "model_thinking_tokens": 0,
+            "post_thinking_sampling": false,
+            "prefix_cache_hit_tokens": 46660,
+            "prefix_reuse_path": "private_endpoint",
+            "prompt_tokens": 46698,
+            "reasoning_loop_coverage": 0.0,
+            "reasoning_loop_detected": false,
+            "reasoning_loop_thinking_tokens": 0,
+            "thinking_budget": null,
+            "thinking_control_applied": false,
+            "thinking_control_tokens": 0,
+            "tool_call_count": 0,
+            "tool_call_parse": {
+              "duplicate_parameters_repaired": 0,
+              "empty_arguments_omitted": 0,
+              "fallback_reason": "none",
+              "forced_call_closed": false,
+              "malformed_call_reported": false,
+              "marker_seen": false,
+              "recovered": false,
+              "recovered_call_count": 0,
+              "recovered_from_reasoning": false,
+              "schema_mismatch_arguments": 0,
+              "structured_call_count": 0,
+              "trailing_content_dropped": false
+            }
+          },
+          "timings_seconds": {
+            "decode": 17.693583699999998,
+            "prefill": 1.500244,
+            "prepare": 0.0441142,
+            "total": 20.3867418,
+            "ttft": 1.5456478,
+            "vision": 0.0
+          },
+          "speculative": {
+            "accepted_per_position": [
+              73,
+              38,
+              20
+            ],
+            "accepted_tokens": 131,
+            "backend": "mtp",
+            "draft_window": 3,
+            "drafted_tokens": 333,
+            "fallback_steps": 0,
+            "ngram_accepted_tokens": 0,
+            "ngram_archive": {
+              "bound": false,
+              "enabled": false,
+              "generation": 0,
+              "published": false,
+              "sampling_seed": null,
+              "session_bytes": 0,
+              "sources": 0,
+              "total_bytes": 0
+            },
+            "ngram_archive_accepted_tokens": 0,
+            "ngram_archive_drafted_tokens": 0,
+            "ngram_archive_rounds": 0,
+            "ngram_drafted_tokens": 0,
+            "ngram_rounds": 0,
+            "rounds": 111
+          }
+        }
+      ]
+    },
+    {
+      "backend": "ninfer",
+      "budget": 49152,
+      "reserve": 2048,
+      "gpu_uuid": "GPU-A",
+      "short_only": false,
+      "purpose": "8GB functional capacity qualification; timings are diagnostic, not benchmarks.",
+      "started_at": "2026-10-23T17:54:59+0800",
+      "pid": 44104,
+      "error": "startup exited 1",
+      "elapsed_seconds": 2.5688877999782562,
+      "finished_at": "2026-10-23T17:55:03+0800",
+      "raw_directory": "capacity-ninfer-49152-full-verify",
+      "command": [
+        "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\apps\\ninfer-serve.exe",
+        "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0.ninfer",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "7334",
+        "--model-id",
+        "bonsai-2-27b",
+        "--max-context",
+        "131072",
+        "--max-concurrency",
+        "1",
+        "--kvmem",
+        "--kvmem-budget",
+        "49152",
+        "--kvmem-gen-reserve",
+        "2048",
+        "--kvmem-host-mib",
+        "4096",
+        "--kv-dtype",
+        "rk4v4",
+        "--gdn-state-fp16",
+        "--device-profile",
+        "off",
+        "--prefill-chunk",
+        "256",
+        "--spec",
+        "mtp",
+        "--draft-tokens",
+        "3",
+        "--ngram-draft-tokens",
+        "0",
+        "--lookup-ngram",
+        "0",
+        "--greedy",
+        "--no-thinking",
+        "--log-colours",
+        "off",
+        "--log-level",
+        "debug",
+        "--kvmem-verify-transfers",
+        "--request-log-jsonl",
+        "$ARTIFACTS\\bonsai-integration-20261023\\capacity-ninfer-49152-full-verify\\requests.jsonl"
+      ],
+      "peak_nvidia_smi_mib": 5706,
+      "windows_memory": {},
+      "native_query_plans": [],
+      "native_requests": [],
+      "classification": "runtime planner refusal, not a completed capacity run",
+      "required_runtime_bytes": 1327859968,
+      "available_runtime_bytes": 1297674240
+    }
+  ],
+  "excluded_capacity_attempts": [
+    {
+      "directory": "capacity-llamacpp-20480",
+      "error": "HTTP 404: ",
+      "interference": null
+    },
+    {
+      "directory": "capacity-llamacpp-49152-full",
+      "error": "[WinError 10054] \u8fdc\u7a0b\u4e3b\u673a\u5f3a\u8feb\u5173\u95ed\u4e86\u4e00\u4e2a\u73b0\u6709\u7684\u8fde\u63a5\u3002",
+      "interference": {
+        "observed_at": "2026-10-23T17:08:36.0926880+08:00",
+        "test_stopped": true,
+        "reason": "Concurrent unrelated Qwen3.5-4B ninfer service on the same RTX 5050",
+        "exclude_from_budget_bounds": true,
+        "interfering_pid": 45360
+      }
+    },
+    {
+      "directory": "capacity-llamacpp-49152-full-exclusive",
+      "error": "<urlopen error [WinError 10061] \u7531\u4e8e\u76ee\u6807\u8ba1\u7b97\u673a\u79ef\u6781\u62d2\u7edd\uff0c\u65e0\u6cd5\u8fde\u63a5\u3002>",
+      "interference": [
+        {
+          "seconds": 11.06,
+          "processes": [
+            {
+              "pid": 17948,
+              "name": "$ARTIFACTS\\bonsai-integration-20261023\\build-llama\\bin\\llama-tokenize.exe",
+              "uuid": "GPU-A"
+            }
+          ]
+        },
+        {
+          "seconds": 17.54,
+          "processes": [
+            {
+              "pid": 26688,
+              "name": "$ARTIFACTS\\bonsai-integration-20261023\\build-llama\\bin\\llama-tokenize.exe",
+              "uuid": "GPU-A"
+            }
+          ]
+        },
+        {
+          "seconds": 21.89,
+          "processes": [
+            {
+              "pid": 15700,
+              "name": "$ARTIFACTS\\bonsai-integration-20261023\\build-llama\\bin\\llama-tokenize.exe",
+              "uuid": "GPU-A"
+            }
+          ]
+        },
+        {
+          "seconds": 28.48,
+          "processes": [
+            {
+              "pid": 35168,
+              "name": "$ARTIFACTS\\bonsai-integration-20261023\\build-llama\\bin\\llama-tokenize.exe",
+              "uuid": "GPU-A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "directory": "capacity-ninfer-20480-final-exclusive",
+      "error": "startup exited 1",
+      "interference": [
+        {
+          "seconds": 4.94,
+          "processes": [
+            {
+              "pid": 52064,
+              "name": "$ARTIFACTS\\polystrata-integration-20261022\\build-merge-integrated\\poly_kvmem_mtp_test.exe",
+              "uuid": "GPU-A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "directory": "capacity-ninfer-20480-final-verify",
+      "error": "[WinError 10054] \u8fdc\u7a0b\u4e3b\u673a\u5f3a\u8feb\u5173\u95ed\u4e86\u4e00\u4e2a\u73b0\u6709\u7684\u8fde\u63a5\u3002",
+      "interference": [
+        {
+          "seconds": 28.57,
+          "processes": [
+            {
+              "pid": 48880,
+              "name": "$ARTIFACTS\\polystrata-integration-20261022\\build-merge-integrated\\strata-poly.exe",
+              "uuid": "GPU-A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "directory": "capacity-ninfer-20480-final3",
+      "error": "[WinError 10054] \u8fdc\u7a0b\u4e3b\u673a\u5f3a\u8feb\u5173\u95ed\u4e86\u4e00\u4e2a\u73b0\u6709\u7684\u8fde\u63a5\u3002",
+      "interference": [
+        {
+          "seconds": 87.2,
+          "processes": [
+            {
+              "pid": 34696,
+              "name": "$ARTIFACTS\\polystrata-integration-20261022\\build-merge-integrated\\strata-poly.exe",
+              "uuid": "GPU-A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "directory": "capacity-ninfer-20480-full",
+      "error": "HTTP 503: {\"error\":{\"code\":\"model_loading\",\"message\":\"The model is still loading. Retry shortly.\",\"param\":null,\"type\":\"service_unavailable\"}}",
+      "interference": null
+    }
+  ],
+  "service_restoration": {
+    "state": "ready",
+    "pid": 37484,
+    "url": "http://127.0.0.1:18200",
+    "config_matches": true,
+    "health": {
+      "status": "ok",
+      "max_context": 262144,
+      "model": "kvmem-polystrata-qwen35",
+      "images": false,
+      "api_key": false,
+      "image_generation": false,
+      "loaded": true,
+      "service": "strata"
+    }
+  },
+  "capacity_worker_note": "Completed native capacity runs used the PTQ1/performance worker before the independent non-KVMem summary fix (SHA256 dacc49f80e4c951f57b3b75f71c74cdf1cf452775d5f7a48d27221987a44cb15). Final-worker 20K attempts were interrupted/failed and excluded, including foreign Polystrata GPU processes; final native cache regression and A16/A8 performance used the fixed worker.",
+  "ninfer_performance": {
+    "raw_directory": "performance-ninfer-5060ti-fixed",
+    "summary": {
+      "a16": {
+        "documents": 6,
+        "mean_prefill_tokens_per_second": 345.04446619801087,
+        "mean_prefill_seconds": 7.546770666666666,
+        "per_document_tokens_per_second": [
+          333.6630183741161,
+          349.81130011985914,
+          349.5017666354281,
+          338.0784630628369,
+          349.52913202449827,
+          349.6831169713267
+        ]
+      },
+      "a8": {
+        "documents": 6,
+        "mean_prefill_tokens_per_second": 667.8805864507317,
+        "mean_prefill_seconds": 3.9022183166666666,
+        "per_document_tokens_per_second": [
+          635.884281372956,
+          684.5597020085056,
+          683.4040895919395,
+          634.3609981503369,
+          684.606333342372,
+          684.4681142382805
+        ]
+      }
+    },
+    "requests": [
+      {
+        "run": "0-a80",
+        "a8": false,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 3,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0994242,
+          "prefill": 7.8012841,
+          "prepare": 0.0038881,
+          "total": 7.906348700000001,
+          "ttft": 7.8055933,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "0-a80",
+        "a8": false,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 38,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2632,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0954037,
+          "prefill": 0.5887898,
+          "prepare": 0.0029482,
+          "total": 0.6876298,
+          "ttft": 0.592115,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "0-a80",
+        "a8": false,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 2,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0477884,
+          "prefill": 7.441154699999999,
+          "prepare": 0.0045515,
+          "total": 7.4942158,
+          "ttft": 7.446111,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 3,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 1
+        }
+      },
+      {
+        "run": "0-a80",
+        "a8": false,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 37,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2631,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.095463,
+          "prefill": 0.6185083,
+          "prepare": 0.0026161,
+          "total": 0.7170045,
+          "ttft": 0.6214207,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "0-a80",
+        "a8": false,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 3,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0955381,
+          "prefill": 7.4477449,
+          "prepare": 0.0042835,
+          "total": 7.548321499999999,
+          "ttft": 7.4524389,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "0-a80",
+        "a8": false,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 38,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2632,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0955796,
+          "prefill": 0.2049225,
+          "prepare": 0.0035859,
+          "total": 0.3046718,
+          "ttft": 0.2089647,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "1-a81",
+        "a8": true,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 3,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.1005862,
+          "prefill": 4.0935121,
+          "prepare": 0.0037583,
+          "total": 4.1991375,
+          "ttft": 4.097883400000001,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "1-a81",
+        "a8": true,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 38,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2632,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0954808,
+          "prefill": 0.441552,
+          "prepare": 0.0037712,
+          "total": 0.5412530999999999,
+          "ttft": 0.44565619999999995,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "1-a81",
+        "a8": true,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 2,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.047718800000000006,
+          "prefill": 3.8024440999999998,
+          "prepare": 0.0032794,
+          "total": 3.8542997999999997,
+          "ttft": 3.8062416999999997,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 3,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 1
+        }
+      },
+      {
+        "run": "1-a81",
+        "a8": true,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 37,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2631,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.09557369999999998,
+          "prefill": 0.5134620999999999,
+          "prepare": 0.0030901,
+          "total": 0.6126189,
+          "ttft": 0.5169123,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "1-a81",
+        "a8": true,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 3,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0957128,
+          "prefill": 3.8088739,
+          "prepare": 0.0044133,
+          "total": 3.9105143,
+          "ttft": 3.8137409,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "1-a81",
+        "a8": true,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 38,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2632,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0955689,
+          "prefill": 0.1445212,
+          "prepare": 0.0030429,
+          "total": 0.24358039999999997,
+          "ttft": 0.1478949,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "2-a81",
+        "a8": true,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 3,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.09955489999999999,
+          "prefill": 4.1033418,
+          "prepare": 0.0041294,
+          "total": 4.2078431,
+          "ttft": 4.1078938,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "2-a81",
+        "a8": true,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 38,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2632,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0957713,
+          "prefill": 0.4093389,
+          "prepare": 0.0034528,
+          "total": 0.5090141,
+          "ttft": 0.41311539999999997,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "2-a81",
+        "a8": true,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 2,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0477752,
+          "prefill": 3.8021851,
+          "prepare": 0.0044317,
+          "total": 3.8556206,
+          "ttft": 3.8070612,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 3,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 1
+        }
+      },
+      {
+        "run": "2-a81",
+        "a8": true,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 37,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2631,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0955648,
+          "prefill": 0.5084621,
+          "prepare": 0.002776,
+          "total": 0.6072427,
+          "ttft": 0.5115632,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "2-a81",
+        "a8": true,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 3,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0955804,
+          "prefill": 3.8029528999999997,
+          "prepare": 0.0038942,
+          "total": 3.9038074,
+          "ttft": 3.807331,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "2-a81",
+        "a8": true,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 38,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2632,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0955489,
+          "prefill": 0.1443749,
+          "prepare": 0.0028497,
+          "total": 0.2432032,
+          "ttft": 0.14754060000000002,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "3-a80",
+        "a8": false,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 3,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0991022,
+          "prefill": 7.6993960999999995,
+          "prepare": 0.0054456,
+          "total": 7.8047406,
+          "ttft": 7.7052727,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "3-a80",
+        "a8": false,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 38,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2632,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0955873,
+          "prefill": 0.45663190000000003,
+          "prepare": 0.0027552,
+          "total": 0.5553864,
+          "ttft": 0.4596853,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "3-a80",
+        "a8": false,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 2,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0477256,
+          "prefill": 7.447161799999999,
+          "prepare": 0.0043812,
+          "total": 7.5000391,
+          "ttft": 7.4520089,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 3,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 1
+        }
+      },
+      {
+        "run": "3-a80",
+        "a8": false,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 37,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2631,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0957336,
+          "prefill": 0.4864968,
+          "prepare": 0.0030624,
+          "total": 0.5858997,
+          "ttft": 0.49003260000000004,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "3-a80",
+        "a8": false,
+        "stage": "document",
+        "result": {
+          "completion_tokens": 3,
+          "computed_prefill_tokens": 2603,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 0,
+          "prefix_reuse_path": "root",
+          "prompt_tokens": 2603,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0955935,
+          "prefill": 7.4438824,
+          "prepare": 0.0036129,
+          "total": 7.5438556000000005,
+          "ttft": 7.447907600000001,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            1,
+            1,
+            0
+          ],
+          "accepted_tokens": 2,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      },
+      {
+        "run": "3-a80",
+        "a8": false,
+        "stage": "question",
+        "result": {
+          "completion_tokens": 8,
+          "computed_prefill_tokens": 38,
+          "effective_thinking_budget": null,
+          "finish_reason": "stop_token",
+          "model_thinking_tokens": 0,
+          "post_thinking_sampling": false,
+          "prefix_cache_hit_tokens": 2594,
+          "prefix_reuse_path": "shared_stable_prefix",
+          "prompt_tokens": 2632,
+          "reasoning_loop_coverage": 0.0,
+          "reasoning_loop_detected": false,
+          "reasoning_loop_thinking_tokens": 0,
+          "thinking_budget": null,
+          "thinking_control_applied": false,
+          "thinking_control_tokens": 0,
+          "tool_call_count": 0,
+          "tool_call_parse": {
+            "duplicate_parameters_repaired": 0,
+            "empty_arguments_omitted": 0,
+            "fallback_reason": "none",
+            "forced_call_closed": false,
+            "malformed_call_reported": false,
+            "marker_seen": false,
+            "recovered": false,
+            "recovered_call_count": 0,
+            "recovered_from_reasoning": false,
+            "schema_mismatch_arguments": 0,
+            "structured_call_count": 0,
+            "trailing_content_dropped": false
+          }
+        },
+        "timings_seconds": {
+          "decode": 0.0955136,
+          "prefill": 0.2057271,
+          "prepare": 0.0026876,
+          "total": 0.3043426,
+          "ttft": 0.20871930000000002,
+          "vision": 0.0
+        },
+        "speculative": {
+          "accepted_per_position": [
+            2,
+            2,
+            1
+          ],
+          "accepted_tokens": 5,
+          "backend": "mtp",
+          "draft_window": 3,
+          "drafted_tokens": 6,
+          "fallback_steps": 0,
+          "ngram_accepted_tokens": 0,
+          "ngram_archive": {
+            "bound": false,
+            "enabled": false,
+            "generation": 0,
+            "published": false,
+            "sampling_seed": null,
+            "session_bytes": 0,
+            "sources": 0,
+            "total_bytes": 0
+          },
+          "ngram_archive_accepted_tokens": 0,
+          "ngram_archive_drafted_tokens": 0,
+          "ngram_archive_rounds": 0,
+          "ngram_drafted_tokens": 0,
+          "ngram_rounds": 0,
+          "rounds": 2
+        }
+      }
+    ]
+  },
+  "llama_performance": {
+    "raw_directory": "performance-llamacpp-5060ti",
+    "tg128_generic_mean": 26.0006155,
+    "tg128_optimized_mean": 46.316265,
+    "pp512_conclusion": "No established gain; 466 to 492 tokens/s in both paths",
+    "configuration": "PTQ1 main model only; no MTP/KVMem; Q4 K/V; FA on; 256 batch/ubatch; t4; 3 repeats per run; order generic/fast/fast/generic"
+  },
+  "native_prefix_fix": {
+    "before": [
+      {
+        "label": "before",
+        "command": [
+          "$ARTIFACTS\\ninfer-upstream-20261022\\build-kvmem\\apps\\ninfer-serve.exe",
+          "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-T2-text\\Ternary-Bonsai-2-27B-T2-text.ninfer",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "12164",
+          "--model-id",
+          "bonsai",
+          "--max-context",
+          "8192",
+          "--kv-capacity",
+          "8192",
+          "--max-concurrency",
+          "1",
+          "--host-cache-mib",
+          "0",
+          "--prefill-chunk",
+          "256",
+          "--kv-dtype",
+          "rk4v4",
+          "--gdn-state-fp16",
+          "--device-profile",
+          "off",
+          "--spec",
+          "none",
+          "--ngram-draft-tokens",
+          "0",
+          "--lookup-ngram",
+          "0",
+          "--no-kvmem",
+          "--greedy",
+          "--no-thinking",
+          "--log-colours",
+          "off",
+          "--no-prefill-a8"
+        ],
+        "binary_sha256": "ed38692015dc9ed4f169a4aed00621abb81de93e4c50b15dfbfd455307a13c61",
+        "gpu_uuid": "GPU-B",
+        "error": "HTTP Error 500: Internal Server Error",
+        "body": "{\"error\":{\"code\":null,\"message\":\"runtime Begin summary differs from committed admission\",\"param\":null,\"type\":\"internal_error\"}}"
+      },
+      {
+        "label": "after",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\apps\\ninfer-serve.exe",
+          "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-T2-text\\Ternary-Bonsai-2-27B-T2-text.ninfer",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "3921",
+          "--model-id",
+          "bonsai",
+          "--max-context",
+          "8192",
+          "--kv-capacity",
+          "8192",
+          "--max-concurrency",
+          "1",
+          "--host-cache-mib",
+          "0",
+          "--prefill-chunk",
+          "256",
+          "--kv-dtype",
+          "rk4v4",
+          "--gdn-state-fp16",
+          "--device-profile",
+          "off",
+          "--spec",
+          "none",
+          "--ngram-draft-tokens",
+          "0",
+          "--lookup-ngram",
+          "0",
+          "--no-kvmem",
+          "--greedy",
+          "--no-thinking",
+          "--log-colours",
+          "off",
+          "--no-prefill-a8"
+        ],
+        "binary_sha256": "dacc49f80e4c951f57b3b75f71c74cdf1cf452775d5f7a48d27221987a44cb15",
+        "gpu_uuid": "GPU-B",
+        "error": "HTTP Error 500: Internal Server Error",
+        "body": "{\"error\":{\"code\":null,\"message\":\"runtime Begin summary differs from committed admission\",\"param\":null,\"type\":\"internal_error\"}}"
+      }
+    ],
+    "after": [
+      {
+        "label": "fixed-t2",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\apps\\ninfer-serve.exe",
+          "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-T2-text\\Ternary-Bonsai-2-27B-T2-text.ninfer",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "14813",
+          "--model-id",
+          "bonsai",
+          "--max-context",
+          "8192",
+          "--kv-capacity",
+          "8192",
+          "--max-concurrency",
+          "1",
+          "--host-cache-mib",
+          "0",
+          "--prefill-chunk",
+          "256",
+          "--kv-dtype",
+          "rk4v4",
+          "--gdn-state-fp16",
+          "--device-profile",
+          "off",
+          "--spec",
+          "none",
+          "--ngram-draft-tokens",
+          "0",
+          "--lookup-ngram",
+          "0",
+          "--no-kvmem",
+          "--greedy",
+          "--no-thinking",
+          "--log-colours",
+          "off",
+          "--no-prefill-a8"
+        ],
+        "binary_sha256": "76a18c6134d7649ddff4d11b89fad0a43de3d7f183a9acd75683555faa11c537",
+        "gpu_uuid": "GPU-B",
+        "answer": "Cedar-4826",
+        "usage": {
+          "completion_tokens": 8,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 2632,
+          "prompt_tokens_details": {
+            "cached_tokens": 2594
+          },
+          "total_tokens": 2640
+        },
+        "pass": true
+      }
+    ],
+    "tests": [
+      {
+        "scenario": "turns-device-only",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_prefix_cache_tests.exe",
+          "ninfer_qwen3_5_hybrid_prefix_real_test"
+        ],
+        "exit_code": 0,
+        "seconds": 11.175292300060391,
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "GPU-B",
+          "NINFER_TEST_ARTIFACT": "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0.ninfer",
+          "NINFER_HYBRID_KV_DTYPE": "int8",
+          "NINFER_HYBRID_REAL_SCENARIO": "turns-device-only"
+        }
+      },
+      {
+        "scenario": "restore-admission",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_prefix_cache_tests.exe",
+          "ninfer_qwen3_5_hybrid_prefix_real_test"
+        ],
+        "exit_code": 0,
+        "seconds": 46.64435859990772,
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "GPU-B",
+          "NINFER_TEST_ARTIFACT": "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0.ninfer",
+          "NINFER_HYBRID_KV_DTYPE": "int8",
+          "NINFER_HYBRID_REAL_SCENARIO": "restore-admission"
+        }
+      }
+    ],
+    "old_fixture_failures": [
+      {
+        "scenario": "turns-device-only",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_prefix_cache_tests.exe",
+          "ninfer_qwen3_5_hybrid_prefix_real_test"
+        ],
+        "exit_code": 0,
+        "seconds": 10.876598800066859,
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "GPU-B",
+          "NINFER_TEST_ARTIFACT": "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0.ninfer",
+          "NINFER_HYBRID_KV_DTYPE": "int8",
+          "NINFER_HYBRID_REAL_SCENARIO": "turns-device-only"
+        }
+      },
+      {
+        "scenario": "restore-exact",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_prefix_cache_tests.exe",
+          "ninfer_qwen3_5_hybrid_prefix_real_test"
+        ],
+        "exit_code": 1,
+        "seconds": 22.55345829995349,
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "GPU-B",
+          "NINFER_TEST_ARTIFACT": "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0.ninfer",
+          "NINFER_HYBRID_KV_DTYPE": "int8",
+          "NINFER_HYBRID_REAL_SCENARIO": "restore-exact"
+        }
+      },
+      {
+        "scenario": "restore-exact-mtp",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_prefix_cache_tests.exe",
+          "ninfer_qwen3_5_hybrid_prefix_real_test"
+        ],
+        "exit_code": 1,
+        "seconds": 1.0353759999852628,
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "GPU-B",
+          "NINFER_TEST_ARTIFACT": "$ARTIFACTS\\models\\ninfer\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0\\Ternary-Bonsai-2-27B-PTQ1-MTP-r3-Q4_0.ninfer",
+          "NINFER_HYBRID_KV_DTYPE": "int8",
+          "NINFER_HYBRID_REAL_SCENARIO": "restore-exact-mtp"
+        }
+      }
+    ]
+  },
+  "validation": {
+    "ninfer_operator_tests": [
+      {
+        "name": "artifact",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_artifact_ptq1_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 0.9017928999383003,
+        "overrides": {}
+      },
+      {
+        "name": "linear-a16",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_linear_ptq1_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 11.873049600049853,
+        "overrides": {}
+      },
+      {
+        "name": "linear-a8",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_linear_ptq1_a8_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 9.80608710006345,
+        "overrides": {}
+      },
+      {
+        "name": "swiglu",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_linear_swiglu_ptq1_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 1.8747051999671385,
+        "overrides": {}
+      },
+      {
+        "name": "residual",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_linear_add_ptq1_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 0.9829174999613315,
+        "overrides": {}
+      },
+      {
+        "name": "attention",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_attn_input_proj_test",
+          "--ptq1-only"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 2.4752525000367314,
+        "overrides": {}
+      },
+      {
+        "name": "gdn",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_gdn_input_proj_test",
+          "--ptq1-only"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 1.438222200027667,
+        "overrides": {}
+      },
+      {
+        "name": "hadamard",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_hadamard_transform_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 2.32623380003497,
+        "overrides": {}
+      },
+      {
+        "name": "topk",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_linear_topk_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 26.376241800026037,
+        "overrides": {}
+      },
+      {
+        "name": "t2-a16",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_linear_t2_a16_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 18.528835400007665,
+        "overrides": {}
+      },
+      {
+        "name": "t2-a8",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_linear_t2_a8_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 14.648644899949431,
+        "overrides": {}
+      },
+      {
+        "name": "a8-isolated",
+        "command": [
+          "$ARTIFACTS\\bonsai-integration-20261023\\build-ninfer\\tests\\ninfer_ptq1_tests.exe",
+          "ninfer_linear_ptq1_a8_test"
+        ],
+        "gpu_uuid": "GPU-A",
+        "exit_code": 0,
+        "seconds": 11.18929130001925,
+        "overrides": {
+          "NINFER_T2_A8_TILE": "0",
+          "NINFER_T2_DECODE": "simt",
+          "NINFER_T2_SMALLT": "v1"
+        }
+      }
+    ],
+    "logs": [
+      "preparation-tests-final2.log",
+      "conversion-tests.log",
+      "patch-replay-final.log",
+      "llama-quant-cpu-final.log",
+      "llama-quant-cuda-generic.log",
+      "llama-quant-memcheck-full.log",
+      "llama-fusion-cpu.log",
+      "llama-fusion-memcheck.log",
+      "llama-fusion-generic.log",
+      "ninfer-ptq1-calibration.log",
+      "build-ninfer-prefix-fix.log"
+    ],
+    "notes": "12 preparation/frontend tests; 28 conversion tests; 12 native operator invocations; CPU/CUDA FP64 oracles; CUDA memory checking; all final patch layers replayed. Graph-update API fallback was diagnosed separately."
+  },
+  "limitations": [
+    "8GB capacity requires specified batch, FP16 GDN for ninfer, one lane and Q4 MTP.",
+    "B excludes the separate 2048 append reserve. Shared GPU counters do not establish absence of paging.",
+    "52K llama and 44K ninfer are highest completed configurations, not universal maximums.",
+    "Other CPU compilation and some other-GPU functional work overlapped performance runs.",
+    "ROCm, vision, multi-GPU and other Bonsai model sizes are unqualified."
+  ],
+  "_sanitization": {
+    "version": 1,
+    "original_sha256": "43513a5395b01589f5b64a64a1ba3f59cf214254a8d30ff5e529b9cab60df0da",
+    "scope": "Device identities/private paths anonymized, credential fields redacted; measurements unchanged."
+  }
+}

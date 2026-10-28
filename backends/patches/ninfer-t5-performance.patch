@@ -1,0 +1,3061 @@
+diff --git a/NOTICE b/NOTICE
+index e999b2be964e903698792075971c1ea1740e8c55..a51a8a648f14ec3d951b0b403bee787650c69882 100644
+--- a/NOTICE
++++ b/NOTICE
+@@ -10,3 +10,10 @@ Changes made here: integrated the current v3 artifact format and current Op inte
+ preserved existing format IDs, T2 routes and architecture bounds; made activation layouts and
+ workspace planning format-aware; fused inverse-rotated PTQ1 embedding with a single BF16 output
+ rounding; added an artifact-owned codec, conversion recipe and independent numerical tests.
++
++T5 CUDA kernels
++===============
++Adapted from JGamboa/ninfer-4090-windows, commit e905787f067de89ef6ef28c52d65a2ce91d425ca
++https://github.com/JGamboa/ninfer-4090-windows (Apache License 2.0).
++Changes: RowSplit artifact integration, explicit existing Hadamard producer boundary,
++strided split-parent destinations, SM120 qualification, and independent codec/oracle tests.
+diff --git a/docs/maintainer/tensor-formats.md b/docs/maintainer/tensor-formats.md
+index 3e35c818e961ab909c686f9626f34d9f98ffb334..7003f7ede2f202a28e8f237ab53a33b94cfd2908 100644
+--- a/docs/maintainer/tensor-formats.md
++++ b/docs/maintainer/tensor-formats.md
+@@ -452,6 +452,9 @@ the row-split layout.
+ 
+ ### 5.2.1 Native PTQ1
+ 
++The optional T5 packing described below represents the same ternary integers and FP16 scales;
++the two formats have different byte layouts and must never alias one another.
++
+ `ptq1_g128_fp16` represents the same ternary values as T2 while preserving Prism PTQ1_0
+ packing: every 128-column group has 24 base bytes, two tail bytes and one FP16 multiplier.
+ It is supported only in `row_split_k128_v1`, with K a multiple of 128. It is a distinct codec;
+@@ -773,3 +776,56 @@ input/output formats, output tolerance, and real target shapes. The
+ 3.4; a producer that copies an upstream quantized tensor is protected by exact source-word
+ comparison, while any source-to-FP8 encoder is protected under its own named profile. Private
+ activation quantization, staging, and accumulation remain implementation choices.
++
++
++## Optional native T5 packing
++
++`t5_g128_fp16` / `QType::T5_G128_FP16` uses `row_split_k128_v1`, group 128,
++FP16 scales, no high plane, and 26 code bytes per group. The scale plane follows
++ordinary RowSplit alignment. Matrices require whole 128-column groups; this
++implementation's compute routes require positive K divisible by 1024.
++
++Each 64-column unit occupies 13 bytes. For byte i < 12, g = floor(i/4), j = i%4,
++the five trits are the codes of columns `20*g + 4*m + j`, m=0..4. Byte 12 stores
++columns 60..63 and a zero fifth trit. Codes are 0/1/2 for logical -1/0/+1. Encode
++`v = sum(trit[m] * 3**(4-m))` as `ceil(256*v/243)`. Decode by repeatedly multiplying
++by 3, emitting the high byte and retaining the low byte. Noncanonical bytes and
++nonzero padding trits are rejected by the Python codec. A stored scalar is
++`(code-1) * FP16_scale`, with no zero point. Including scales, storage is 1.75 bits
++per weight, equal to PTQ1; conversion from PTQ1 is a lossless reordering, not a new
++weight quantization.
++
++Execution is opt-in through a separate artifact and `AllowA8` (or `AllowA4`, which
++also admits A8). T5 has no A16 compute fallback; A16-only calls fail explicitly.
++Existing PTQ1/T2 artifacts retain their own paths and policies. The public tensors
++are BF16. Per 128 activation columns, the private quantizer uses symmetric s8
++codes and an FP32 scale, introducing activation rounding within the A8 numerical
++allowance. dp4a serves 1..4 tokens, integer MMA serves 5..32, and larger calls use
++prefill tiles; row tails use the small-token tiled route. Routing is static and
++CUDA Graph capture does not perform host synchronization or persistent allocation.
++
++The same public operations accept T5: linear, residual linear_add, linear_swiglu,
++the Bonsai two-parent attention and GDN projections, ordinary/rotated embedding,
++and the registered full/reduced vocabulary linear_topk heads. Split parents must
++both use T5. Output rows are contiguous; the internal splitter also respects token
++strides for GDN's shared qkv allocation. Every transient allocation is charged to
++the operation's workspace query. Top-k uses A8 projection into BF16 logits before
++the existing reduction; it does not promise identical ranking to A16 near ties.
++
++Hadamard signs remain owned by artifact Uses and model producers. This port
++consumes the represented BF16 rows from existing fused RMSNorm/rotation and
++SwiGLU/rotation producers; it does not repeat rotation or adopt the donor's fully
++fused FP32-producer-to-A8 rounding boundary. The donor's 4090-specific wave-cost
++heuristic is replaced by complete 128-token tiles and a 64-token tail. Other
++shape thresholds and prefetch defaults are inherited starting points, not claims
++of optimal tuning on every GPU.
++
++Source: JGamboa/ninfer-4090-windows at
++e905787f067de89ef6ef28c52d65a2ce91d425ca (Apache-2.0; attribution in NOTICE).
++The integration is a removable patch; format name, QType value and tests belong
++to that patch, not to an unpinned assumption about future upstream compatibility.
++Use `python -m tools.convert.repack_t5 INPUT.ninfer OUTPUT.ninfer` to repack a
++native PTQ1 artifact while retaining other objects byte-for-byte. The converter
++verifies persisted codes/scales and copied-object hashes, saves a verification
++report, and does not overwrite the source. `bonsai2_27b_t5` is also available as a
++conversion recipe. Reverting to PTQ1 uses the original artifact.
+diff --git a/include/ninfer/ops/attn_input_proj.h b/include/ninfer/ops/attn_input_proj.h
+index ea57395745c1276e87463197653bd491f5debf2b..f87cb21b92a4f7ccad8f91a5b142989af85678c9 100644
+--- a/include/ninfer/ops/attn_input_proj.h
++++ b/include/ninfer/ops/attn_input_proj.h
+@@ -12,10 +12,11 @@
+ 
+ namespace ninfer::ops {
+ 
+-/** Native ternary weights use T2_G128_FP16 or PTQ1_G128_FP16 RowSplit, group 128,
+- * FP16 multipliers. Their exact decoding is defined in docs/maintainer/tensor-formats.md.
+- * Both packings support the same registered Bonsai 27B geometries. A split projection requires
+- * both parents to use the same packing. PTQ1 has a required high plane; T2 has none.
++/** Native ternary weights use T2_G128_FP16, PTQ1_G128_FP16 or T5_G128_FP16 RowSplit,
++ * group 128 and FP16 multipliers. Exact packing and the T5 compute contract are defined in
++ * docs/maintainer/tensor-formats.md. Split parents must use the same packing. PTQ1 has a high
++ * plane; T2/T5 do not. T5 requires A8 permission and workspace, with per-group s8 activations
++ * and positive K divisible by 1024; it has no A16 fallback. Public activations remain BF16.
+  */
+ /**
+  * Computes four independent linear projections for each token:
+diff --git a/include/ninfer/ops/embedding.h b/include/ninfer/ops/embedding.h
+index ead1de9e285e13ab267e867212b64a61fc47ef7f..561fb33e87fdf7fc898e783069fbfcbabbf520dc 100644
+--- a/include/ninfer/ops/embedding.h
++++ b/include/ninfer/ops/embedding.h
+@@ -14,7 +14,7 @@ namespace ninfer::ops {
+  *
+  * `ids` is contiguous I32 [T], `out` is contiguous BF16 [D,T], and every id is in
+  * [0,vocab). `table` has logical shape [vocab,D] and is contiguous BF16, Q4_G64_FP16 or
+- * Q6_G64_FP16 RowSplit, Q8_G32_FP16 RowSplit, or FP8_E4M3FN_ROW_BF16 RowScale. Dense BF16 values
++ * Q6_G64_FP16 RowSplit, Q8_G32_FP16 RowSplit, FP8_E4M3FN_ROW_BF16 RowScale, or T5_G128_FP16 RowSplit. Dense BF16 values
+  * are copied bit-exactly. For quantized tables, the oracle independently decodes each code and
+  * multiplies it by the exact stored scale in FP64; the BF16 output is promoted and compared
+  * directly with that ideal. Final output storage rounding belongs to the quantized embedding
+@@ -22,7 +22,8 @@ namespace ninfer::ops {
+  * Q6 `[248320,5120]` or `[248320,2048]`, Q8 `[248320,2048]` or `[248320,5120]`, and FP8
+  * `[248320,5120]`. Q4/Q6/Q8 scales are FP16; FP8 has one BF16 multiplier per
+  * row and requires 4-byte-aligned output storage. `out` must not overlap `ids` or any table plane.
+- * There is no workspace or persistent state side effect.
++ * T5 admits positive vocab and D divisible by 1024, with FP16 group-128 scales and no
++ * activation quantization during gather. There is no workspace or persistent state side effect.
+  */
+ void embedding(const Tensor& ids, const Weight& table, Tensor& out, cudaStream_t stream);
+ 
+diff --git a/include/ninfer/ops/gdn_input_proj.h b/include/ninfer/ops/gdn_input_proj.h
+index 5062e599ad9d9d5fc85121f1ddba4dfdfc1d2aac..41dba864d149ef54f52629dc1f73ecacb806628e 100644
+--- a/include/ninfer/ops/gdn_input_proj.h
++++ b/include/ninfer/ops/gdn_input_proj.h
+@@ -110,7 +110,7 @@ void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Ten
+ 
+ /**
+  * Two-parent snapshot capacity keyed by the parents' formats. The Q4/Q5 pair answers as the
+- * row-count query above; a T2 pair (ternary checkpoints, both parents the same T2_G128_FP16 or PTQ1_G128_FP16) projects every
++ * row-count query above; a T2 pair (ternary checkpoints, both parents the same T2_G128_FP16, PTQ1_G128_FP16 or T5_G128_FP16) projects every
+  * part through the T2 linear routes, so it adds its private projection planes to the materialized
+  * convolution path at every batch size.
+  */
+diff --git a/include/ninfer/ops/hadamard_transform.h b/include/ninfer/ops/hadamard_transform.h
+index 64ac5f5fcdfa45bf18018f9cc8fdbac58e6cc094..387c92790153d5aeb43b45166cb7a2d432e79100 100644
+--- a/include/ninfer/ops/hadamard_transform.h
++++ b/include/ninfer/ops/hadamard_transform.h
+@@ -108,7 +108,7 @@ void sigmoid_mul_hadamard(const Tensor& gate, const Tensor& x, const Tensor& sig
+  * Gathers rows of a Hadamard-rotated ternary table and restores them to the primal basis:
+  *   out[b*1024+i, t] = 2^-5 * signs[b*1024+i] * sum_j H[i][j] * table[ids[t], b*1024+j]
+  * i.e. the inverse hadamard_transform of each dequantised row. `table` is a row-split
+- * t2_g128_fp16 or ptq1_g128_fp16 [vocab, K] weight, `signs` BF16 [K] of +1 / -1 (K a multiple of 1024), `ids` I32 [T]
++ * t2_g128_fp16, ptq1_g128_fp16 or t5_g128_fp16 [vocab, K] weight, `signs` BF16 [K] of +1 / -1 (K a multiple of 1024), `ids` I32 [T]
+  * with every id in [0, vocab), `out` BF16 [K, T]; signs and out are 16-byte aligned. The
+  * dequantised values enter the transform unrounded, so out carries one BF16 rounding. No workspace
+  * or persistent state.
+diff --git a/include/ninfer/ops/linear.h b/include/ninfer/ops/linear.h
+index 9d24e2371681c75c65b7fa9bca3860141ff8081f..478453c6deaac6d431dec04a10a68248dda771d0 100644
+--- a/include/ninfer/ops/linear.h
++++ b/include/ninfer/ops/linear.h
+@@ -11,10 +11,11 @@
+ 
+ namespace ninfer::ops {
+ 
+-/** Native ternary weights use T2_G128_FP16 or PTQ1_G128_FP16 RowSplit, group 128,
+- * FP16 multipliers. Their exact decoding is defined in docs/maintainer/tensor-formats.md.
+- * Both packings support the same registered Bonsai 27B geometries. A split projection requires
+- * both parents to use the same packing. PTQ1 has a required high plane; T2 has none.
++/** Native ternary weights use T2_G128_FP16, PTQ1_G128_FP16 or T5_G128_FP16 RowSplit,
++ * group 128 and FP16 multipliers. Exact packing and the T5 compute contract are defined in
++ * docs/maintainer/tensor-formats.md. Split parents must use the same packing. PTQ1 has a high
++ * plane; T2/T5 do not. T5 requires A8 permission and workspace, with per-group s8 activations
++ * and positive K divisible by 1024; it has no A16 fallback. Public activations remain BF16.
+  */
+ /**
+  * @brief Permitted private activation-compute profiles for a linear projection.
+diff --git a/include/ninfer/ops/linear_add.h b/include/ninfer/ops/linear_add.h
+index 63ed624f1571ea050090a59430d9f94dc432d355..0f6c5e9f2f44ce171b039affde9d2af6847f8d11 100644
+--- a/include/ninfer/ops/linear_add.h
++++ b/include/ninfer/ops/linear_add.h
+@@ -14,10 +14,11 @@
+ 
+ namespace ninfer::ops {
+ 
+-/** Native ternary weights use T2_G128_FP16 or PTQ1_G128_FP16 RowSplit, group 128,
+- * FP16 multipliers. Their exact decoding is defined in docs/maintainer/tensor-formats.md.
+- * Both packings support the same registered Bonsai 27B geometries. A split projection requires
+- * both parents to use the same packing. PTQ1 has a required high plane; T2 has none.
++/** Native ternary weights use T2_G128_FP16, PTQ1_G128_FP16 or T5_G128_FP16 RowSplit,
++ * group 128 and FP16 multipliers. Exact packing and the T5 compute contract are defined in
++ * docs/maintainer/tensor-formats.md. Split parents must use the same packing. PTQ1 has a high
++ * plane; T2/T5 do not. T5 requires A8 permission and workspace, with per-group s8 activations
++ * and positive K divisible by 1024; it has no A16 fallback. Public activations remain BF16.
+  */
+ /**
+  * Returns the A16-only transient capacity required by LinearAdd for every T in the inclusive
+diff --git a/include/ninfer/ops/linear_swiglu.h b/include/ninfer/ops/linear_swiglu.h
+index 6d091dcba4ea6617de817a07b4d42ea1461bb4a2..0c39ab82f8ddb5b60d2db7214d21bb1c4c029fd2 100644
+--- a/include/ninfer/ops/linear_swiglu.h
++++ b/include/ninfer/ops/linear_swiglu.h
+@@ -14,10 +14,11 @@
+ 
+ namespace ninfer::ops {
+ 
+-/** Native ternary weights use T2_G128_FP16 or PTQ1_G128_FP16 RowSplit, group 128,
+- * FP16 multipliers. Their exact decoding is defined in docs/maintainer/tensor-formats.md.
+- * Both packings support the same registered Bonsai 27B geometries. A split projection requires
+- * both parents to use the same packing. PTQ1 has a required high plane; T2 has none.
++/** Native ternary weights use T2_G128_FP16, PTQ1_G128_FP16 or T5_G128_FP16 RowSplit,
++ * group 128 and FP16 multipliers. Exact packing and the T5 compute contract are defined in
++ * docs/maintainer/tensor-formats.md. Split parents must use the same packing. PTQ1 has a high
++ * plane; T2/T5 do not. T5 requires A8 permission and workspace, with per-group s8 activations
++ * and positive K divisible by 1024; it has no A16 fallback. Public activations remain BF16.
+  */
+ /**
+  * Returns the transient capacity required by LinearSwiGLU for every T in the inclusive
+diff --git a/include/ninfer/ops/linear_topk.h b/include/ninfer/ops/linear_topk.h
+index b50de085e5265ff685208c378d47db0fcbf25b5d..62e8b83d24e02a6a73cadd616a088ba54c7c752c 100644
+--- a/include/ninfer/ops/linear_topk.h
++++ b/include/ninfer/ops/linear_topk.h
+@@ -26,7 +26,7 @@ namespace ninfer::ops {
+  * the stable top sixteen scores and global token ids per column.
+  *
+  * @details For any positive column count `U`, `hidden` is contiguous BF16 `[5120,U]`, `head` is
+- * Q8_G32_FP16, FP8_E4M3FN_ROW_BF16 or T2_G128_FP16 / PTQ1_G128_FP16 `[248320,5120]`, and `valid_rows` is 248077.
++ * Q8_G32_FP16, FP8_E4M3FN_ROW_BF16 or T2_G128_FP16 / PTQ1_G128_FP16 / T5_G128_FP16 `[248320,5120]`, and `valid_rows` is 248077.
+  * For every `t in [0,U)` and valid vocabulary row `v`, the ideal score is
+  *
+  * @f[
+@@ -38,8 +38,10 @@ namespace ninfer::ops {
+  * `[16,U]`. Rank is stored fastest; a caller may view the output as `[16,K,B]` when `U=K*B`.
+  * Candidates are ordered by descending computed score, with exact score ties resolved by lower
+  * global token id. Physical rows `[valid_rows,248320)` never participate. Projection uses the
+- * registered A16 arithmetic profile; candidate scores are returned directly in FP32 and no dense
+- * vocabulary-logit tensor is an observable intermediate.
++ * registered A16 arithmetic profile except T5, which explicitly uses per-group s8 activations.
++ * Ternary projection scores are rounded to BF16 before ranking and then returned as FP32.
++ * T5 ranking is defined by those computed scores; near ties need not match an A16 projection.
++ * No dense vocabulary-logit tensor is an observable intermediate.
+  *
+  * All tensors and every weight plane are preserved except that both output tensors are completely
+  * overwritten. Inputs, outputs, weight planes, and workspace must not overlap. The Op has no
+@@ -54,7 +56,7 @@ void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_ro
+  * scores with shortlist rows mapped to global token ids.
+  *
+  * @details The tensor contract is the same as the full-head overload except that `head` is
+- * Q4_G64_FP16 or T2_G128_FP16 / PTQ1_G128_FP16 `[131072,5120]` and every head row participates.
++ * Q4_G64_FP16 or T2_G128_FP16 / PTQ1_G128_FP16 / T5_G128_FP16 `[131072,5120]` and every head row participates.
+  * `row_to_global_ids` is contiguous I32 `[131072]`; it contains distinct ids in `[0,248077)` and
+  * maps each local head row to the id used for output and tie-breaking. Artifact binding establishes
+  * the map's range and uniqueness.
+diff --git a/src/artifact/formats.cpp b/src/artifact/formats.cpp
+index 809734f041e76960b765c3d421f2be9b6d63077b..9a729577c168a736aac0691c7adc3104678843dc 100644
+--- a/src/artifact/formats.cpp
++++ b/src/artifact/formats.cpp
+@@ -18,6 +18,7 @@ constexpr std::array kFormats = {
+     std::pair{QType::Q8_G32_FP16, std::string_view{"q8_g32_fp16"}},
+     std::pair{QType::T2_G128_FP16, std::string_view{"t2_g128_fp16"}},
+     std::pair{QType::PTQ1_G128_FP16, std::string_view{"ptq1_g128_fp16"}},
++    std::pair{QType::T5_G128_FP16, std::string_view{"t5_g128_fp16"}},
+     std::pair{QType::NVFP4, std::string_view{"nvfp4"}},
+     std::pair{QType::FP8_E4M3FN_ROW_BF16, std::string_view{"fp8_e4m3fn_row_bf16"}},
+     std::pair{QType::FP8_E4M3FN_ROW_FP16, std::string_view{"fp8_e4m3fn_row_fp16"}},
+diff --git a/src/core/weight.h b/src/core/weight.h
+index e513bbcdd937a221f64f11273b3dd80388db2adc..53fd9eda968ae2eea259ac50a8a531a9e44443ea 100644
+--- a/src/core/weight.h
++++ b/src/core/weight.h
+@@ -47,6 +47,8 @@ enum class QType : std::uint16_t {
+     FP8_E4M3FN_ROW_FP16 = 29,
+     // Native Prism PTQ1_0: 24 base-3 bytes + 2 tail bytes + FP16 scale per 128 weights.
+     PTQ1_G128_FP16 = 30,
++    // Exact ternary reordering: two 13-byte T5 units plus FP16 scale per 128.
++    T5_G128_FP16 = 31,
+ };
+ 
+ [[nodiscard]] constexpr bool is_gguf(QType format) {
+@@ -54,7 +56,8 @@ enum class QType : std::uint16_t {
+ }
+ 
+ [[nodiscard]] constexpr bool is_ternary(QType format) {
+-    return format == QType::T2_G128_FP16 || format == QType::PTQ1_G128_FP16;
++    return format == QType::T2_G128_FP16 || format == QType::PTQ1_G128_FP16 ||
++           format == QType::T5_G128_FP16;
+ }
+ 
+ struct RowSplitFormat {
+@@ -73,6 +76,7 @@ struct RowSplitFormat {
+     case QType::Q8_G32_FP16: return {32, 32, 0, 2};
+     case QType::T2_G128_FP16: return {128, 32, 0, 2};
+     case QType::PTQ1_G128_FP16: return {128, 24, 2, 2};
++    case QType::T5_G128_FP16: return {128, 26, 0, 2};
+     default: return {};
+     }
+ }
+diff --git a/src/core/weight_view.cpp b/src/core/weight_view.cpp
+index 9b348e341e559b438d2f1882b4db9a44d40619eb..d5535bf61f6b3be7142b9cdd59d44b27c69de762 100644
+--- a/src/core/weight_view.cpp
++++ b/src/core/weight_view.cpp
+@@ -104,7 +104,7 @@ WeightGeometry weight_geometry(QType format, QuantLayout layout,
+         if (geometry.group == 0) {
+             throw std::invalid_argument("RowSplit requires a grouped integer format");
+         }
+-        if (format == QType::PTQ1_G128_FP16 && (k % 128 || layout != QuantLayout::RowSplit)) {
++        if ((format == QType::PTQ1_G128_FP16 || format == QType::T5_G128_FP16) && (k % 128 || layout != QuantLayout::RowSplit)) {
+             throw std::invalid_argument("PTQ1 requires RowSplit and whole 128-column groups");
+         }
+         out.group_size          = geometry.group;
+diff --git a/src/models/qwen3_5/load/prepare.cpp b/src/models/qwen3_5/load/prepare.cpp
+index c15b251dfa772ee245d17462f418cb04ce29efb5..781748f202da38a88345d00cddaa64ab8de085fe 100644
+--- a/src/models/qwen3_5/load/prepare.cpp
++++ b/src/models/qwen3_5/load/prepare.cpp
+@@ -37,6 +37,9 @@ bool stored_as(const artifact::Binder& binder, const artifact::ParameterReferenc
+ 
+ bool keeps_permission(const artifact::Binder& binder, const artifact::ParameterReference& reference,
+                       ops::LinearPolicy policy) {
++    if (ops::allows_a8(policy) && stored_as(binder, reference, QType::T5_G128_FP16)) {
++        return true; // Integer tensor cores; independent of FP8/FP4 architecture support.
++    }
+     switch (policy) {
+     case ops::LinearPolicy::AllowA4:
+         return kNvfp4A4Built && stored_as(binder, reference, QType::NVFP4);
+@@ -63,6 +66,12 @@ void apply_rank_policies(Bindings& bindings, std::span<const ops::DeviceTier> ra
+                                    std::to_string(weight.rank));
+         }
+         if (rank_tiers[weight.rank] == ops::DeviceTier::Blackwell) { continue; }
++        const auto& parts = weight.reference.binding.parts;
++        bool t5 = !parts.empty();
++        for (const auto& part : parts) {
++            t5 = t5 && bindings.binder.reader().geometry(part.object).format == QType::T5_G128_FP16;
++        }
++        if (t5) { continue; }
+         for (WeightUse& use : weight.uses) {
+             if (use.policy == ops::LinearPolicy::AllowA8 ||
+                 use.policy == ops::LinearPolicy::AllowA4) {
+diff --git a/src/ops/launcher/hadamard_transform.cu b/src/ops/launcher/hadamard_transform.cu
+index 8605212f182675705c5d9f24ebfa1562767aed63..1dc99dc366aa59cb669853aea960dfa59c8ef5c7 100644
+--- a/src/ops/launcher/hadamard_transform.cu
++++ b/src/ops/launcher/hadamard_transform.cu
+@@ -1,6 +1,8 @@
+ // ninfer::ops - hadamard_transform launcher: one warp per (column, 1024-block), four warps per CTA.
+ #include "ops/launcher/hadamard_transform.h"
+ 
++#include "ops/linear/t5/t5_project.h"
++
+ #include "core/device.h"
+ #include "ops/kernel/hadamard_producers.cuh"
+ #include "ops/kernel/hadamard_transform.cuh"
+@@ -114,6 +116,10 @@ void embedding_rotated_ternary_launch(const Tensor& ids, const Weight& table, co
+     if (ctas > std::numeric_limits<unsigned>::max()) {
+         throw std::overflow_error("embedding_rotated: grid exceeds the CUDA launch limit");
+     }
++    if (table.qtype == QType::T5_G128_FP16) {
++        t5_embedding(ids, table, signs, out, stream);
++        return;
++    }
+     if (table.qtype == QType::PTQ1_G128_FP16) {
+         embed_gather_t2_hadamard_kernel<kWarpsPerCta, true>
+             <<<static_cast<unsigned>(ctas), kWarpsPerCta * kWarpSize, 0, stream>>>(
+diff --git a/src/ops/linear/linear.cpp b/src/ops/linear/linear.cpp
+index 5b2ade3fea9e10dea6da157ab4033b45e9066294..e8c0b7d8851774defb281f8e58781e0167ce6a40 100644
+--- a/src/ops/linear/linear.cpp
++++ b/src/ops/linear/linear.cpp
+@@ -1,3 +1,5 @@
++#include "ops/linear/t5/t5_project.h"
++
+ #include "core/weight.h"
+ #include "ninfer/ops/linear.h"
+ 
+@@ -126,6 +128,11 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
+     case QType::Q8_G32_FP16:
+         detail::q8_dispatch(x, w, out, policy, stream);
+         return;
++    case QType::T5_G128_FP16: {
++        Tensor* outputs[]{&out};
++        detail::t5_project(x, w, outputs, false, policy, workspace, stream);
++        return;
++    }
+     case QType::PTQ1_G128_FP16:
+         if (workspace != nullptr && detail::t2_a8_admits(policy) && detail::t2_a8_supported(w, x.ne[1])) {
+             detail::t2_a8_linear(x, w, out, *workspace, stream);
+@@ -178,6 +185,9 @@ std::size_t linear_route_workspace_bytes(QType qtype, std::int32_t output_rows,
+         (void)detail::select_q8_launch(output_rows, input_rows, min_tokens, policy);
+         (void)detail::select_q8_launch(output_rows, input_rows, max_tokens, policy);
+         return 0;
++    case QType::T5_G128_FP16:
++        if (output_rows <= 0) { throw std::invalid_argument("linear workspace: T5 rows must be positive"); }
++        return detail::t5_workspace_capacity_bytes(policy, input_rows, max_tokens);
+     case QType::PTQ1_G128_FP16:
+         detail::validate_ptq1_shape(output_rows, input_rows, min_tokens, policy);
+         detail::validate_ptq1_shape(output_rows, input_rows, max_tokens, policy);
+diff --git a/src/ops/linear/sources.cmake b/src/ops/linear/sources.cmake
+index c6fbb909460ef83c8dab2f72dd0895a35ac98ebc..2d88074793cc6d48d58ffb3d5cb17e4a3bd6c9cc 100644
+--- a/src/ops/linear/sources.cmake
++++ b/src/ops/linear/sources.cmake
+@@ -12,4 +12,5 @@ include("${CMAKE_CURRENT_LIST_DIR}/q6/sources.cmake")
+ include("${CMAKE_CURRENT_LIST_DIR}/q8/sources.cmake")
+ include("${CMAKE_CURRENT_LIST_DIR}/sm70/sources.cmake")
+ include("${CMAKE_CURRENT_LIST_DIR}/t2/sources.cmake")
++include("${CMAKE_CURRENT_LIST_DIR}/t5/sources.cmake")
+ include("${CMAKE_CURRENT_LIST_DIR}/gguf/sources.cmake")
+diff --git a/src/ops/linear/t5/sources.cmake b/src/ops/linear/t5/sources.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..50f8ebca01b1470c27f9b0ad97958d61807f2ba1
+--- /dev/null
++++ b/src/ops/linear/t5/sources.cmake
+@@ -0,0 +1,4 @@
++target_sources(ninfer_ops PRIVATE
++  "${CMAKE_CURRENT_LIST_DIR}/t5_embedding.cu"
++  "${CMAKE_CURRENT_LIST_DIR}/t5_project.cu"
++)
+diff --git a/src/ops/linear/t5/t5_a8.cuh b/src/ops/linear/t5/t5_a8.cuh
+new file mode 100644
+index 0000000000000000000000000000000000000000..1566e9200db31be30480ecd5f6e387c6485cf060
+--- /dev/null
++++ b/src/ops/linear/t5/t5_a8.cuh
+@@ -0,0 +1,1129 @@
++// Adapted from JGamboa/ninfer-4090-windows@e905787f (Apache-2.0); see NOTICE.
++#pragma once
++
++// A8 projections of T5_G128_FP16 weights, adapted from the JGamboa T5 route.
++//
++// Weight layout. A row is K / 64 units of 13 bytes. Unit byte 4 g + j (g = 0..2, j = 0..3)
++// holds the trits t_m = code of column 20 g + 4 m + j (m = 0..4), byte 12 the columns 60 + m
++// (m = 0..3, t_4 = 0), as q = ceil(256 v / 243) with v = sum_m t_m 3^(4 - m). Decoding one
++// 32-bit group of bytes 4 g .. 4 g + 3 runs the even and odd bytes in 16-bit lanes: per m,
++// r = 3 r yields the trit r >> 8 of every byte, so each m gives one word of four codes {0,1,2}
++// for the natural-order columns 20 g + 4 m .. 20 g + 4 m + 3.
++//
++// Activation layout: int8 in natural column order with one FP32 scale per 128 columns, and the
++// sums of q per 32-column slice and per 128-column group, so `(code - 1) . q = code . q - sum(q)`.
++// This port accepts represented BF16 rows from the current model's fused rotation producers.
++// It does not apply the rotation a second time or change the model's rounding boundary.
++
++#include "ops/common/math.cuh"
++#include "ops/common/memory.cuh"
++#include "ops/common/mma.cuh"
++
++#include <cuda_bf16.h>
++#include <cuda_fp16.h>
++
++#include <cstddef>
++#include <cstdint>
++
++namespace ninfer::ops::detail::t5_a8 {
++
++__device__ __forceinline__ void mma_s8_from(int& d0, int& d1, int& d2, int& d3, unsigned a0,
++                                            unsigned a1, unsigned a2, unsigned a3, unsigned b0,
++                                            unsigned b1, int c0, int c1, int c2, int c3) {
++#if defined(NINFER_SM70_DEVICE) || defined(NINFER_SM75_DEVICE)
++    d0 = c0; d1 = c1; d2 = c2; d3 = c3;
++    mma_s8(d0, d1, d2, d3, a0, a1, a2, a3, b0, b1);
++#else
++    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
++                 "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
++                 : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
++                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(c0), "r"(c1),
++                   "r"(c2), "r"(c3));
++#endif
++}
++
++constexpr int kMaxOutputs = 4;
++
++struct Outputs {
++    __nv_bfloat16* data[kMaxOutputs];
++    int stride[kMaxOutputs];
++    int end[kMaxOutputs]; // exclusive parent row bound of each output
++};
++
++// The output of parent row `row`, resolved with unrolled selects (no local copy of Outputs).
++struct OutputRow {
++    __nv_bfloat16* data; // element (row, token 0)
++    int rows;            // token stride
++};
++
++__device__ __forceinline__ OutputRow output_row(const Outputs& outputs, int row) {
++    __nv_bfloat16* data = outputs.data[0];
++    int begin = 0, stride = outputs.stride[0];
++#pragma unroll
++    for (int s = 1; s < kMaxOutputs; ++s) {
++        if (row >= outputs.end[s - 1]) {
++            data  = outputs.data[s];
++            begin = outputs.end[s - 1];
++            stride = outputs.stride[s];
++        }
++    }
++    return {data + (row - begin), stride};
++}
++
++__device__ __forceinline__ void store_row(OutputRow out, int token, float value, bool accumulate) {
++    __nv_bfloat16* p = out.data + std::int64_t(token) * out.rows;
++    *p = __float2bfloat16_rn(accumulate ? value + __bfloat162float(*p) : value);
++}
++
++// Position of activation word `word` (columns 4 word .. 4 word + 3 of a token row) in the GEMV
++// layout: each run of 16 units (1024 columns) stores its 16-byte chunks chunk-major, [chunk
++// 0..3][unit 0..15], so the 16 lanes of a GEMV half-warp, which read the same chunk of 16
++// consecutive units, load 256 contiguous bytes instead of 16 chunks 64 bytes apart.
++__device__ __forceinline__ int gemv_word(int word) {
++    const int unit = word >> 4, chunk = (word >> 2) & 3;
++    return (unit >> 4) * 256 + chunk * 64 + (unit & 15) * 4 + (word & 3);
++}
++
++// One warp quantizes one (token, 128-column group); lane l holds columns 4 l .. 4 l + 3 in
++// `value` and writes activation word l (natural order, or the GEMV layout above). q = rint(x *
++// 127 / amax), scale = amax / 127 (zero for an all-zero group), then the sums of q per 32-column
++// slice (eight lanes) and per group.
++__device__ __forceinline__ void quantize_group(const float (&value)[4], int lane, int token,
++                                               int group, int k, bool gemv_layout,
++                                               std::uint32_t* __restrict__ qx,
++                                               float* __restrict__ group_scale,
++                                               int* __restrict__ group_sum,
++                                               int* __restrict__ slice_sum) {
++    float amax = 0.0f;
++#pragma unroll
++    for (int i = 0; i < 4; ++i) amax = fmaxf(amax, fabsf(value[i]));
++#pragma unroll
++    for (int offset = 16; offset > 0; offset >>= 1) {
++        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, offset));
++    }
++    const float inverse = amax > 0.0f ? 127.0f / amax : 0.0f;
++    std::uint32_t word  = 0;
++    int sum             = 0;
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++        const int q = max(-127, min(127, __float2int_rn(value[i] * inverse)));
++        word |= (static_cast<std::uint32_t>(q) & 0xffu) << (8 * i);
++        sum += q;
++    }
++    const std::int64_t groups = k / 128;
++    const int index = group * 32 + lane;
++    qx[std::int64_t(token) * (k / 4) + (gemv_layout ? gemv_word(index) : index)] = word;
++#pragma unroll
++    for (int offset = 1; offset < 8; offset <<= 1) sum += __shfl_xor_sync(0xffffffffu, sum, offset);
++    if ((lane & 7) == 0) slice_sum[std::int64_t(token) * (k / 32) + group * 4 + (lane >> 3)] = sum;
++    sum += __shfl_xor_sync(0xffffffffu, sum, 8);
++    sum += __shfl_xor_sync(0xffffffffu, sum, 16);
++    if (lane == 0) {
++        group_scale[std::int64_t(token) * groups + group] = amax / 127.0f;
++        group_sum[std::int64_t(token) * groups + group]   = sum;
++    }
++}
++
++constexpr int kUnitColumns = 64;
++constexpr int kUnitBytes   = 13;
++
++// One CTA quantizes one represented BF16 1024-column block of one token.
++constexpr int kQuantizeBlock   = 1024;
++constexpr int kQuantizeThreads = 256;
++
++__device__ __forceinline__ void unpack_bf16x4(uint2 word, float (&value)[4]) {
++    const float2 low  = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&word.x));
++    const float2 high = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&word.y));
++    value[0]          = low.x;
++    value[1]          = low.y;
++    value[2]          = high.x;
++    value[3]          = high.y;
++}
++
++// The input x [K,T] itself.
++struct PlainInput {
++    static constexpr bool kTokenState = false;
++    const __nv_bfloat16* x;
++
++    struct Token {};
++    __device__ __forceinline__ Token prepare(int, int) const { return {}; }
++    __device__ __forceinline__ void operator()(int k, int token, int column, Token,
++                                               float (&value)[4]) const {
++        unpack_bf16x4(load_ldg<uint2>(x + std::int64_t(token) * k + column), value);
++    }
++};
++
++// The leading code lines and scale lines of the weight that a decode-width quantization asks L2
++// for (prefetch.global.L2, one request per 128-byte line). The GEMV that follows reads them
++// first (CTAs start in row order), so DRAM streams its first rows while the quantization runs
++// instead of idling until the GEMV's first loads. Lines are counted from 128-byte-aligned bases.
++struct WeightPrefetch {
++    const char* codes;
++    const char* scales;
++    unsigned code_lines;
++    unsigned scale_lines;
++};
++
++// Grid: (K / 1024, T) CTAs. For the
++// GEMV (`gemv`, T <= 4) the activation words take the GEMV layout and one more row of gridDim.x
++// CTAs (blockIdx.y == tokens) only issues `prefetch` and exits.
++template <class Input>
++__global__ void __launch_bounds__(kQuantizeThreads)
++    quantize_kernel(Input input, int k,
++                    std::uint32_t* __restrict__ qx, float* __restrict__ group_scale,
++                    int* __restrict__ group_sum, int* __restrict__ slice_sum, int tokens, bool gemv,
++                    WeightPrefetch prefetch) {
++    if (static_cast<int>(blockIdx.y) >= tokens) {
++        const unsigned threads = gridDim.x * blockDim.x;
++        const unsigned first   = blockIdx.x * blockDim.x + threadIdx.x;
++        for (unsigned line = first; line < prefetch.code_lines; line += threads) {
++            asm volatile("prefetch.global.L2 [%0];" ::"l"(prefetch.codes + 128ull * line));
++        }
++        for (unsigned line = first; line < prefetch.scale_lines; line += threads) {
++            asm volatile("prefetch.global.L2 [%0];" ::"l"(prefetch.scales + 128ull * line));
++        }
++        return;
++    }
++    const int tid                   = static_cast<int>(threadIdx.x);
++    const int token                 = static_cast<int>(blockIdx.y);
++    const typename Input::Token state = input.prepare(k, token);
++    const int first = static_cast<int>(blockIdx.x);
++    const int last = first + 1;
++    for (int block = first; block < last; ++block) {
++        const int column = block * kQuantizeBlock + 4 * tid;
++        float value[4];
++        input(k, token, column, state, value);
++        quantize_group(value, tid & 31, token, column / 128, k, gemv, qx, group_scale, group_sum,
++                       slice_sum);
++    }
++}
++
++// The 13 bytes of one unit as four little-endian words (bytes 0-3, 4-7, 8-11, 12), read with
++// four aligned 32-bit streaming loads and funnel shifts.
++__device__ __forceinline__ void load_unit(const std::uint8_t* __restrict__ row_codes, int unit,
++                                          std::uint32_t (&a)[4]) {
++    const std::int64_t start = std::int64_t(unit) * kUnitBytes;
++    const auto* base = reinterpret_cast<const std::uint32_t*>(row_codes + (start & ~std::int64_t(3)));
++    const unsigned shift   = unsigned(start & 3) * 8u;
++    const std::uint32_t w0 = __ldcs(base), w1 = __ldcs(base + 1), w2 = __ldcs(base + 2),
++                        w3 = __ldcs(base + 3);
++    a[0] = __funnelshift_r(w0, w1, shift);
++    a[1] = __funnelshift_r(w1, w2, shift);
++    a[2] = __funnelshift_r(w2, w3, shift);
++    a[3] = w3 >> shift;
++}
++
++// The five code words of one 32-bit byte group. After r *= 3 of a byte r in a 16-bit lane, the
++// lane's high byte is exactly the trit (3 * 255 < 768), so one byte permute gathers the word.
++__device__ __forceinline__ void group_words(std::uint32_t bytes, std::uint32_t* words) {
++    std::uint32_t even = bytes & 0x00ff00ffu;
++    std::uint32_t odd  = __byte_perm(bytes, 0u, 0x4341); // bytes 1 and 3
++#pragma unroll
++    for (int m = 0; m < 5; ++m) {
++        even *= 3u;
++        odd *= 3u;
++        words[m] = __byte_perm(even, odd, 0x7351);
++        even &= 0x00ff00ffu;
++        odd &= 0x00ff00ffu;
++    }
++}
++
++// The code word of unit byte 12 (columns 60..63).
++__device__ __forceinline__ std::uint32_t last_word(std::uint32_t bytes) {
++    std::uint32_t r = bytes & 0xffu;
++    std::uint32_t x[4];
++#pragma unroll
++    for (int m = 0; m < 4; ++m) {
++        r *= 3u;
++        x[m] = r;
++        r &= 0xffu;
++    }
++    return __byte_perm(__byte_perm(x[0], x[1], 0x0051), __byte_perm(x[2], x[3], 0x0051), 0x5410);
++}
++
++// words[w] = the codes of unit columns 4 w .. 4 w + 3, one per byte.
++__device__ __forceinline__ void decode_unit(const std::uint32_t (&a)[4], std::uint32_t (&words)[16]) {
++#pragma unroll
++    for (int g = 0; g < 3; ++g) group_words(a[g], words + 5 * g);
++    words[15] = last_word(a[3]);
++}
++
++// ---------------------------------------------------------------------------------------------
++// dp4a GEMV for decode and single-lane MTP verification (T <= 4). A CTA of two warps owns 4 R
++// rows: each half-warp R rows, its 16 lanes striding the units (K / 64 is a multiple of 16, so
++// no lane idles). Per unit and row: four streaming loads, the arithmetic decode, and one dp4a
++// per code word and token; the activation words of a unit are shared by the R rows. A row's
++// arithmetic does not depend on R. The dp4a work grows with T while the decode does not, so
++// wider T takes the tensor-core small-T route below.
++
++constexpr int kGemvThreads   = 64;
++constexpr int kGemvMaxTokens = 4;
++
++template <int Tile, int R>
++__global__ void __launch_bounds__(kGemvThreads)
++    gemv_kernel(const uint4* __restrict__ qx, const float* __restrict__ group_scale,
++                const int* __restrict__ slice_sum, const std::uint8_t* __restrict__ codes,
++                const __half* __restrict__ scales, std::int64_t scale_row_halves, int n, int k,
++                Outputs outputs, bool accumulate) {
++    static_assert(Tile >= 1 && Tile <= kGemvMaxTokens);
++    const int warp  = static_cast<int>(threadIdx.x) / 32;
++    const int lane  = static_cast<int>(threadIdx.x) % 32;
++    const int hl    = lane & 15;
++    const int row0 =
++        ((static_cast<int>(blockIdx.x) * (kGemvThreads / 32) + warp) * 2 + (lane >> 4)) * R;
++    const int units              = k / kUnitColumns;
++    const std::int64_t row_bytes = std::int64_t(units) * kUnitBytes;
++    const int slices = k / 32, groups = k / 128;
++    // Rows past n alias the last row; their results are never stored.
++    const std::uint8_t* row_codes[R];
++    const __half* row_scales[R];
++#pragma unroll
++    for (int r = 0; r < R; ++r) {
++        const std::int64_t row = min(row0 + r, n - 1);
++        row_codes[r]           = codes + row * row_bytes;
++        row_scales[r]          = scales + row * scale_row_halves;
++    }
++    float acc[R][Tile];
++#pragma unroll
++    for (int r = 0; r < R; ++r) {
++#pragma unroll
++        for (int t = 0; t < Tile; ++t) acc[r][t] = 0.0f;
++    }
++    for (int u = hl; u < units; u += 16) {
++        std::uint32_t words[R][16];
++        float scale[R];
++#pragma unroll
++        for (int r = 0; r < R; ++r) {
++            std::uint32_t a[4];
++            load_unit(row_codes[r], u, a);
++            decode_unit(a, words[r]);
++            scale[r] = __half2float(__ldcs(row_scales[r] + (u >> 1)));
++        }
++        uint4 xs[Tile][4];
++        int offset[Tile];
++        float step[Tile];
++#pragma unroll
++        for (int t = 0; t < Tile; ++t) {
++            // GEMV layout (gemv_word): chunk w of unit u at 16-unit run u / 16, chunk-major.
++            const uint4* row = qx + std::int64_t(t) * (k / 16) + (u >> 4) * 64 + (u & 15);
++#pragma unroll
++            for (int w = 0; w < 4; ++w) xs[t][w] = __ldg(row + 16 * w);
++            const int2 sums = __ldg(reinterpret_cast<const int2*>(slice_sum + std::int64_t(t) * slices) + u);
++            offset[t]       = sums.x + sums.y;
++            step[t] = __ldg(group_scale + std::int64_t(t) * groups + (u >> 1));
++        }
++#pragma unroll
++        for (int r = 0; r < R; ++r) {
++            int dot[Tile];
++#pragma unroll
++            for (int t = 0; t < Tile; ++t) dot[t] = 0;
++#pragma unroll
++            for (int w = 0; w < 16; ++w) {
++#pragma unroll
++                for (int t = 0; t < Tile; ++t) {
++                    const std::uint32_t lanes[4] = {xs[t][w >> 2].x, xs[t][w >> 2].y,
++                                                    xs[t][w >> 2].z, xs[t][w >> 2].w};
++                    dot[t] = __dp4a(static_cast<int>(words[r][w]), static_cast<int>(lanes[w & 3]), dot[t]);
++                }
++            }
++#pragma unroll
++            for (int t = 0; t < Tile; ++t) {
++                acc[r][t] = fmaf(scale[r] * step[t], static_cast<float>(dot[t] - offset[t]), acc[r][t]);
++            }
++        }
++    }
++#pragma unroll
++    for (int r = 0; r < R; ++r) {
++#pragma unroll
++        for (int t = 0; t < Tile; ++t) {
++            float v = acc[r][t];
++#pragma unroll
++            for (int o = 8; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
++            acc[r][t] = v;
++        }
++    }
++#pragma unroll
++    for (int r = 0; r < R; ++r) {
++        const int row = row0 + r;
++        if (row >= n) continue;
++#pragma unroll
++        for (int t = 0; t < Tile; ++t) {
++            if (hl == t) store_row(output_row(outputs, row), t, acc[r][t], accumulate);
++        }
++    }
++}
++
++// ---------------------------------------------------------------------------------------------
++// int8 tensor-core GEMMs for prefill, m16n8k32 s8 MMAs over 128-column steps (one scale group).
++// Code words and activations are stored in shared memory in 16-byte chunks XORed with the row
++// (token) index, so both the A and B fragments load with conflict-free `ldmatrix`. Each step's
++// int32 sums start at kFloatMagic, so the FP32 update acc += (row scale * token scale) *
++// (code . q - sum(q)) needs one exact FADD per sum instead of an I2F (quarter rate). The code
++// bytes of a unit are loaded a step ahead as aligned words and shifted only at the decode, so
++// the load latency hides behind the MMAs. The token tiles of a row block are adjacent in launch
++// order and share its code bytes in L2. The arithmetic per output is the same in both kernels.
++//
++// gemm_kernel: 64 x 64 tiles for T = 33..64 (and wider T when N % 128 != 0). A CTA of four
++// warps (wm, wn) of 32 x 32 owns 64 rows and 64 tokens, three CTAs per SM. The stage's 64 rows x
++// 2 units are decoded into a single code-word buffer, one unit per thread, after the step's MMAs
++// between two barriers. The activation and the token scales and sums are double-buffered with
++// cp.async.
++//
++// gemm_tall_kernel: 128-row tiles of 128 or 64 tokens for wider T, below.
++
++constexpr int kStageK = 128;
++
++constexpr int kGemmRows    = 64;
++constexpr int kGemmTokens  = 64;
++constexpr int kGemmThreads = 128;
++
++__device__ __forceinline__ int gemm_word(int row, int word) { return row * 32 + (word ^ ((row & 7) << 2)); }
++
++template <int Tokens>
++struct GemmStage {
++    std::uint8_t x[Tokens * kStageK]; // 16-byte chunks swizzled per token row
++    float scale[Tokens];
++    int sum[Tokens];
++};
++
++// 1.5 * 2^23 as FP32 bits: kFloatMagic + x reinterpreted as a float is 12582912 + x exactly for
++// |x| < 2^22 (a step's |code . q| <= 2 * 127 * 128), and 12582912 + sum(q) is exact as well.
++constexpr int kFloatMagic = 0x4B400000;
++
++// One unit's 13 bytes as aligned streaming loads of the 16-byte window that holds them;
++// shift_unit_words aligns them to the unit.
++__device__ __forceinline__ void load_unit_words(const std::uint8_t* __restrict__ row_codes, int unit,
++                                                std::uint32_t (&r)[4]) {
++    const auto* base = reinterpret_cast<const std::uint32_t*>(row_codes + ((unit * kUnitBytes) & ~3));
++#pragma unroll
++    for (int i = 0; i < 4; ++i) r[i] = __ldcs(base + i);
++}
++
++// The unit's bytes as little-endian words (bytes 0-3, 4-7, 8-11, 12).
++__device__ __forceinline__ void shift_unit_words(const std::uint32_t (&r)[4], int unit,
++                                                 std::uint32_t (&a)[4]) {
++    const unsigned shift = unsigned((unit * kUnitBytes) & 3) * 8u;
++    a[0] = __funnelshift_r(r[0], r[1], shift);
++    a[1] = __funnelshift_r(r[1], r[2], shift);
++    a[2] = __funnelshift_r(r[2], r[3], shift);
++    a[3] = r[3] >> shift;
++}
++
++// Decodes a unit and stores its 16 code words in the row's swizzled chunks.
++__device__ __forceinline__ void decode_store_unit(const std::uint32_t (&a)[4],
++                                                  std::uint32_t* __restrict__ code_words, int row,
++                                                  int unit) {
++    std::uint32_t* base = code_words + row * 32;
++    const auto chunk    = [&](int c) { return base + ((unit * 4 + c) ^ (row & 7)) * 4; };
++    std::uint32_t words[15];
++#pragma unroll
++    for (int g = 0; g < 3; ++g) group_words(a[g], words + 5 * g);
++    *reinterpret_cast<uint4*>(chunk(0)) = make_uint4(words[0], words[1], words[2], words[3]);
++    *reinterpret_cast<uint4*>(chunk(1)) = make_uint4(words[4], words[5], words[6], words[7]);
++    *reinterpret_cast<uint4*>(chunk(2)) = make_uint4(words[8], words[9], words[10], words[11]);
++    *reinterpret_cast<uint4*>(chunk(3)) = make_uint4(words[12], words[13], words[14], last_word(a[3]));
++}
++
++// Shared memory of one CTA: the double-buffered activation stages, then the code words.
++constexpr std::size_t gemm_shared_bytes() {
++    return 2 * sizeof(GemmStage<kGemmTokens>) + std::size_t(kGemmRows) * 32 * sizeof(std::uint32_t);
++}
++
++// Stores a warp's (16 MTiles) x 32 tile. Fragment C: [0], [1] are row gid, tokens 2 lid and
++// 2 lid + 1; [2], [3] are row gid + 8.
++template <int MTiles>
++__device__ __forceinline__ void store_tile(const Outputs& outputs, const float (&acc)[MTiles][4][4],
++                                           int row, int token_base, int token0, int live, int lane,
++                                           bool accumulate) {
++    const int gid = lane >> 2;
++    const int lid = lane & 3;
++#pragma unroll
++    for (int mt = 0; mt < MTiles; ++mt) {
++#pragma unroll
++        for (int half = 0; half < 2; ++half) {
++            const OutputRow out = output_row(outputs, row + mt * 16 + gid + half * 8);
++#pragma unroll
++            for (int nt = 0; nt < 4; ++nt) {
++#pragma unroll
++                for (int j = 0; j < 2; ++j) {
++                    const int token = token_base + nt * 8 + 2 * lid + j;
++                    if (token < live) store_row(out, token0 + token, acc[mt][nt][2 * half + j], accumulate);
++                }
++            }
++        }
++    }
++}
++
++__global__ void __launch_bounds__(kGemmThreads, 3)
++    gemm_kernel(const std::uint8_t* __restrict__ qx, const float* __restrict__ group_scale,
++                const int* __restrict__ group_sum, const std::uint8_t* __restrict__ codes,
++                const __half* __restrict__ scales, std::int64_t scale_row_halves, int k,
++                int tokens, int token_tiles, Outputs outputs, bool accumulate) {
++    constexpr int kRows      = kGemmRows;
++    constexpr int kTokens    = kGemmTokens;
++    constexpr int kThreads   = kGemmThreads;
++    extern __shared__ __align__(128) std::uint8_t gemm_smem[];
++    auto* stages     = reinterpret_cast<GemmStage<kTokens>*>(gemm_smem);
++    auto* code_words = reinterpret_cast<std::uint32_t*>(gemm_smem + 2 * sizeof(GemmStage<kTokens>));
++    const int tid    = static_cast<int>(threadIdx.x);
++    const int warp   = tid >> 5;
++    const int lane   = tid & 31;
++    const int gid    = lane >> 2;
++    const int lid    = lane & 3;
++    const int wm     = warp % 2;
++    const int wn     = warp / 2;
++    const int row0   = static_cast<int>(blockIdx.x) / token_tiles * kRows;
++    const int token0 = static_cast<int>(blockIdx.x) % token_tiles * kTokens;
++    const int live   = min(kTokens, tokens - token0);
++    const int steps  = k / kStageK;
++    const std::int64_t row_bytes = std::int64_t(k / kUnitColumns) * kUnitBytes;
++    // Decode item (row, unit) = (tid / 2, tid % 2).
++    const int my_unit = tid & 1;
++    const int my_row  = tid >> 1;
++    const std::uint8_t* my_codes = codes + std::int64_t(row0 + my_row) * row_bytes;
++
++    const auto stage_x = [&](int step, GemmStage<kTokens>& s) {
++#pragma unroll
++        for (int i = 0; i < kTokens * (kStageK / 16) / kThreads; ++i) {
++            const int item   = tid + i * kThreads;
++            const int token  = item >> 3;
++            const int chunk  = item & 7;
++            const int source = token < live ? token0 + token : token0;
++            cp_async_zfill<16>(&s.x[token * kStageK + ((chunk ^ (token & 7)) << 4)],
++                               qx + std::int64_t(source) * k + std::int64_t(step) * kStageK +
++                                   chunk * 16,
++                               token < live ? 16 : 0);
++        }
++        // kThreads >= 2 kTokens: the first kTokens threads stage the scales, the next the sums.
++        static_assert(kThreads >= 2 * kTokens);
++        const int token  = tid & (kTokens - 1);
++        const int source = token < live ? token0 + token : token0;
++        const std::int64_t index = std::int64_t(source) * (k / kStageK) + step;
++        if (tid < kTokens) {
++            cp_async_zfill<4>(&s.scale[token], group_scale + index, token < live ? 4 : 0);
++        } else if (tid < 2 * kTokens) {
++            cp_async_zfill<4>(&s.sum[token], group_sum + index, token < live ? 4 : 0);
++        }
++    };
++
++    // ldmatrix row addresses. A (x4, per mt and ks): matrices rows 0-7 / 8-15 of chunk 2 ks,
++    // then of chunk 2 ks + 1, i.e. fragment registers a0..a3. B (x4, per nt pair and ks): tokens
++    // of nt at chunks 2 ks, 2 ks + 1, then of nt + 1.
++    const int a_row    = wm * 32 + (lane & 7) + ((lane >> 3) & 1) * 8;
++    const int a_chunk  = lane >> 4;
++    const int b_token  = wn * 32 + (lane >> 4) * 8 + (lane & 7);
++    const int b_chunk  = (lane >> 3) & 1;
++
++    float acc[2][4][4] = {};
++    std::uint32_t raw[4] = {};
++    load_unit_words(my_codes, my_unit, raw);
++    std::uint32_t words[4] = {};
++    shift_unit_words(raw, my_unit, words);
++    decode_store_unit(words, code_words, my_row, my_unit);
++    stage_x(0, stages[0]);
++    cp_commit();
++    for (int step = 0; step < steps; ++step) {
++        if (step + 1 < steps) {
++            stage_x(step + 1, stages[(step + 1) & 1]);
++            load_unit_words(my_codes, 2 * (step + 1) + my_unit, raw);
++        }
++        cp_commit();
++        cp_wait<1>();
++        __syncthreads();
++        const GemmStage<kTokens>& s = stages[step & 1];
++        int group[2][4][4];
++#pragma unroll
++        for (int ks = 0; ks < kStageK / 32; ++ks) {
++            unsigned b[4][2];
++#pragma unroll
++            for (int np = 0; np < 2; ++np) {
++                const int token = b_token + np * 16;
++                const int chunk = 2 * ks + b_chunk;
++                ldmatrix_x4(b[2 * np][0], b[2 * np][1], b[2 * np + 1][0], b[2 * np + 1][1],
++                            smem_addr(&s.x[token * kStageK + ((chunk ^ (token & 7)) << 4)]));
++            }
++#pragma unroll
++            for (int mt = 0; mt < 2; ++mt) {
++                unsigned a0, a1, a2, a3;
++                ldmatrix_x4(a0, a1, a2, a3,
++                            smem_addr(&code_words[gemm_word(a_row + mt * 16, 4 * (2 * ks + a_chunk))]));
++#pragma unroll
++                for (int nt = 0; nt < 4; ++nt) {
++                    int* g = group[mt][nt];
++                    if (ks == 0) {
++                        mma_s8_from(g[0], g[1], g[2], g[3], a0, a1, a2, a3, b[nt][0], b[nt][1],
++                                    kFloatMagic, kFloatMagic, kFloatMagic, kFloatMagic);
++                    } else {
++                        mma_s8(g[0], g[1], g[2], g[3], a0, a1, a2, a3, b[nt][0], b[nt][1]);
++                    }
++                }
++            }
++        }
++        float token_scale[4][2], token_bias[4][2];
++#pragma unroll
++        for (int nt = 0; nt < 4; ++nt) {
++#pragma unroll
++            for (int j = 0; j < 2; ++j) {
++                const int token    = wn * 32 + nt * 8 + 2 * lid + j;
++                token_scale[nt][j] = s.scale[token];
++                token_bias[nt][j]  = __int_as_float(kFloatMagic + s.sum[token]);
++            }
++        }
++#pragma unroll
++        for (int mt = 0; mt < 2; ++mt) {
++            const int r        = row0 + wm * 32 + mt * 16 + gid;
++            const float top    = __half2float(__ldg(scales + std::int64_t(r) * scale_row_halves + step));
++            const float bottom =
++                __half2float(__ldg(scales + std::int64_t(r + 8) * scale_row_halves + step));
++#pragma unroll
++            for (int nt = 0; nt < 4; ++nt) {
++#pragma unroll
++                for (int e = 0; e < 4; ++e) {
++                    const int j      = e & 1;
++                    const float unit = (e < 2 ? top : bottom) * token_scale[nt][j];
++                    acc[mt][nt][e]   = fmaf(unit, __int_as_float(group[mt][nt][e]) - token_bias[nt][j],
++                                            acc[mt][nt][e]);
++                }
++            }
++        }
++        // Every warp has read this stage's code words before they are overwritten.
++        __syncthreads();
++        if (step + 1 < steps) {
++            shift_unit_words(raw, 2 * (step + 1) + my_unit, words);
++            decode_store_unit(words, code_words, my_row, my_unit);
++        }
++    }
++    store_tile(outputs, acc, row0 + wm * 32, wn * 32, token0, live, lane, accumulate);
++}
++
++// ---------------------------------------------------------------------------------------------
++// gemm_tall_kernel: tiles of 128 rows x 128 or 64 tokens for T > 64 (design 9.1). Eight warps of
++// 64 x 32 (128 tokens) or 32 x 32 (64 tokens), one CTA per SM, one barrier per step: the
++// activation stages and the code-word stages are both double-buffered, so the next step's
++// activations (cp.async) and code words (decoded by all threads, one unit each) are written while
++// this step's are read. A 64-token tile decodes as much per step for half the MMAs; the launch
++// mixes both widths so that the last resident wave is filled (t5_project.cu).
++
++template <int Rows>
++struct GemmCodeStage {
++    std::uint32_t words[Rows * 32]; // 16-byte chunks swizzled per row
++    float scale[Rows];              // the stage's FP16 row scales
++};
++
++// Stages the activation tiles (tokens x 128 bytes, 16-byte chunks swizzled per token) and the
++// token scales and sums of a step; `thread` of `Threads` participating threads. The source
++// pointers are fixed per thread (tokens past `live` read token0 with zero fill), so a step only
++// adds its column offset.
++template <int Tokens, int Threads>
++struct XStager {
++    static_assert(Threads >= 2 * Tokens && Tokens * (kStageK / 16) % Threads == 0);
++    static constexpr int kChunks = Tokens * (kStageK / 16) / Threads;
++    const std::uint8_t* src[kChunks];
++    unsigned dst[kChunks];
++    int bytes[kChunks];
++    const std::uint8_t* small_src; // token scale (thread < Tokens) or sum, of step 0
++    unsigned small_dst;
++    int small_bytes;
++
++    __device__ __forceinline__ XStager(int thread, const std::uint8_t* __restrict__ qx,
++                                       const float* __restrict__ group_scale,
++                                       const int* __restrict__ group_sum, int k, int token0,
++                                       int live) {
++#pragma unroll
++        for (int i = 0; i < kChunks; ++i) {
++            const int item   = thread + i * Threads;
++            const int token  = item >> 3;
++            const int chunk  = item & 7;
++            const int source = token < live ? token0 + token : token0;
++            src[i]   = qx + std::int64_t(source) * k + chunk * 16;
++            dst[i]   = unsigned(token * kStageK + ((chunk ^ (token & 7)) << 4));
++            bytes[i] = token < live ? 16 : 0;
++        }
++        const int token          = thread & (Tokens - 1);
++        const int source         = token < live ? token0 + token : token0;
++        const std::int64_t index = std::int64_t(source) * (k / kStageK);
++        small_src   = thread < Tokens ? reinterpret_cast<const std::uint8_t*>(group_scale + index)
++                                      : reinterpret_cast<const std::uint8_t*>(group_sum + index);
++        small_dst   = unsigned(thread < Tokens ? offsetof(GemmStage<Tokens>, scale)
++                                               : offsetof(GemmStage<Tokens>, sum)) +
++                    unsigned(token) * 4u;
++        small_bytes = thread < 2 * Tokens && token < live ? 4 : 0;
++    }
++
++    __device__ __forceinline__ void issue(int step, GemmStage<Tokens>& stage, int thread) const {
++        const unsigned base = smem_addr(&stage);
++#pragma unroll
++        for (int i = 0; i < kChunks; ++i) {
++#if defined(NINFER_PRE_SM80_DEVICE)
++            cp_async_zfill<16, Cache::cg>(reinterpret_cast<std::uint8_t*>(&stage) + dst[i],
++                                          src[i] + std::int64_t(step) * kStageK, bytes[i]);
++#else
++            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
++                         :
++                         : "r"(base + dst[i]), "l"(src[i] + std::int64_t(step) * kStageK),
++                           "r"(bytes[i]));
++#endif
++        }
++        if (thread < 2 * Tokens) {
++#if defined(NINFER_PRE_SM80_DEVICE)
++            cp_async_zfill<4>(reinterpret_cast<std::uint8_t*>(&stage) + small_dst,
++                              small_src + std::int64_t(step) * 4, small_bytes);
++#else
++            asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
++                         :
++                         : "r"(base + small_dst), "l"(small_src + std::int64_t(step) * 4),
++                           "r"(small_bytes));
++#endif
++        }
++    }
++};
++
++// Byte offsets of a lane's ldmatrix rows per k-slice: A (x4 per 16-row tile) in the code words,
++// matrices rows 0-7 / 8-15 of chunk 2 ks, then of chunk 2 ks + 1; B (x4 per token pair) in the
++// activation tile, tokens of nt at chunks 2 ks, 2 ks + 1, then of nt + 1. Rows and tokens are
++// 128-byte lines with 16-byte chunks XORed with the line index, and a row (token) index differs
++// from the lane's line only in multiples of 8, so chunk 2 ks + c sits at ((c ^ l7) << 4) ^ (ks << 5).
++struct FragOffsets {
++    unsigned a[4];
++    unsigned b[4];
++};
++
++__device__ __forceinline__ FragOffsets frag_offsets(int a_row, int b_token, int lane) {
++    const unsigned l7 = unsigned(lane & 7);
++    const unsigned ax = (unsigned(lane >> 4) ^ l7) << 4;
++    const unsigned bx = (unsigned((lane >> 3) & 1) ^ l7) << 4;
++    FragOffsets f;
++#pragma unroll
++    for (int ks = 0; ks < 4; ++ks) {
++        f.a[ks] = unsigned(a_row) * 128u + (ax ^ unsigned(ks << 5));
++        f.b[ks] = unsigned(b_token) * 128u + (bx ^ unsigned(ks << 5));
++    }
++    return f;
++}
++
++constexpr int kTallRows    = 128;
++constexpr int kTallThreads = 256;
++
++// A tile of 128 rows x Tokens (128 or 64) tokens: eight warps of kWarpRows rows x 32 tokens.
++template <int Tokens>
++struct TallTile {
++    static_assert(Tokens == 128 || Tokens == 64);
++    static constexpr int kWarpsN   = Tokens / 32;
++    static constexpr int kWarpsM   = kTallThreads / 32 / kWarpsN;
++    static constexpr int kWarpRows = kTallRows / kWarpsM;
++    static constexpr int kMTiles   = kWarpRows / 16; // 16-row MMA tiles per warp
++};
++
++// Sized for the 128-token tile; a 64-token tile uses the same stage offsets.
++constexpr std::size_t gemm_tall_shared_bytes() {
++    return 2 * sizeof(GemmStage<128>) + 2 * sizeof(GemmCodeStage<kTallRows>);
++}
++
++// The FP32 tile staged as [token][row], rows padded so that the fragment stores are conflict-free
++// and every 8-row chunk is 16-byte aligned.
++constexpr int kTallStageLd = kTallRows + 4;
++static_assert(std::size_t(128) * kTallStageLd * sizeof(float) <= gemm_tall_shared_bytes());
++
++// Stores a 128-row tile through shared memory: the warps stage their FP32 accumulators, then each
++// thread writes 8-row chunks of one token as 16-byte stores (a token's 128 rows by 16 adjacent
++// threads), adding the residual for accumulate. Per output this is store_row's arithmetic:
++// bf16_rn(acc) or bf16_rn(acc + residual). The host routes here only outputs whose row bounds
++// are multiples of 8 and whose data is 16-byte aligned.
++template <int Tokens, int MTiles>
++__device__ __forceinline__ void store_tall_tile(const Outputs& outputs,
++                                                const float (&acc)[MTiles][4][4], float* staged,
++                                                int row0, int token0, int live, int warp_row,
++                                                int warp_token, int tid, bool accumulate) {
++    const int lane = tid & 31;
++    const int gid  = lane >> 2;
++    const int lid  = lane & 3;
++#pragma unroll
++    for (int mt = 0; mt < MTiles; ++mt) {
++#pragma unroll
++        for (int nt = 0; nt < 4; ++nt) {
++#pragma unroll
++            for (int e = 0; e < 4; ++e) {
++                const int row   = warp_row + mt * 16 + gid + (e >> 1) * 8;
++                const int token = warp_token + nt * 8 + 2 * lid + (e & 1);
++                staged[token * kTallStageLd + row] = acc[mt][nt][e];
++            }
++        }
++    }
++    __syncthreads();
++    constexpr int kChunks = kTallRows / 8;
++#pragma unroll
++    for (int i = 0; i < Tokens * kChunks / kTallThreads; ++i) {
++        const int item  = tid + i * kTallThreads;
++        const int token = item / kChunks;
++        const int chunk = item % kChunks;
++        if (token >= live) continue;
++        const float* source = &staged[token * kTallStageLd + chunk * 8];
++        const float4 low    = *reinterpret_cast<const float4*>(source);
++        const float4 high   = *reinterpret_cast<const float4*>(source + 4);
++        float value[8]      = {low.x, low.y, low.z, low.w, high.x, high.y, high.z, high.w};
++        const OutputRow out = output_row(outputs, row0 + chunk * 8);
++        auto* target = reinterpret_cast<uint4*>(out.data + std::int64_t(token0 + token) * out.rows);
++        if (accumulate) {
++            const uint4 old         = *target;
++            const unsigned words[4] = {old.x, old.y, old.z, old.w};
++#pragma unroll
++            for (int w = 0; w < 4; ++w) {
++                const float2 pair = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&words[w]));
++                value[2 * w]     = value[2 * w] + pair.x;
++                value[2 * w + 1] = value[2 * w + 1] + pair.y;
++            }
++        }
++        unsigned packed[4];
++#pragma unroll
++        for (int w = 0; w < 4; ++w) {
++            const __nv_bfloat162 pair = __floats2bfloat162_rn(value[2 * w], value[2 * w + 1]);
++            packed[w]                 = *reinterpret_cast<const unsigned*>(&pair);
++        }
++        *target = make_uint4(packed[0], packed[1], packed[2], packed[3]);
++    }
++}
++
++// Each SM sub-partition holds one warp of each half of the CTA. Warps 0-3 ("ping") multiply, then
++// decode the next step's code words and apply the step's FP32 update; warps 4-7 ("pong") first
++// apply the previous step's update and decode, then multiply, carrying their int32 sums and the
++// step's scales across the barrier. A sub-partition's tensor pipe then runs one warp's MMAs while
++// the other warp does its integer and FP32 work, instead of both doing the same phase at once.
++template <int Tokens>
++__device__ __forceinline__ void gemm_tall_tile(const std::uint8_t* __restrict__ qx,
++                                               const float* __restrict__ group_scale,
++                                               const int* __restrict__ group_sum,
++                                               const std::uint8_t* __restrict__ codes,
++                                               const __half* __restrict__ scales,
++                                               std::int64_t scale_row_halves, int k, int tokens,
++                                               int row0, int token0, const Outputs& outputs,
++                                               bool accumulate, std::uint8_t* gemm_smem) {
++    using Tile             = TallTile<Tokens>;
++    constexpr int kRows    = kTallRows;
++    constexpr int kTokens  = Tokens;
++    constexpr int kThreads = kTallThreads;
++    constexpr int MTiles   = Tile::kMTiles;
++    using XStage           = GemmStage<kTokens>;
++    using CodeStage        = GemmCodeStage<kRows>;
++    auto* xs = reinterpret_cast<XStage*>(gemm_smem);
++    auto* cs = reinterpret_cast<CodeStage*>(gemm_smem + 2 * sizeof(GemmStage<128>));
++    const int tid     = static_cast<int>(threadIdx.x);
++    const int warp    = tid >> 5;
++    const int lane    = tid & 31;
++    const int gid     = lane >> 2;
++    const int lid     = lane & 3;
++    const int wm      = warp % Tile::kWarpsM;
++    const int wn      = warp / Tile::kWarpsM;
++    const bool pong   = warp >= 4;
++    const int live    = min(kTokens, tokens - token0);
++    const int steps   = k / kStageK;
++    // Decode item: row tid / 2, unit tid % 2 of each step.
++    const int my_row  = tid >> 1;
++    const int my_unit = tid & 1;
++    const std::uint8_t* my_codes =
++        codes + std::int64_t(row0 + my_row) * (std::int64_t(k / kUnitColumns) * kUnitBytes);
++    const __half* my_scales = scales + std::int64_t(row0 + my_row) * scale_row_halves;
++    std::uint32_t raw[4]    = {};
++    __half raw_scale        = {};
++    const auto load = [&](int step) {
++        load_unit_words(my_codes, 2 * step + my_unit, raw);
++        if (my_unit == 0) raw_scale = __ldg(my_scales + step);
++    };
++    const auto decode = [&](int step, CodeStage& c) {
++        std::uint32_t a[4];
++        shift_unit_words(raw, 2 * step + my_unit, a);
++        decode_store_unit(a, c.words, my_row, my_unit);
++        if (my_unit == 0) c.scale[my_row] = __half2float(raw_scale);
++    };
++
++    const FragOffsets f = frag_offsets(wm * Tile::kWarpRows + (lane & 7) + ((lane >> 3) & 1) * 8,
++                                       wn * 32 + (lane >> 4) * 8 + (lane & 7), lane);
++    const auto multiply = [&](const XStage& s, const CodeStage& c, int (&g)[MTiles][4][4]) {
++        const unsigned x_base = smem_addr(s.x);
++        const unsigned c_base = smem_addr(c.words);
++#pragma unroll
++        for (int ks = 0; ks < 4; ++ks) {
++            unsigned b[4][2];
++#pragma unroll
++            for (int np = 0; np < 2; ++np) {
++                ldmatrix_x4(b[2 * np][0], b[2 * np][1], b[2 * np + 1][0], b[2 * np + 1][1],
++                            x_base + f.b[ks] + np * 16 * kStageK);
++            }
++#pragma unroll
++            for (int mt = 0; mt < MTiles; ++mt) {
++                unsigned a0, a1, a2, a3;
++                ldmatrix_x4(a0, a1, a2, a3, c_base + f.a[ks] + mt * 16 * 128);
++#pragma unroll
++                for (int nt = 0; nt < 4; ++nt) {
++                    int* d = g[mt][nt];
++                    if (ks == 0) {
++                        mma_s8_from(d[0], d[1], d[2], d[3], a0, a1, a2, a3, b[nt][0], b[nt][1],
++                                    kFloatMagic, kFloatMagic, kFloatMagic, kFloatMagic);
++                    } else {
++                        mma_s8(d[0], d[1], d[2], d[3], a0, a1, a2, a3, b[nt][0], b[nt][1]);
++                    }
++                }
++            }
++        }
++    };
++    // The step's token scales, token biases 12582912 + sum(q) (so that the int32 sum started at
++    // kFloatMagic gives code . q - sum(q) with one exact FADD) and row scales.
++    float token_scale[4][2], token_bias[4][2], row_scale[MTiles][2];
++    const auto load_scales = [&](const XStage& s, const CodeStage& c) {
++#pragma unroll
++        for (int nt = 0; nt < 4; ++nt) {
++#pragma unroll
++            for (int j = 0; j < 2; ++j) {
++                const int token    = wn * 32 + nt * 8 + 2 * lid + j;
++                token_scale[nt][j] = s.scale[token];
++                token_bias[nt][j]  = __int_as_float(kFloatMagic + s.sum[token]);
++            }
++        }
++#pragma unroll
++        for (int mt = 0; mt < MTiles; ++mt) {
++            row_scale[mt][0] = c.scale[wm * Tile::kWarpRows + mt * 16 + gid];
++            row_scale[mt][1] = c.scale[wm * Tile::kWarpRows + mt * 16 + gid + 8];
++        }
++    };
++    float acc[MTiles][4][4] = {};
++    const auto update = [&](const int (&g)[MTiles][4][4]) {
++#pragma unroll
++        for (int mt = 0; mt < MTiles; ++mt) {
++#pragma unroll
++            for (int nt = 0; nt < 4; ++nt) {
++#pragma unroll
++                for (int e = 0; e < 4; ++e) {
++                    const int j      = e & 1;
++                    const float unit = row_scale[mt][e >> 1] * token_scale[nt][j];
++                    acc[mt][nt][e]   = fmaf(unit, __int_as_float(g[mt][nt][e]) - token_bias[nt][j],
++                                            acc[mt][nt][e]);
++                }
++            }
++        }
++    };
++
++    const XStager<kTokens, kThreads> stager(tid, qx, group_scale, group_sum, k, token0, live);
++    load(0);
++    decode(0, cs[0]);
++    if (steps > 1) load(1);
++    stager.issue(0, xs[0], tid);
++    cp_commit();
++    int g[MTiles][4][4];
++    for (int step = 0; step < steps; ++step) {
++        cp_wait<0>();
++        // Stage `step` is visible and every warp is done reading step - 1, whose buffers refill.
++        __syncthreads();
++        if (step + 1 < steps) stager.issue(step + 1, xs[(step + 1) & 1], tid);
++        cp_commit();
++        const XStage& s    = xs[step & 1];
++        const CodeStage& c = cs[step & 1];
++        const auto next    = [&] {
++            if (step + 1 < steps) {
++                decode(step + 1, cs[(step + 1) & 1]);
++                if (step + 2 < steps) load(step + 2);
++            }
++        };
++        if (pong) {
++            if (step > 0) update(g);
++            next();
++            multiply(s, c, g);
++            load_scales(s, c);
++        } else {
++            multiply(s, c, g);
++            next();
++            load_scales(s, c);
++            update(g);
++        }
++    }
++    if (pong) update(g);
++    // Every warp is done with the stages, which now hold the FP32 tile.
++    __syncthreads();
++    store_tall_tile<Tokens, MTiles>(outputs, acc, reinterpret_cast<float*>(gemm_smem), row0,
++                                    token0, live, wm * Tile::kWarpRows, wn * 32, tid, accumulate);
++}
++
++// A row block's tokens are covered by `wide` 128-token tiles, then `narrow` 64-token tiles. The
++// grid holds every row block's wide tiles first, then every row block's narrow tiles, token
++// tiles fastest within each part, so the cheaper narrow CTAs fill the last resident wave.
++__global__ void __launch_bounds__(kTallThreads, 1)
++    gemm_tall_kernel(const std::uint8_t* __restrict__ qx, const float* __restrict__ group_scale,
++                     const int* __restrict__ group_sum, const std::uint8_t* __restrict__ codes,
++                     const __half* __restrict__ scales, std::int64_t scale_row_halves, int k,
++                     int tokens, int wide, int narrow, Outputs outputs, bool accumulate) {
++    extern __shared__ __align__(128) std::uint8_t gemm_smem[];
++    const int row_blocks = static_cast<int>(gridDim.x) / (wide + narrow);
++    const int tile       = static_cast<int>(blockIdx.x);
++    if (tile < row_blocks * wide) {
++        gemm_tall_tile<128>(qx, group_scale, group_sum, codes, scales, scale_row_halves, k, tokens,
++                            tile / wide * kTallRows, tile % wide * 128, outputs, accumulate,
++                            gemm_smem);
++    } else {
++        const int rest = tile - row_blocks * wide;
++        gemm_tall_tile<64>(qx, group_scale, group_sum, codes, scales, scale_row_halves, k, tokens,
++                           rest / narrow * kTallRows, wide * 128 + rest % narrow * 64, outputs,
++                           accumulate, gemm_smem);
++    }
++}
++
++// ---------------------------------------------------------------------------------------------
++// Small-T tensor-core GEMV for the verification of concurrent MTP lanes (T = 5..32; also any T
++// of a weight whose rows are not a multiple of the GEMM's 64). The dp4a GEMV's work grows with T
++// and the prefill GEMM gives each 64-row CTA the whole K (80 CTAs for a 5120-row weight), so
++// neither fits here. A CTA of four warps owns 16 rows and 8 NTiles tokens; warp w takes the
++// 128-column groups w, w + 4, ... of the row block (K % 1024 == 0: every warp has K / 512 >= 2
++// groups), and the four FP32 partial sums are added in shared memory in warp order, so the
++// weights are read once per token tile with one CTA per 16 rows.
++//
++// Per group each lane decodes one (row, unit) = (lane / 2, lane % 2) as the GEMV does (the next
++// two groups' bytes are in flight meanwhile) into the warp's shared code words, and the warp
++// multiplies 16 rows x 128 columns x 8 NTiles tokens with m16n8k32 s8 MMAs, A by `ldmatrix`.
++// The k order inside the MMAs is permuted so that lane `lid` reads the activation words
++// 8 lid .. 8 lid + 7 of its token with two 16-byte loads: MMA step ks, fragment half h (a0/a1
++// and b0 for h = 0, a2/a3 and b1 for h = 1) holds group word 8 lid + 2 ks + h, i.e. code word
++// w of unit u (group word 16 u + w) is stored at chunk w % 8, word 2 u + w / 8 of its row (the
++// chunk XORed with the row as in the GEMM). The group sums correct the code offset as there.
++
++constexpr int kSmallWarps    = 4;
++constexpr int kSmallThreads  = 32 * kSmallWarps;
++constexpr int kSmallRows     = 16;
++constexpr int kSmallMaxTiles = 4; // 32 tokens per CTA
++
++template <int NTiles>
++__global__ void __launch_bounds__(kSmallThreads, NTiles <= 2 ? 4 : 3)
++    small_t_kernel(const std::uint8_t* __restrict__ qx, const float* __restrict__ group_scale,
++                   const int* __restrict__ group_sum, const std::uint8_t* __restrict__ codes,
++                   const __half* __restrict__ scales, std::int64_t scale_row_halves, int n, int k,
++                   int tokens, Outputs outputs, bool accumulate) {
++    static_assert(NTiles >= 1 && NTiles <= kSmallMaxTiles);
++    constexpr int kTokens = 8 * NTiles;
++    // Per warp: 16 rows x 32 code words per group; after the loop, the partial sums [token][row].
++    __shared__ __align__(128) std::uint32_t warp_words[kSmallWarps][kSmallRows * 32];
++    static_assert(kTokens * kSmallRows <= kSmallRows * 32);
++    const int tid    = static_cast<int>(threadIdx.x);
++    const int warp   = tid >> 5;
++    const int lane   = tid & 31;
++    const int gid    = lane >> 2;
++    const int lid    = lane & 3;
++    const int row0   = static_cast<int>(blockIdx.x) * kSmallRows;
++    const int token0 = static_cast<int>(blockIdx.y) * kTokens;
++    const int live   = min(kTokens, tokens - token0);
++    const int groups = k / kStageK;
++    const std::int64_t row_bytes = std::int64_t(k / kUnitColumns) * kUnitBytes;
++    std::uint32_t* code_words    = warp_words[warp];
++
++    // Rows past n alias the last row and tokens past `live` the last live token; their results
++    // are never stored.
++    const int my_row             = lane >> 1;
++    const int my_unit            = lane & 1;
++    const std::uint8_t* my_codes = codes + std::int64_t(min(row0 + my_row, n - 1)) * row_bytes;
++    const __half* top_scales     = scales + std::int64_t(min(row0 + gid, n - 1)) * scale_row_halves;
++    const __half* bottom_scales =
++        scales + std::int64_t(min(row0 + gid + 8, n - 1)) * scale_row_halves;
++    // B operand: token nt * 8 + gid, bytes 32 lid .. 32 lid + 31 of each group; C fragment
++    // tokens nt * 8 + 2 lid + j for the group scales and sums.
++    int x_offset[NTiles], token_offset[NTiles][2];
++#pragma unroll
++    for (int nt = 0; nt < NTiles; ++nt) {
++        x_offset[nt] = (token0 + min(nt * 8 + gid, live - 1)) * k + 32 * lid;
++#pragma unroll
++        for (int j = 0; j < 2; ++j) {
++            token_offset[nt][j] = (token0 + min(nt * 8 + 2 * lid + j, live - 1)) * groups;
++        }
++    }
++    // ldmatrix row addresses of the A fragments (as in the GEMM).
++    const int a_row   = (lane & 7) + ((lane >> 3) & 1) * 8;
++    const int a_chunk = lane >> 4;
++
++    float acc[NTiles][4];
++#pragma unroll
++    for (int nt = 0; nt < NTiles; ++nt) {
++#pragma unroll
++        for (int e = 0; e < 4; ++e) acc[nt][e] = 0.0f;
++    }
++    std::uint32_t raw[4], next[4];
++    load_unit(my_codes, 2 * warp + my_unit, raw);
++    load_unit(my_codes, 2 * (warp + kSmallWarps) + my_unit, next);
++#pragma unroll 1
++    for (int group = warp; group < groups; group += kSmallWarps) {
++        uint4 x[NTiles][2];
++#pragma unroll
++        for (int nt = 0; nt < NTiles; ++nt) {
++            const auto* source = reinterpret_cast<const uint4*>(qx + x_offset[nt] + group * kStageK);
++            x[nt][0]           = __ldg(source);
++            x[nt][1]           = __ldg(source + 1);
++        }
++        {
++            std::uint32_t words[16];
++            decode_unit(raw, words);
++            std::uint32_t* row_words = code_words + my_row * 32 + 2 * my_unit;
++#pragma unroll
++            for (int c = 0; c < 8; ++c) {
++                *reinterpret_cast<uint2*>(row_words + ((c ^ (my_row & 7)) << 2)) =
++                    make_uint2(words[c], words[c + 8]);
++            }
++        }
++#pragma unroll
++        for (int i = 0; i < 4; ++i) raw[i] = next[i];
++        if (group + 2 * kSmallWarps < groups) {
++            load_unit(my_codes, 2 * (group + 2 * kSmallWarps) + my_unit, next);
++        }
++        __syncwarp();
++        int dot[NTiles][4];
++#pragma unroll
++        for (int nt = 0; nt < NTiles; ++nt) {
++#pragma unroll
++            for (int e = 0; e < 4; ++e) dot[nt][e] = 0;
++        }
++#pragma unroll
++        for (int ks = 0; ks < 4; ++ks) {
++            unsigned a0, a1, a2, a3;
++            ldmatrix_x4(a0, a1, a2, a3,
++                        smem_addr(&code_words[gemm_word(a_row, 4 * (2 * ks + a_chunk))]));
++#pragma unroll
++            for (int nt = 0; nt < NTiles; ++nt) {
++                // b0, b1 = group words 8 lid + 2 ks and 8 lid + 2 ks + 1 of the lane's token.
++                const uint4& xs = x[nt][ks >> 1];
++                mma_s8(dot[nt][0], dot[nt][1], dot[nt][2], dot[nt][3], a0, a1, a2, a3,
++                       ks & 1 ? xs.z : xs.x, ks & 1 ? xs.w : xs.y);
++            }
++        }
++        // Every lane has its fragments before the next group's code words are stored.
++        __syncwarp();
++        const float top    = __half2float(__ldg(top_scales + group));
++        const float bottom = __half2float(__ldg(bottom_scales + group));
++        // Fragment C: [0], [1] are row gid, tokens 2 lid and 2 lid + 1; [2], [3] row gid + 8.
++#pragma unroll
++        for (int nt = 0; nt < NTiles; ++nt) {
++#pragma unroll
++            for (int j = 0; j < 2; ++j) {
++                const float step = __ldg(group_scale + token_offset[nt][j] + group);
++                const int sum    = __ldg(group_sum + token_offset[nt][j] + group);
++                acc[nt][j] = fmaf(top * step, static_cast<float>(dot[nt][j] - sum), acc[nt][j]);
++                acc[nt][2 + j] =
++                    fmaf(bottom * step, static_cast<float>(dot[nt][2 + j] - sum), acc[nt][2 + j]);
++            }
++        }
++    }
++
++    // The warp's partial sums replace its code words as [token][row]; then every thread adds
++    // the four warps' sums of (row, token) items in warp order, rows fastest (coalesced stores).
++    auto* partial = reinterpret_cast<float*>(code_words);
++#pragma unroll
++    for (int nt = 0; nt < NTiles; ++nt) {
++#pragma unroll
++        for (int e = 0; e < 4; ++e) {
++            partial[(nt * 8 + 2 * lid + (e & 1)) * kSmallRows + gid + (e >> 1) * 8] = acc[nt][e];
++        }
++    }
++    __syncthreads();
++    for (int item = tid; item < kTokens * kSmallRows; item += kSmallThreads) {
++        const int row   = item % kSmallRows;
++        const int token = item / kSmallRows;
++        if (token >= live || row0 + row >= n) continue;
++        float sum = 0.0f;
++#pragma unroll
++        for (int w = 0; w < kSmallWarps; ++w) sum += reinterpret_cast<const float*>(warp_words[w])[item];
++        store_row(output_row(outputs, row0 + row), token0 + token, sum, accumulate);
++    }
++}
++
++} // namespace ninfer::ops::detail::t5_a8
+diff --git a/src/ops/linear/t5/t5_embedding.cu b/src/ops/linear/t5/t5_embedding.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..88891d2d96b37653afa9c4912985849417a60886
+--- /dev/null
++++ b/src/ops/linear/t5/t5_embedding.cu
+@@ -0,0 +1,107 @@
++// Adapted from JGamboa/ninfer-4090-windows@e905787f (Apache-2.0); see NOTICE.
++#include "ops/linear/t5/t5_project.h"
++
++#include "core/device.h"
++
++#include <cuda_bf16.h>
++#include <cuda_fp16.h>
++
++#include <cstdint>
++#include <stdexcept>
++
++namespace ninfer::ops::detail {
++namespace {
++
++constexpr int kBlock   = 1024;
++constexpr int kThreads = 256; // one four-column code word per thread
++
++// One CTA per (1024-column block, token). Thread tid decodes the four columns 4 tid .. 4 tid + 3,
++// word w = tid % 16 of unit tid / 16 (t5_a8.cuh): trit m of unit bytes 4 g .. 4 g + 3 for
++// w = 5 g + m < 15, byte 12 for w = 15. Then, for a rotated table (explicit signs argument), the
++// logical W' H S row transform: the FP32 shared-memory Walsh-Hadamard butterfly of ops/hadamard,
++// the 1/32 normalization and the signs. One BF16 rounding of the result.
++__global__ void __launch_bounds__(kThreads)
++    t5_embedding_kernel(const std::int32_t* __restrict__ ids, const std::uint8_t* __restrict__ codes,
++                        const __half* __restrict__ scales, std::int64_t scale_row_halves,
++                        const __nv_bfloat16* __restrict__ signs, int k,
++                        __nv_bfloat16* __restrict__ out) {
++    __shared__ float values[kBlock];
++    const int tid     = static_cast<int>(threadIdx.x);
++    const int column0 = static_cast<int>(blockIdx.x) * kBlock;
++    const int token   = static_cast<int>(blockIdx.y);
++    const std::int64_t row = ids[token];
++    const int unit = column0 / 64 + tid / 16;
++    const int word = tid % 16;
++    const std::uint8_t* bytes = codes + row * (std::int64_t(k) / 64 * 13) + std::int64_t(unit) * 13;
++    std::uint32_t trits = 0;
++    if (word < 15) {
++        const int g = word / 5, m = word % 5;
++        std::uint32_t even = std::uint32_t(bytes[4 * g]) | (std::uint32_t(bytes[4 * g + 2]) << 16);
++        std::uint32_t odd  = std::uint32_t(bytes[4 * g + 1]) | (std::uint32_t(bytes[4 * g + 3]) << 16);
++        for (int step = 0; step <= m; ++step) {
++            even *= 3u;
++            odd *= 3u;
++            trits = ((even >> 8) & 0x00030003u) | (odd & 0x03000300u);
++            even &= 0x00ff00ffu;
++            odd &= 0x00ff00ffu;
++        }
++    } else {
++        std::uint32_t r = bytes[12];
++        for (int m = 0; m < 4; ++m) {
++            r *= 3u;
++            trits |= (r >> 8) << (8 * m);
++            r &= 0xffu;
++        }
++    }
++    const float scale = __half2float(scales[row * scale_row_halves + (column0 + 4 * tid) / 128]);
++#pragma unroll
++    for (int j = 0; j < 4; ++j) {
++        values[4 * tid + j] = static_cast<float>(static_cast<int>((trits >> (8 * j)) & 0xffu) - 1) * scale;
++    }
++    __nv_bfloat16* destination = out + std::int64_t(token) * k + column0;
++    if (signs == nullptr) {
++#pragma unroll
++        for (int j = 0; j < 4; ++j) destination[4 * tid + j] = __float2bfloat16_rn(values[4 * tid + j]);
++        return;
++    }
++    __syncthreads();
++#pragma unroll
++    for (int stride = 1; stride < kBlock; stride <<= 1) {
++#pragma unroll
++        for (int pair = tid; pair < kBlock / 2; pair += kThreads) {
++            const int low        = (pair / stride) * 2 * stride + pair % stride;
++            const float a        = values[low];
++            const float b        = values[low + stride];
++            values[low]          = a + b;
++            values[low + stride] = a - b;
++        }
++        __syncthreads();
++    }
++#pragma unroll
++    for (int i = 0; i < kBlock / kThreads; ++i) {
++        const int index = tid + i * kThreads;
++        destination[index] = __float2bfloat16_rn(values[index] * 0x1p-5f *
++                                                 __bfloat162float(signs[column0 + index]));
++    }
++}
++
++} // namespace
++
++void t5_embedding(const Tensor& ids, const Weight& table, const Tensor& signs, Tensor& out, cudaStream_t stream) {
++    validate_t5_weight(table, "embedding");
++    const int tokens = ids.ne[0];
++    if (ids.dtype != DType::I32 || out.dtype != DType::BF16 || out.ne[0] != table.k ||
++        out.ne[1] != tokens || !ids.is_contiguous() || !out.is_contiguous()) {
++        throw std::invalid_argument("embedding: t5 expects I32 ids [T] and BF16 out [K,T]");
++    }
++    if (tokens == 0) return;
++    const dim3 grid(static_cast<unsigned>(table.k / kBlock), static_cast<unsigned>(tokens));
++    t5_embedding_kernel<<<grid, kThreads, 0, stream>>>(
++        static_cast<const std::int32_t*>(ids.data), static_cast<const std::uint8_t*>(table.qdata),
++        static_cast<const __half*>(table.scales), table.scale_nb[1] / 2,
++        static_cast<const __nv_bfloat16*>(signs.data), table.k,
++        static_cast<__nv_bfloat16*>(out.data));
++    CUDA_CHECK(cudaGetLastError());
++}
++
++} // namespace ninfer::ops::detail
+diff --git a/src/ops/linear/t5/t5_project.cu b/src/ops/linear/t5/t5_project.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..fdc4723a7914a59fb3b1cae92bcd5bf6f376fa63
+--- /dev/null
++++ b/src/ops/linear/t5/t5_project.cu
+@@ -0,0 +1,259 @@
++// Adapted from JGamboa/ninfer-4090-windows@e905787f (Apache-2.0); see NOTICE.
++#include "ops/linear/t5/t5_project.h"
++
++#include "core/device.h"
++#include "ops/linear/t5/t5_a8.cuh"
++
++#include <cuda_bf16.h>
++#include <cuda_fp16.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <stdexcept>
++#include <string>
++
++namespace ninfer::ops::detail {
++namespace {
++
++// Routes by T (design 9.1): the dp4a GEMV through T = 4, the small-T tensor-core route through
++// T = 32 (MTP verification of up to eight lanes at draft 3), the prefill GEMM beyond.
++constexpr int kSmallTMaxTokens = 8 * t5_a8::kSmallMaxTiles;
++
++bool aligned16(const void* p) { return (reinterpret_cast<std::uintptr_t>(p) & 15) == 0; }
++
++std::size_t round_up_256(std::size_t bytes) { return (bytes + 255) / 256 * 256; }
++
++struct QuantizedX {
++    Tensor q, scale, group_sum, slice_sum;
++};
++
++// Bytes of code rows that a decode-width quantization asks L2 for ahead of the GEMV
++// (t5_a8::WeightPrefetch). One MiB is what DRAM moves while the quantization runs: per MTP 2
++// round on the RTX 4090, 0.75 MiB saved 1.5 %, 1-1.5 MiB 1.9 %, 4 MiB 0.9 % (design 9.1 item 33).
++constexpr std::int64_t kGemvPrefetchBytes = std::int64_t(1) << 20;
++
++t5_a8::WeightPrefetch gemv_prefetch(const Weight& w) {
++    const std::int64_t row_bytes = std::int64_t(w.k / t5_a8::kUnitColumns) * t5_a8::kUnitBytes;
++    const std::int64_t rows =
++        std::min<std::int64_t>(w.n, std::max<std::int64_t>(1, kGemvPrefetchBytes / row_bytes));
++    // Line i starts at base + 128 i, inside the first `bytes` of the plane for every i counted.
++    const auto lines = [](std::int64_t bytes) { return static_cast<unsigned>((bytes + 127) / 128); };
++    return {static_cast<const char*>(w.qdata), static_cast<const char*>(w.scales),
++            lines(rows * row_bytes), lines(rows * w.scale_nb[1])};
++}
++
++// Quantizes represented BF16 input. At GEMV widths it also prefetches leading weight rows.
++template <class Input>
++QuantizedX quantize(const Input& input, const Weight& w, int tokens, WorkspaceArena& workspace,
++                    cudaStream_t stream) {
++    const int k = w.k;
++    QuantizedX result{workspace.alloc(DType::I8, {k, tokens}),
++                      workspace.alloc(DType::FP32, {k / 128, tokens}),
++                      workspace.alloc(DType::I32, {k / 128, tokens}),
++                      workspace.alloc(DType::I32, {k / 32, tokens})};
++    auto* q     = static_cast<std::uint32_t*>(result.q.data);
++    auto* scale = static_cast<float*>(result.scale.data);
++    auto* gsum  = static_cast<int*>(result.group_sum.data);
++    auto* ssum  = static_cast<int*>(result.slice_sum.data);
++    // The dp4a GEMV route (T <= 4) reads the GEMV activation layout and gets the prefetch row.
++    const bool gemv = tokens <= t5_a8::kGemvMaxTokens;
++    const t5_a8::WeightPrefetch lines =
++        gemv ? gemv_prefetch(w) : t5_a8::WeightPrefetch{nullptr, nullptr, 0u, 0u};
++    const dim3 grid(static_cast<unsigned>(k / t5_a8::kQuantizeBlock),
++                    static_cast<unsigned>(tokens + (gemv ? 1 : 0)));
++    t5_a8::quantize_kernel<Input><<<grid, t5_a8::kQuantizeThreads, 0, stream>>>(
++        input, k, q, scale, gsum, ssum, tokens, gemv, lines);
++    CUDA_CHECK(cudaGetLastError());
++    return result;
++}
++
++template <int Tile, int R>
++void launch_gemv_rows(const QuantizedX& q, const Weight& w, const t5_a8::Outputs& outputs,
++                      bool accumulate, cudaStream_t stream) {
++    constexpr int rows_per_cta = t5_a8::kGemvThreads / 16 * R;
++    const unsigned grid        = static_cast<unsigned>((w.n + rows_per_cta - 1) / rows_per_cta);
++    t5_a8::gemv_kernel<Tile, R><<<grid, t5_a8::kGemvThreads, 0, stream>>>(
++        static_cast<const uint4*>(q.q.data), static_cast<const float*>(q.scale.data),
++        static_cast<const int*>(q.slice_sum.data), static_cast<const std::uint8_t*>(w.qdata),
++        static_cast<const __half*>(w.scales), w.scale_nb[1] / 2, w.n, w.k, outputs, accumulate);
++    CUDA_CHECK(cudaGetLastError());
++}
++
++// Rows per GEMV half-warp. The 5120-row weights (640 CTAs at two rows) keep two: at one row,
++// down ran 8 % slower at T = 3. The taller ones (14336 rows and up) take one, twice the warps,
++// 1-5 % faster at T = 3 (in_proj 24.2 -> 23.7 us, qkvg 22.5 -> 21.4, gate+up 46.0 -> 45.3).
++constexpr int kGemvOneRowMinRows = 8192;
++
++template <int Tile>
++void launch_gemv(const QuantizedX& q, const Weight& w, const t5_a8::Outputs& outputs,
++                 bool accumulate, cudaStream_t stream) {
++    if (w.n >= kGemvOneRowMinRows) {
++        launch_gemv_rows<Tile, 1>(q, w, outputs, accumulate, stream);
++    } else {
++        launch_gemv_rows<Tile, 2>(q, w, outputs, accumulate, stream);
++    }
++}
++
++template <int NTiles>
++void launch_small_t(const QuantizedX& q, const Weight& w, int tokens,
++                    const t5_a8::Outputs& outputs, bool accumulate, cudaStream_t stream) {
++    constexpr int kTokens = 8 * NTiles;
++    const dim3 grid(static_cast<unsigned>((w.n + t5_a8::kSmallRows - 1) / t5_a8::kSmallRows),
++                    static_cast<unsigned>((tokens + kTokens - 1) / kTokens));
++    t5_a8::small_t_kernel<NTiles><<<grid, t5_a8::kSmallThreads, 0, stream>>>(
++        static_cast<const std::uint8_t*>(q.q.data), static_cast<const float*>(q.scale.data),
++        static_cast<const int*>(q.group_sum.data), static_cast<const std::uint8_t*>(w.qdata),
++        static_cast<const __half*>(w.scales), w.scale_nb[1] / 2, w.n, w.k, tokens, outputs,
++        accumulate);
++    CUDA_CHECK(cudaGetLastError());
++}
++
++void launch_gemm(const QuantizedX& q, const Weight& w, int tokens, const t5_a8::Outputs& outputs,
++                 bool accumulate, cudaStream_t stream) {
++    constexpr std::size_t kSmem = t5_a8::gemm_shared_bytes();
++    static_assert(kSmem <= 48 * 1024);
++    const int token_tiles = (tokens + t5_a8::kGemmTokens - 1) / t5_a8::kGemmTokens;
++    const unsigned grid   = static_cast<unsigned>(w.n / t5_a8::kGemmRows * token_tiles);
++    t5_a8::gemm_kernel<<<grid, t5_a8::kGemmThreads, kSmem, stream>>>(
++        static_cast<const std::uint8_t*>(q.q.data), static_cast<const float*>(q.scale.data),
++        static_cast<const int*>(q.group_sum.data), static_cast<const std::uint8_t*>(w.qdata),
++        static_cast<const __half*>(w.scales), w.scale_nb[1] / 2, w.k, tokens, token_tiles, outputs,
++        accumulate);
++    CUDA_CHECK(cudaGetLastError());
++}
++
++// The token tiles of each 128-row block: `wide` 128-token tiles, then `narrow` 64-token tiles.
++struct TallSplit {
++    int wide, narrow;
++};
++
++// Uniform complete 128-token tiles and a 64-token tail. The donor's 4090 wave-cost
++// heuristic is not assumed to describe SM120; this keeps arithmetic and bounds identical.
++TallSplit choose_tall_split(int, int tokens) {
++    return {tokens / 128, (tokens % 128 + 63) / 64};
++}
++
++void launch_tall_gemm(const QuantizedX& q, const Weight& w, int tokens,
++                      const t5_a8::Outputs& outputs, bool accumulate, cudaStream_t stream) {
++    constexpr std::size_t kSmem = t5_a8::gemm_tall_shared_bytes();
++    raise_dynamic_shared_memory(t5_a8::gemm_tall_kernel, static_cast<int>(kSmem));
++    const int row_blocks  = w.n / t5_a8::kTallRows;
++    const TallSplit split = choose_tall_split(row_blocks, tokens);
++    const unsigned grid   = static_cast<unsigned>(row_blocks * (split.wide + split.narrow));
++    t5_a8::gemm_tall_kernel<<<grid, t5_a8::kTallThreads, kSmem, stream>>>(
++        static_cast<const std::uint8_t*>(q.q.data), static_cast<const float*>(q.scale.data),
++        static_cast<const int*>(q.group_sum.data), static_cast<const std::uint8_t*>(w.qdata),
++        static_cast<const __half*>(w.scales), w.scale_nb[1] / 2, w.k, tokens, split.wide,
++        split.narrow, outputs, accumulate);
++    CUDA_CHECK(cudaGetLastError());
++}
++
++void require_input(const Tensor& x, const Weight& w, const char* what) {
++    if (x.dtype != DType::BF16 || x.ne[0] != w.k || x.ne[1] <= 0 || x.ne[2] != 1 || x.ne[3] != 1 ||
++        x.data == nullptr || !x.is_contiguous() || !aligned16(x.data)) {
++        throw std::invalid_argument(std::string("t5_project: ") + what +
++                                    " must be contiguous aligned BF16 [K,T]");
++    }
++}
++
++// Validates the weight, policy and outputs, then quantizes the input and multiplies: dp4a GEMV
++// through T = 4, the small-T MMA route through T = 32 (and at any T when N % 64 != 0, in 32-token
++// tiles), the 64 x 64 GEMM through T = 64 (and beyond when N % 128 != 0 or an output is not made
++// of aligned 8-row chunks), the pipelined 128-row GEMM beyond (every Bonsai weight).
++template <class Input>
++void project(const Input& input, int tokens, const Weight& w, std::span<Tensor* const> outputs,
++             bool accumulate, LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
++    if (!allows_a8(policy) || workspace == nullptr) {
++        throw std::invalid_argument("t5_project: a T5 weight requires AllowA8 and a workspace");
++    }
++    if (outputs.empty() || outputs.size() > t5_a8::kMaxOutputs) {
++        throw std::invalid_argument("t5_project: expected one to four outputs");
++    }
++    t5_a8::Outputs packed{};
++    int end = 0;
++    // The pipelined GEMM stores 8-row chunks as 16-byte words.
++    bool chunked_outputs = true;
++    for (std::size_t i = 0; i < outputs.size(); ++i) {
++        if (outputs[i] == nullptr) { throw std::invalid_argument("t5_project: null output"); }
++        const Tensor& out = *outputs[i];
++        if (out.dtype != DType::BF16 || out.ne[0] <= 0 || out.ne[0] > w.n - end ||
++            out.ne[1] != tokens || out.ne[2] != 1 || out.ne[3] != 1 ||
++            out.nb[0] != sizeof(__nv_bfloat16) || out.nb[1] < out.ne[0] * sizeof(__nv_bfloat16) || out.data == nullptr) {
++            throw std::invalid_argument("t5_project: outputs must be contiguous BF16 [rows,T]");
++        }
++        end += out.ne[0];
++        chunked_outputs = chunked_outputs && out.ne[0] % 8 == 0 && out.nb[1] % 16 == 0 && aligned16(out.data);
++        packed.data[i] = static_cast<__nv_bfloat16*>(out.data);
++        packed.end[i]  = end;
++        packed.stride[i] = static_cast<int>(out.nb[1] / sizeof(__nv_bfloat16));
++    }
++    for (std::size_t i = outputs.size(); i < t5_a8::kMaxOutputs; ++i) {
++        packed.data[i] = packed.data[outputs.size() - 1];
++        packed.end[i]  = end;
++        packed.stride[i] = packed.stride[outputs.size() - 1];
++    }
++    if (end != w.n) {
++        throw std::invalid_argument("t5_project: output rows must cover the weight rows");
++    }
++
++    auto scope         = workspace->scope();
++    const QuantizedX q = quantize(input, w, tokens, *workspace, stream);
++    switch (tokens) {
++    case 1: launch_gemv<1>(q, w, packed, accumulate, stream); return;
++    case 2: launch_gemv<2>(q, w, packed, accumulate, stream); return;
++    case 3: launch_gemv<3>(q, w, packed, accumulate, stream); return;
++    case 4: launch_gemv<4>(q, w, packed, accumulate, stream); return;
++    default: break;
++    }
++    if (tokens <= kSmallTMaxTokens || w.n % t5_a8::kGemmRows != 0) {
++        switch ((std::min(tokens, kSmallTMaxTokens) + 7) / 8) {
++        case 1: launch_small_t<1>(q, w, tokens, packed, accumulate, stream); break;
++        case 2: launch_small_t<2>(q, w, tokens, packed, accumulate, stream); break;
++        case 3: launch_small_t<3>(q, w, tokens, packed, accumulate, stream); break;
++        default: launch_small_t<4>(q, w, tokens, packed, accumulate, stream); break;
++        }
++    } else if (tokens > t5_a8::kGemmTokens && w.n % t5_a8::kTallRows == 0 && chunked_outputs) {
++        launch_tall_gemm(q, w, tokens, packed, accumulate, stream);
++    } else {
++        launch_gemm(q, w, tokens, packed, accumulate, stream);
++    }
++}
++
++} // namespace
++
++void validate_t5_weight(const Weight& w, const char* op) {
++    if (w.qtype != QType::T5_G128_FP16 || w.layout != QuantLayout::RowSplit ||
++        w.scale_dtype != DType::FP16 || w.group_size != 128 || w.group != 128 ||
++        w.n <= 0 || w.k <= 0 || w.k % 1024 || w.ndim != 2 ||
++        w.shape[0] != w.n || w.shape[1] != w.k ||
++        w.padded_shape[0] != w.n || w.padded_shape[1] != w.k ||
++        w.qdata == nullptr || w.qhigh != nullptr || w.high_plane_bytes != 0 || w.scales == nullptr ||
++        (reinterpret_cast<std::uintptr_t>(w.qdata) & 15) ||
++        (reinterpret_cast<std::uintptr_t>(w.scales) & 15) || w.scale_nb[1] != w.k / 64) {
++        throw std::invalid_argument(std::string(op) +
++                                    ": weight must be T5_G128_FP16 ternary rows with K%1024=0");
++    }
++}
++
++std::size_t t5_workspace_capacity_bytes(LinearPolicy policy, std::int32_t input_rows,
++                                        std::int32_t max_tokens) {
++    if (input_rows <= 0 || input_rows % 1024 || max_tokens <= 0) {
++        throw std::invalid_argument("t5 workspace: requires K % 1024 == 0 and positive T");
++    }
++    if (!allows_a8(policy)) { throw std::invalid_argument("t5 workspace: requires AllowA8"); }
++    const std::size_t k = static_cast<std::size_t>(input_rows);
++    const std::size_t t = static_cast<std::size_t>(max_tokens);
++    return round_up_256(k * t) + 2 * round_up_256(k / 128 * t * 4) + round_up_256(k / 32 * t * 4);
++}
++
++void t5_project(const Tensor& x, const Weight& w, std::span<Tensor* const> outputs, bool accumulate,
++                LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream) {
++    validate_t5_weight(w, "t5_project");
++    require_input(x, w, "x");
++    project(t5_a8::PlainInput{static_cast<const __nv_bfloat16*>(x.data)}, x.ne[1], w, outputs,
++            accumulate, policy, workspace, stream);
++}
++
++
++} // namespace ninfer::ops::detail
+diff --git a/src/ops/linear/t5/t5_project.h b/src/ops/linear/t5/t5_project.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c2d099303c69d20354da1802f53407038f8f948
+--- /dev/null
++++ b/src/ops/linear/t5/t5_project.h
+@@ -0,0 +1,49 @@
++// Adapted from JGamboa/ninfer-4090-windows@e905787f (Apache-2.0); see NOTICE.
++#pragma once
++
++#include "core/arena.h"
++#include "core/tensor.h"
++#include "core/weight.h"
++#include "ninfer/ops/linear.h"
++
++#include <cuda_runtime.h>
++
++#include <cstddef>
++#include <cstdint>
++#include <span>
++
++namespace ninfer::ops::detail {
++
++// out_s = W x for a T5_G128_FP16 RowSplit weight W [N,K] and BF16 x [K,T] (K % 1024 == 0).
++// The N parent rows are written in order to BF16 outputs [rows_s, T] with contiguous rows (sum rows_s
++// == N, at most four), e.g. query/key/gate/value of one fused parent. With accumulate,
++// out_s += W x in FP32 before one BF16 rounding (the residual epilogue of linear_add). FP32
++// accumulation, one FP16 scale per 128-column group.
++//
++// A8 only: the policy must allow A8 and a workspace of t5_workspace_capacity_bytes is required.
++// x is quantized to int8 with one FP32 scale per token and 128-column group (t5_a8.cuh), then
++// multiplied in integer arithmetic: dp4a GEMV through T = 4, a small-T int8 MMA route through
++// T = 32 (weights read once per 32 tokens, K split over the warps of a 16-row CTA), the int8 MMA
++// prefill GEMM beyond (or 32-token small-T tiles when N % 64 != 0).
++// Existing fused producers supply the already rotated x. Through T = 4 the
++// quantization kernel also asks L2 for
++// the weight's first MiB of code rows, which the GEMV reads first. Graph-capturable: static grid
++// per (N, T), no host sync.
++void t5_project(const Tensor& x, const Weight& w, std::span<Tensor* const> outputs,
++                bool accumulate, LinearPolicy policy, WorkspaceArena* workspace,
++                cudaStream_t stream);
++
++// Transient bytes of t5_project for any T <= max_tokens: the int8 activation, its group scales
++// and group and slice sums. Requires a policy that allows A8.
++std::size_t t5_workspace_capacity_bytes(LinearPolicy policy, std::int32_t input_rows,
++                                        std::int32_t max_tokens);
++
++// Embedding gather from a T5_G128_FP16 table [vocab, K]: out[:, t] = row ids[t] of the logical
++// table, i.e. the decoded stored row z' or, with signs, S (H_1024 z') / 32 per
++// 1024-column block (the W' H S algebra of a rotated projection). ids I32 [T], out BF16 [K, T].
++void t5_embedding(const Tensor& ids, const Weight& table, const Tensor& signs, Tensor& out, cudaStream_t stream);
++
++// Throws unless w is a resident T5_G128_FP16 RowSplit view with K % 1024 == 0.
++void validate_t5_weight(const Weight& w, const char* op);
++
++} // namespace ninfer::ops::detail
+diff --git a/src/ops/linear_topk/linear_topk.cpp b/src/ops/linear_topk/linear_topk.cpp
+index bd597f891fccdffad026861ed81c2b5a0ce4c9fc..7605c61dfc3cb1ccbdc9ec3779d3433992466a26 100644
+--- a/src/ops/linear_topk/linear_topk.cpp
++++ b/src/ops/linear_topk/linear_topk.cpp
+@@ -1,3 +1,5 @@
++#include "ops/linear/t5/t5_project.h"
++
+ #include "core/weight.h"
+ #include "ninfer/ops/linear_topk.h"
+ 
+@@ -153,7 +155,7 @@ void require_t2(const Weight& head, std::int32_t rows) {
+         head.ndim == 2 && head.n == rows && head.k == detail::kLinearTopKHidden &&
+         head.shape[0] == head.n && head.shape[1] == head.k && head.padded_shape[0] == head.n &&
+         head.padded_shape[1] == head.k &&
+-        (head.qtype == QType::T2_G128_FP16
++        (head.qtype != QType::PTQ1_G128_FP16
+              ? head.qhigh == nullptr && head.high_plane_bytes == 0
+              : head.qhigh != nullptr && head.high_plane_bytes != 0) &&
+         aligned_to(head.qdata, 16) && aligned_to(head.scales, 16);
+@@ -248,6 +250,11 @@ void execute(const Tensor& hidden, const Weight& head, const Tensor* id_map, Ten
+         else if (profile == HeadProfile::Fp8Full)
+             detail::linear_topk_fp8_launch(x, head, detail::kLinearTopKFullValidRows, scratch,
+                                            stream);
++        else if (head.qtype == QType::T5_G128_FP16) {
++            Tensor* outputs[]{&logits};
++            detail::t5_project(x, head, outputs, false, LinearPolicy::AllowA8, &workspace, stream);
++            detail::linear_topk_logits_launch(logits, id_map != nullptr ? head.n : detail::kLinearTopKFullValidRows, id_map, scratch, stream);
++        }
+         else if (profile == HeadProfile::T2)
+             detail::linear_topk_t2_launch(
+                 x, head, id_map != nullptr ? head.n : detail::kLinearTopKFullValidRows, id_map,
+@@ -285,6 +292,9 @@ std::size_t linear_topk_workspace_capacity_bytes(QType qtype, std::int32_t head_
+         (void)layout.alloc(DType::BF16, {head_rows, columns}, 256);
+         (void)detail::allocate_linear_topk_workspace(layout, head_rows, columns, plan.rows,
+                                                      plan.tile, plan.block_k);
++        if (qtype == QType::T5_G128_FP16) {
++            (void)layout.alloc_bytes(detail::t5_workspace_capacity_bytes(LinearPolicy::AllowA8, input_rows, columns));
++        }
+         if (profile == HeadProfile::Gguf) {
+             const detail::GgufShape shape{qtype, head_rows, input_rows};
+             (void)layout.alloc_bytes(detail::gguf_project_workspace_bytes(
+diff --git a/src/ops/weight_input.cpp b/src/ops/weight_input.cpp
+index ce7004a9ac8c209ece1bfcb77fe51b1d2c267dad..b12e9ec98c69242f00b48b9311a9a3fae2633543 100644
+--- a/src/ops/weight_input.cpp
++++ b/src/ops/weight_input.cpp
+@@ -218,7 +218,9 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool
+                          first.weight.qtype == second.weight.qtype;
+     require(q4_q5 || ternary,
+             "input projection: requires Q4/Q5 or two ternary parents of the same format");
+-    return PairedProjectionWeights{first.weight, second.weight, LinearPolicy::A16Only,
++    const auto pair_policy = first.weight.qtype == QType::T5_G128_FP16
++                                 ? common_policy(inputs) : LinearPolicy::A16Only;
++    return PairedProjectionWeights{first.weight, second.weight, pair_policy,
+                                    common_signs(inputs)};
+ }
+ 
+diff --git a/src/ops/wrapper/attn_input_proj.cpp b/src/ops/wrapper/attn_input_proj.cpp
+index 2e81c90b43fae1186dce8f0d92bf30e58c4ab665..52064a8c91a9b1eb82e2ad8ad64609c3197126f2 100644
+--- a/src/ops/wrapper/attn_input_proj.cpp
++++ b/src/ops/wrapper/attn_input_proj.cpp
+@@ -1,3 +1,5 @@
++#include "ops/linear/t5/t5_project.h"
++
+ #include "core/weight.h"
+ #include "core/weight_view.h"
+ #include "ninfer/ops/attn_input_proj.h"
+@@ -52,7 +54,7 @@ void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, cons
+     const bool q4_planes = qtype != QType::Q4_G64_FP16 || no_high;
+     const bool ternary = is_ternary(qtype);
+     const bool t2_planes = !ternary ||
+-        (weight.qtype == QType::T2_G128_FP16 ? no_high
++        (weight.qtype != QType::PTQ1_G128_FP16 ? no_high
+          : (weight.qhigh != nullptr && weight.high_plane_bytes != 0));
+     const bool q5_planes =
+         qtype != QType::Q5_G64_FP16 || (weight.qhigh != nullptr && weight.high_plane_bytes != 0);
+@@ -356,6 +358,13 @@ bool t2_pair_project(const Tensor& x, const Weight& query_key_weight,
+     require_matrix(v, kKvRows, cols, "v");
+     require_rowsplit(query_key_weight, QType::T2_G128_FP16, kQRows + kKvRows, "query/key weight");
+     require_rowsplit(gate_value_weight, QType::T2_G128_FP16, kQRows + kKvRows, "gate/value weight");
++    if (query_key_weight.qtype == QType::T5_G128_FP16) {
++        Tensor* first[]{&q, &k};
++        Tensor* second[]{&gate, &v};
++        detail::t5_project(x, query_key_weight, first, false, policy, workspace, stream);
++        detail::t5_project(x, gate_value_weight, second, false, policy, workspace, stream);
++        return true;
++    }
+     if (workspace != nullptr && detail::sm70::covers(query_key_weight, cols) &&
+         detail::sm70::covers(gate_value_weight, cols)) {
+         sm70_split(x, query_key_weight, {&q, &k}, &gate_value_weight, {&gate, &v}, policy,
+diff --git a/src/ops/wrapper/embedding.cpp b/src/ops/wrapper/embedding.cpp
+index 334b77dc30dbe6eb4eede8a17b4764f322d219fe..b99f6a4a24219a6fa873332914468106a85d7fcb 100644
+--- a/src/ops/wrapper/embedding.cpp
++++ b/src/ops/wrapper/embedding.cpp
+@@ -4,6 +4,7 @@
+ #include "ops/common/math.h"
+ #include "ops/linear/gguf/gguf_linear.h"
+ #include "ops/linear/fp8/fp8_format.h"
++#include "ops/linear/t5/t5_project.h"
+ #include "ops/launcher/embed_gather.h" // detail::embed_gather_*_launch
+ #include "core/weight_view.h"
+ 
+@@ -247,6 +248,13 @@ void embedding(const Tensor& ids, const Weight& table, Tensor& out, cudaStream_t
+         return;
+     }
+     switch (table.qtype) {
++    case QType::T5_G128_FP16:
++        detail::validate_t5_weight(table, "embedding");
++        if (table.k != out.ne[0]) { throw std::invalid_argument("embedding: T5 table d must match out"); }
++        if (is_empty_T(ids, out)) { return; }
++        require_non_empty_tensors(ids, out);
++        detail::t5_embedding(ids, table, Tensor{}, out, stream);
++        break;
+     case QType::BF16: {
+         require_dense_metadata(table, out);
+         if (is_empty_T(ids, out)) { return; }
+diff --git a/src/ops/wrapper/gdn_input_proj.cpp b/src/ops/wrapper/gdn_input_proj.cpp
+index 3b2f9b82a1b857385360b2c048fc806bd79fe999..74e9c55d3984a7c2f8f802a0868bd877521f31b0 100644
+--- a/src/ops/wrapper/gdn_input_proj.cpp
++++ b/src/ops/wrapper/gdn_input_proj.cpp
+@@ -1,3 +1,5 @@
++#include "ops/linear/t5/t5_project.h"
++
+ #include "core/weight.h"
+ #include "core/weight_view.h"
+ #include "ninfer/ops/gdn_input_proj.h"
+@@ -269,7 +271,7 @@ void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, cons
+     const bool q4_planes = qtype != QType::Q4_G64_FP16 || no_high;
+     const bool ternary = is_ternary(qtype);
+     const bool t2_planes = !ternary ||
+-        (weight.qtype == QType::T2_G128_FP16 ? no_high
++        (weight.qtype != QType::PTQ1_G128_FP16 ? no_high
+          : (weight.qhigh != nullptr && weight.high_plane_bytes != 0));
+     const bool q5_planes =
+         qtype != QType::Q5_G64_FP16 || (weight.qhigh != nullptr && weight.high_plane_bytes != 0);
+@@ -882,6 +884,15 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
+     require_matrix(z, kZRows, cols, "z");
+     require_rowsplit(qk_weight, QType::T2_G128_FP16, kQkRows, "qk weight");
+     require_rowsplit(value_z_weight, QType::T2_G128_FP16, kValueRows + kZRows, "value/z weight");
++    if (qk_weight.qtype == QType::T5_G128_FP16) {
++        Tensor qk = qkv.slice(0, 0, kQkRows);
++        Tensor value = qkv.slice(0, kQkRows, kValueRows);
++        Tensor* first[]{&qk};
++        Tensor* second[]{&value, &z};
++        detail::t5_project(x, qk_weight, first, false, policy, &workspace, stream);
++        detail::t5_project(x, value_z_weight, second, false, policy, &workspace, stream);
++        return;
++    }
+     if (sm70_takes(x, qk_weight, &value_z_weight)) {
+         sm70_project_gdn(x, qk_weight, &value_z_weight, qkv, z, policy, workspace, stream);
+         return;
+@@ -917,6 +928,9 @@ void t2_two_parent_project(const Tensor& x, const Weight& qk_weight, const Weigh
+ std::size_t t2_two_parent_projection_bytes(std::int32_t min_columns, std::int32_t max_columns,
+                                            LinearPolicy policy = LinearPolicy::A16Only,
+                                            QType qtype = QType::T2_G128_FP16) {
++    if (qtype == QType::T5_G128_FP16) {
++        return detail::t5_workspace_capacity_bytes(policy, 5120, max_columns);
++    }
+     // sm_70 projects both parents through its own routes at every width.
+     if (detail::sm70::enabled() && qtype == QType::T2_G128_FP16) {
+         return sm70_projection_bytes(QType::T2_G128_FP16, QType::T2_G128_FP16, 12288, 5120,
+diff --git a/src/ops/wrapper/linear_add.cpp b/src/ops/wrapper/linear_add.cpp
+index 229d5e89b19d182a558d90fc96f6a1b3ea633838..2c4a18ea3b4184d3e986d12dfbe4d416d46f74fa 100644
+--- a/src/ops/wrapper/linear_add.cpp
++++ b/src/ops/wrapper/linear_add.cpp
+@@ -1,3 +1,5 @@
++#include "ops/linear/t5/t5_project.h"
++
+ #include "core/layout.h"
+ #include "core/weight.h"
+ #include "ninfer/ops/linear.h"
+@@ -148,6 +150,10 @@ std::size_t linear_add_route_workspace_bytes(QType qtype, std::int32_t output_ro
+         const detail::GgufShape shape{qtype, output_rows, input_rows};
+         return detail::gguf_project_workspace_bytes({&shape, 1}, min_tokens, max_tokens);
+     }
++    if (qtype == QType::T5_G128_FP16) {
++        if (output_rows <= 0) { throw std::invalid_argument("linear_add workspace: T5 rows must be positive"); }
++        return detail::t5_workspace_capacity_bytes(policy, input_rows, max_tokens);
++    }
+     if (is_ternary(qtype)) {
+         (void)linear_workspace_capacity_bytes(qtype, output_rows, input_rows, LinearPolicy::A16Only,
+                                               min_tokens, max_tokens);
+@@ -249,6 +255,11 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
+         return;
+     }
+ 
++    if (w.qtype == QType::T5_G128_FP16) {
++        Tensor* outputs[]{&residual_out};
++        detail::t5_project(x, w, outputs, true, policy, &ws, stream);
++        return;
++    }
+     if (is_ternary(w.qtype)) {
+         if (detail::t2_a8_admits(policy) && detail::t2_a8_supported(w, t)) {
+             detail::t2_a8_linear_add(x, w, residual_out, ws, stream);
+diff --git a/src/ops/wrapper/linear_swiglu.cpp b/src/ops/wrapper/linear_swiglu.cpp
+index bb6bc13c3f14c8bb6fb41912b4c478860abcb59b..42be4d3be779a2108826ed326db8807bcefb4ef4 100644
+--- a/src/ops/wrapper/linear_swiglu.cpp
++++ b/src/ops/wrapper/linear_swiglu.cpp
+@@ -1,3 +1,5 @@
++#include "ops/linear/t5/t5_project.h"
++
+ #include "core/layout.h"
+ #include "core/weight.h"
+ #include "core/weight_view.h"
+@@ -62,6 +64,13 @@ std::size_t linear_swiglu_route_workspace_bytes(QType qtype, std::int32_t gate_u
+         const detail::GgufShape parent{qtype, gate_up_rows, input_rows};
+         return detail::gguf_swiglu_workspace_bytes(parent, nullptr, min_tokens, max_tokens);
+     }
++    if (qtype == QType::T5_G128_FP16) {
++        if (gate_up_rows <= 0) { throw std::invalid_argument("linear_swiglu workspace: T5 rows must be positive"); }
++        WorkspaceLayoutBuilder layout;
++        (void)layout.alloc(DType::BF16, {gate_up_rows, max_tokens});
++        (void)layout.alloc_bytes(detail::t5_workspace_capacity_bytes(policy, input_rows, max_tokens));
++        return layout.peak_bytes(1);
++    }
+     if (is_ternary(qtype)) {
+         (void)linear_workspace_capacity_bytes(qtype, gate_up_rows, input_rows,
+                                               LinearPolicy::A16Only, min_tokens, max_tokens);
+@@ -201,7 +210,7 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
+     const bool nvfp4_weight = large_shape && gate_up_weight.qtype == QType::NVFP4;
+     const bool fp8_weight   = large_shape && gate_up_weight.qtype == QType::FP8_E4M3FN_ROW_BF16;
+     const bool t2_weight    = large_shape && is_ternary(gate_up_weight.qtype) &&
+-                              (gate_up_weight.qtype == QType::T2_G128_FP16
++                              (gate_up_weight.qtype != QType::PTQ1_G128_FP16
+                                    ? gate_up_weight.qhigh == nullptr && gate_up_weight.high_plane_bytes == 0
+                                    : gate_up_weight.qhigh != nullptr && gate_up_weight.high_plane_bytes != 0) &&
+                               common_row_split;
+@@ -220,10 +229,14 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
+ 
+     if (t2_weight) {
+         // Ternary rows project gate and up into one plane; SwiGLU is a separate elementwise pass
+-        // over its two halves. A16 by construction.
++        // over its two halves. T5 uses the artifact's A8 permission; older formats retain A16.
+         auto scope     = ws.scope();
+         Tensor gate_up = ws.alloc(DType::BF16, {gate_up_weight.n, t});
+-        linear(x, gate_up_weight, gate_up, stream);
++        if (gate_up_weight.qtype == QType::T5_G128_FP16) {
++            linear(x, gate_up_weight, gate_up, policy, ws, stream);
++        } else {
++            linear(x, gate_up_weight, gate_up, stream);
++        }
+         const Tensor gate = gate_up.slice(0, 0, out.ne[0]);
+         const Tensor up   = gate_up.slice(0, out.ne[0], out.ne[0]);
+         silu_mul(gate, up, out, stream);
+diff --git a/tests/artifact/test_t5.py b/tests/artifact/test_t5.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb141b5e06c3d4a54dd349ab17b8a32d91eb5028
+--- /dev/null
++++ b/tests/artifact/test_t5.py
+@@ -0,0 +1,89 @@
++import numpy as np
++import pytest
++import torch
++
++from tools.artifact.codecs.t5 import pack, unpack
++from tools.artifact.codecs.row_split import encode_row_split, decode_row_split_codes
++from tools.artifact.layouts import row_split_geometry
++from tools.convert.sources.gguf import encode_ptq1_0, decode_ptq1_0
++
++
++def reference_pack(values):
++    out = []
++    for unit in values.reshape(-1,64):
++        for byte in range(13):
++            v=0
++            for stage in range(5):
++                column=20*(byte//4)+4*stage+byte%4 if byte<12 else 60+stage
++                digit=int(unit[column])+1 if column<64 else 0
++                v=3*v+digit
++            out.append((256*v+242)//243)
++    return bytes(out)
++
++
++def test_all_codewords_and_exact_ptq1_repack():
++    rng=np.random.default_rng(7501)
++    values=rng.integers(-1,2,(243,2,128),dtype=np.int8)
++    for v in range(243):
++        for stage in range(5):
++            values[v,0,4*stage]=v//3**(4-stage)%3-1
++    scales=rng.standard_normal((243,2)).astype(np.float16)
++    scales[0]=[np.float16(-0.0),np.nextafter(np.float16(0),np.float16(1))]
++    gguf=encode_ptq1_0(values,scales)
++    decoded=decode_ptq1_0(gguf)
++    packed=pack(torch.from_numpy(decoded.values.reshape(-1,128)))
++    assert packed.numpy().tobytes()==reference_pack(values)
++    assert torch.equal(unpack(packed),torch.from_numpy(values.reshape(-1,128)))
++    payload=encode_row_split(torch.from_numpy(values),torch.from_numpy(scales),'t5_g128_fp16',(243,256))
++    actual_scales,actual_codes=decode_row_split_codes(payload,'t5_g128_fp16',(243,256))
++    assert torch.equal(actual_codes,torch.from_numpy(values))
++    assert torch.equal(actual_scales.view(torch.int16),torch.from_numpy(scales).view(torch.int16))
++    g=row_split_geometry('t5_g128_fp16',(243,256))
++    assert g.base_bytes_per_group==26 and g.high_bytes_per_group==0
++
++
++def test_bad_codes_geometry_and_padding():
++    with pytest.raises(ValueError):
++        pack(torch.full((1,128),2,dtype=torch.int8))
++    with pytest.raises(ValueError):
++        row_split_geometry('t5_g128_fp16',(3,129))
++    valid=pack(torch.zeros((1,128),dtype=torch.int8))
++    for byte in (255,1):
++        bad=valid.clone(); bad[0,12]=byte
++        with pytest.raises(ValueError): unpack(bad)
++
++
++def test_repack_preserves_bindings_auxiliaries_and_companion(tmp_path):
++    from tools.artifact.reader import Artifact
++    from tools.artifact.writer import ArtifactWriter
++    from tools.artifact.schema import TensorSpec, ResourceSpec
++    from tools.convert.repack_t5 import repack
++
++    source, dest = tmp_path/'source.ninfer', tmp_path/'t5.ninfer'
++    codes = torch.arange(4*1024, dtype=torch.int32).remainder(3).sub(1).to(torch.int8).reshape(4,8,128)
++    scales = torch.arange(32, dtype=torch.float16).reshape(4,8)/128
++    payload = encode_row_split(codes, scales, 'ptq1_g128_fp16', (4,1024))
++    specs = [TensorSpec('w',(4,1024),'ptq1_g128_fp16','row_split_k128_v1'),
++             TensorSpec('mtp',(2,2),'bf16','contiguous_le_v1'), ResourceSpec('template',5)]
++    bindings = {'text/weight':{'object':'w'},
++                'text/parts':{'parts':[{'object':'w','range':[2048,4096]},
++                                      {'object':'w','range':[0,2048]}]},
++                'mtp/weight':{'object':'mtp'}}
++    uses = [{'parameter':p,'input':p+'/input','activation_policy':'A16Only'} for p in bindings]
++    components = {'text':{'config':{},'resources':{'chat_template.jinja':'template'}},'mtp':{'config':{}}}
++    with ArtifactWriter(source,specs,components=components,bindings=bindings,uses=uses) as writer:
++        writer.write_object('w',payload)
++        writer.write_object('mtp',bytes(range(8)))
++        writer.write_object('template',b'hello')
++    before=source.read_bytes()
++    report=repack(source,dest)
++    assert report['verified'] and source.read_bytes()==before
++    with Artifact(dest) as converted:
++        assert converted.directory.bindings==bindings
++        assert converted.directory.components==components
++        assert [u['activation_policy'] for u in converted.directory.uses]==['AllowA8','AllowA8','A16Only']
++        assert converted.read_object('mtp')==bytes(range(8))
++        assert converted.read_object('template')==b'hello'
++        actual_scales,actual_codes=decode_row_split_codes(converted.read_object('w'),'t5_g128_fp16',(4,1024))
++        assert torch.equal(actual_codes,codes)
++        assert torch.equal(actual_scales.view(torch.int16),scales.view(torch.int16))
+diff --git a/tests/ops/linear/test_t5.cpp b/tests/ops/linear/test_t5.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..45a7c8af795c22e0ef8623f5ac1c9ae0a99f583e
+--- /dev/null
++++ b/tests/ops/linear/test_t5.cpp
+@@ -0,0 +1,424 @@
++// T5_G128_FP16 (base-3) projections and embedding against an FP64 oracle from the format
++// weight (n, k) = (code - 1) * scale[n][k / 128],
++// code = (codes[n][k / 4] >> 2 * (k % 4)) & 3. The weight is built through the production
++// geometry and native Weight view, including a row view of a fused parent.
++#include "core/device.h"
++#include "core/weight_view.h"
++#include "ninfer/ops/attn_input_proj.h"
++#include "ninfer/ops/embedding.h"
++#include "ninfer/ops/linear.h"
++#include "ninfer/ops/linear_add.h"
++#include "ninfer/ops/linear_topk.h"
++#include "ninfer/ops/linear_swiglu.h"
++#include "ninfer/ops/gdn_input_proj.h"
++#include "ninfer/ops/hadamard_transform.h"
++#include "ops/linear/t5/t5_project.h"
++#include "ops/op_tester.h"
++
++#include <cuda_fp16.h>
++
++#include <array>
++#include <algorithm>
++#include <bit>
++#include <cmath>
++#include <cstring>
++#include <cstdint>
++#include <iostream>
++#include <stdexcept>
++#include <random>
++#include <string>
++#include <vector>
++
++using namespace ninfer;
++using namespace ninfer::test;
++
++namespace {
++
++// One BF16 unit roundoff in relative L2; gross error covers final BF16 storage (A16 criterion).
++constexpr ReductionCriterion kA16{1.0 / 256.0, 1.0 / 256.0, 2.0 / 256.0};
++// The shared Linear A8 criterion: activation quantization allowance plus BF16 storage.
++constexpr ReductionCriterion kA8{0.04, 1.0 / 256.0, 0.06};
++
++ReductionCriterion criterion(ops::LinearPolicy policy) {
++    return ops::allows_a8(policy) ? kA8 : kA16;
++}
++
++const char* policy_name(ops::LinearPolicy policy) {
++    return ops::allows_a8(policy) ? " A8" : " A16";
++}
++
++struct Ternary {
++    std::int32_t n = 0, k = 0;
++    std::vector<std::uint8_t> code;  // [n][k] in {0, 1, 2}
++    std::vector<float> scale;        // [n][k / 128], FP16-representable
++    std::vector<std::byte> payload;  // RowSplit, base-3 codes
++    WeightGeometry geometry;
++    DeviceBuffer device;
++    WeightParent parent;
++
++    Ternary(std::int32_t rows, std::int32_t columns, std::uint32_t seed) : n(rows), k(columns) {
++        std::mt19937 rng(seed);
++        code.resize(std::size_t(n) * k);
++        scale.resize(std::size_t(n) * (k / 128));
++        for (auto& c : code) c = static_cast<std::uint8_t>(rng() % 3);
++        std::uniform_real_distribution<float> magnitude(0.002f, 0.05f);
++        for (auto& s : scale) s = __half2float(__float2half(magnitude(rng)));
++        if (n == 248320) {
++            // Exactly represented integer logits, with deliberate ties and ample score gaps.
++            // This makes top-k ordering an exact oracle instead of treating near-tie floating
++            // differences in a random full-vocabulary dot product as a ranking defect.
++            std::fill(scale.begin(), scale.end(), 0.0f);
++            for (int j = 0; j < 32; ++j) {
++                const int row = 37 + 7919 * j;
++                std::fill_n(code.begin() + std::size_t(row) * k, 128, std::uint8_t{2});
++                scale[std::size_t(row) * (k / 128)] = float(j / 2 + 1) / 128.0f;
++            }
++            // A deliberately dominant padding row must never enter the public vocabulary.
++            std::fill(code.end() - k, code.end(), std::uint8_t{2});
++            scale[std::size_t(n - 1) * (k / 128)] = 8.0f;
++        }
++        const std::array<std::uint64_t, 2> shape{std::uint64_t(n), std::uint64_t(k)};
++        geometry = weight_geometry(QType::T5_G128_FP16, QuantLayout::RowSplit, shape);
++        payload.assign(geometry.bytes, std::byte{0});
++        for (std::int32_t row = 0; row < n; ++row) {
++            // Base-3 units (design doc 9.1): byte i < 12 of unit u, g = i / 4, j = i % 4, holds
++            // t_m = c[64 u + 20 g + 4 m + j]; byte 12 holds c[64 u + 60 + m] (m < 4) and t_4 = 0.
++            // q = ceil(256 v / 243), v = sum_m t_m 3^(4 - m).
++            const std::uint8_t* c = &code[std::size_t(row) * k];
++            for (std::int32_t unit = 0; unit < k / 64; ++unit) {
++                for (int i = 0; i < 13; ++i) {
++                    int v = 0;
++                    for (int m = 0; m < 5; ++m) {
++                        const int column = i < 12 ? 20 * (i / 4) + 4 * m + i % 4 : 60 + m;
++                        v = 3 * v + (i < 12 || m < 4 ? c[64 * unit + column] : 0);
++                    }
++                    payload[std::size_t(row) * (k / 64 * 13) + unit * 13 + i] =
++                        std::byte((256 * v + 242) / 243);
++                }
++            }
++            for (std::int32_t group = 0; group < k / 128; ++group) {
++                const __half h = __float2half(scale[std::size_t(row) * (k / 128) + group]);
++                std::memcpy(&payload[geometry.scale_offset + (std::size_t(row) * (k / 128) + group) * 2],
++                            &h, 2);
++            }
++        }
++        device = DeviceBuffer(payload.size());
++        device.copy_from_host(payload.data(), payload.size());
++        parent = {geometry, static_cast<const std::byte*>(device.p)};
++    }
++
++    // Prism rotation: the weight multiplies (1/32) H (signs * x) per 1024-column block.
++    std::vector<float> signs;
++    DeviceBuffer device_signs;
++
++    void rotate(std::uint32_t seed) {
++        std::mt19937 rng(seed);
++        signs.resize(std::size_t(k));
++        for (auto& sign : signs) sign = rng() & 1 ? 1.0f : -1.0f;
++        device_signs = to_device_bf16(signs);
++    }
++
++    Weight rows(std::int32_t first, std::int32_t count) const {
++        Weight view = native_weight(WeightView{{std::uint64_t(count), std::uint64_t(k)},
++                                               {{&parent, std::uint64_t(first) * k,
++                                                 std::uint64_t(first + count) * k}}});
++        return view;
++    }
++
++    double weight(std::int32_t row, std::int32_t column) const {
++        return (double(code[std::size_t(row) * k + column]) - 1.0) *
++               scale[std::size_t(row) * (k / 128) + column / 128];
++    }
++};
++
++std::vector<float> activation(std::int32_t k, std::int32_t t, std::uint32_t seed) {
++    std::vector<float> x(std::size_t(k) * t);
++    fill_uniform(x, seed, -4.0f, 4.0f);
++    round_to_bf16(x);
++    return x;
++}
++
++// The weight's input: the logical input itself, or its Prism rotation (1/32) H (signs * input)
++// with the Sylvester Walsh-Hadamard matrix H[r][c] = (-1)^popcount(r & c) of every 1024-column
++// block, FP64.
++std::vector<double> weight_input(const Ternary& w, std::vector<double> input, std::int32_t t) {
++    if (w.signs.empty()) return input;
++    std::vector<double> rotated(input.size());
++    for (std::int32_t token = 0; token < t; ++token) {
++        for (std::int32_t block = 0; block < w.k; block += 1024) {
++            const std::size_t base = std::size_t(token) * w.k + block;
++            for (int r = 0; r < 1024; ++r) {
++                double sum = 0;
++                for (int c = 0; c < 1024; ++c) {
++                    const double term = input[base + c] * w.signs[block + c];
++                    sum += std::popcount(unsigned(r & c)) & 1 ? -term : term;
++                }
++                rotated[base + r] = sum / 32.0;
++            }
++        }
++    }
++    return rotated;
++}
++
++// out[t][r] = sum_c W[first + r][c] input[t][c] for the weight input [T][K], FP64.
++std::vector<double> project(const Ternary& w, std::int32_t first, std::int32_t rows,
++                            const std::vector<double>& input, std::int32_t t) {
++    std::vector<double> out(std::size_t(rows) * t), row(std::size_t(w.k));
++    for (std::int32_t r = 0; r < rows; ++r) {
++        for (std::int32_t c = 0; c < w.k; ++c) row[c] = w.weight(first + r, c);
++        for (std::int32_t token = 0; token < t; ++token) {
++            const double* x = &input[std::size_t(token) * w.k];
++            double sum      = 0;
++            for (std::int32_t c = 0; c < w.k; ++c) sum += row[c] * x[c];
++            out[std::size_t(token) * rows + r] = sum;
++        }
++    }
++    return out;
++}
++
++std::vector<double> oracle(const Ternary& w, std::int32_t first, std::int32_t rows,
++                           const std::vector<float>& x, std::int32_t t) {
++    return project(w, first, rows, weight_input(w, std::vector<double>(x.begin(), x.end()), t), t);
++}
++
++int linear_case(const Ternary& w, std::int32_t first, std::int32_t rows, std::int32_t t,
++                bool graph, ops::LinearPolicy policy = ops::LinearPolicy::AllowA8) {
++    auto x = activation(w.k, t, 17u * t + rows);
++    auto device_x = to_device_bf16(x);
++    GuardedDeviceBuffer out(std::size_t(rows) * t * 2);
++    Tensor tx(device_x.p, DType::BF16, {w.k, t});
++    Tensor to(out.data(), DType::BF16, {rows, t});
++    const Weight view = w.rows(first, rows);
++    DeviceArena workspace(
++        ops::linear_workspace_capacity_bytes(QType::T5_G128_FP16, rows, w.k, policy, 1, t));
++    if (graph) {
++        cudaStream_t stream;
++        cudaGraph_t captured;
++        cudaGraphExec_t executable;
++        CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
++        CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
++        ops::linear(tx, view, to, policy, workspace, stream);
++        CUDA_CHECK(cudaStreamEndCapture(stream, &captured));
++        CUDA_CHECK(cudaGraphInstantiate(&executable, captured, nullptr, nullptr, 0));
++        CUDA_CHECK(cudaGraphLaunch(executable, stream));
++        CUDA_CHECK(cudaStreamSynchronize(stream));
++        x = activation(w.k, t, 29u * t + rows);
++        std::vector<std::uint16_t> updated(x.size());
++        for (std::size_t i=0; i<x.size(); ++i) updated[i]=f32_to_bf16(x[i]);
++        device_x.copy_from_host(updated.data(), updated.size() * 2);
++        CUDA_CHECK(cudaGraphLaunch(executable, stream));
++        CUDA_CHECK(cudaStreamSynchronize(stream));
++        CUDA_CHECK(cudaGraphExecDestroy(executable));
++        CUDA_CHECK(cudaGraphDestroy(captured));
++        CUDA_CHECK(cudaStreamDestroy(stream));
++    } else {
++        ops::linear(tx, view, to, policy, workspace, nullptr);
++        cuda_synchronize();
++    }
++    if (workspace.used() != 0) throw std::runtime_error("workspace leak");
++    const std::string label = "t5 linear [" + std::to_string(rows) + "," + std::to_string(w.k) +
++                              "] rows+" + std::to_string(first) + " T=" + std::to_string(t) +
++                              policy_name(policy);
++    return verify_reduction(label, from_device_bf16(out.data(), std::size_t(rows) * t),
++                            oracle(w, first, rows, x, t), criterion(policy)) +
++           out.verify_guards(label.c_str());
++}
++
++int linear_add_case(const Ternary& w, std::int32_t t,
++                    ops::LinearPolicy policy = ops::LinearPolicy::AllowA8) {
++    const auto x        = activation(w.k, t, 91u + t);
++    auto residual_value = activation(w.n, t, 92u + t);
++    auto expected       = oracle(w, 0, w.n, x, t);
++    for (std::size_t i = 0; i < expected.size(); ++i) expected[i] += residual_value[i];
++    auto device_x        = to_device_bf16(x);
++    auto device_residual = to_device_bf16(residual_value);
++    Tensor tx(device_x.p, DType::BF16, {w.k, t});
++    Tensor tr(device_residual.p, DType::BF16, {w.n, t});
++    DeviceArena workspace(
++        ops::linear_add_workspace_capacity_bytes(QType::T5_G128_FP16, w.n, w.k, policy, 1, t));
++    ops::linear_add(tx, w.rows(0, w.n), tr, policy, workspace, nullptr);
++    cuda_synchronize();
++    return verify_reduction("t5 linear_add [" + std::to_string(w.n) + "," + std::to_string(w.k) +
++                                "] T=" + std::to_string(t) + policy_name(policy),
++                            from_device_bf16(device_residual.p, expected.size()), expected,
++                            criterion(policy));
++}
++
++// Embedding gather: the logical row ids[t] of the table, i.e. the decoded stored row or, for a
++// rotated table, signs * H(z') / 32 per 1024-column block (FP64 Sylvester oracle).
++int embedding_case(const Ternary& w, const std::vector<std::int32_t>& ids) {
++    // A row of the logical table W' H S is (z' H) S: the signs follow the butterfly.
++    const auto t = static_cast<std::int32_t>(ids.size());
++    std::vector<double> expected(std::size_t(w.k) * t);
++    for (std::int32_t token = 0; token < t; ++token) {
++        for (std::int32_t block = 0; block < w.k; block += 1024) {
++            for (int r = 0; r < 1024; ++r) {
++                double value = w.weight(ids[token], block + r);
++                if (!w.signs.empty()) {
++                    double sum = 0;
++                    for (int c = 0; c < 1024; ++c) {
++                        const double term = w.weight(ids[token], block + c);
++                        sum += std::popcount(unsigned(r & c)) & 1 ? -term : term;
++                    }
++                    value = sum / 32.0 * w.signs[block + r];
++                }
++                expected[std::size_t(token) * w.k + block + r] = value;
++            }
++        }
++    }
++    DeviceBuffer device_ids(ids.size() * 4);
++    device_ids.copy_from_host(ids.data(), ids.size() * 4);
++    GuardedDeviceBuffer out(std::size_t(w.k) * t * 2);
++    Tensor tids(device_ids.p, DType::I32, {t});
++    Tensor tout(out.data(), DType::BF16, {w.k, t});
++    Tensor signs(w.device_signs.p, DType::BF16, {w.k});
++    if (w.signs.empty()) {
++        ops::embedding(tids, w.rows(0, w.n), tout, nullptr);
++    } else {
++        ops::embedding_rotated(tids, w.rows(0, w.n), signs, tout, nullptr);
++    }
++    cuda_synchronize();
++    const std::string label = std::string("t5 embedding") + (w.signs.empty() ? "" : " rotated") +
++                              " T=" + std::to_string(t);
++    return verify_reduction(label, from_device_bf16(out.data(), expected.size()), expected, kA16) +
++           out.verify_guards(label.c_str());
++}
++
++} // namespace
++
++
++int main() {
++    if (cuda_unavailable()) return 77;
++    int failures = 0;
++    const Ternary small(301, 3072, 15);
++    for (int t : {1,2,3,4,5,8,9,16,17,24,25,32,33,65})
++        failures += linear_case(small,0,301,t,t==3 || t==9);
++    failures += linear_case(small,44,200,6,false);
++    const Ternary tile(384, 5120, 18);
++    for(int t : {32,33,64,65,127,128,129,193,256})
++        failures += linear_case(tile,0,384,t,t==65 || t==129);
++    // Real reduction widths and row views, including the tallest gate/up parent.
++    for (const auto [n,k] : std::array<std::pair<int,int>,4>{{
++        {5120,6144},{5120,17408},{16384,5120},{34816,5120}}}) {
++        const Ternary w(n,k,3000u+n+k);
++        for(int t : {1,4,9}) failures += linear_case(w,0,n,t,t==4);
++        if(n==5120) failures += linear_add_case(w,3);
++    }
++    // Same split-parent layout as production, including GDN's strided qkv destinations.
++    for(int t : {1,4,9,65}) {
++        const Ternary first(4096,5120,71), second(12288,5120,72);
++        auto x=activation(5120,t,73+t); auto dx=to_device_bf16(x);
++        GuardedDeviceBuffer dqkv(std::size_t(10240)*t*2), dz(std::size_t(6144)*t*2);
++        Tensor tx(dx.p,DType::BF16,{5120,t}), qkv(dqkv.data(),DType::BF16,{10240,t}),
++               z(dz.data(),DType::BF16,{6144,t});
++        auto policy=ops::LinearPolicy::AllowA8;
++        const auto bytes=ops::gdn_input_proj_split_workspace_capacity_bytes(
++            QType::T5_G128_FP16,4096,QType::T5_G128_FP16,12288,5120,policy,t,t);
++        DeviceArena ws(bytes);
++        ops::gdn_input_proj(tx,first.rows(0,4096),second.rows(0,12288),qkv,z,policy,ws,nullptr);
++        cuda_synchronize();
++        const auto a=oracle(first,0,4096,x,t), b=oracle(second,0,6144,x,t);
++        std::vector<double> expected(std::size_t(10240)*t);
++        for(int c=0;c<t;++c) {
++            std::copy_n(a.data()+c*4096,4096,expected.data()+c*10240);
++            std::copy_n(b.data()+c*6144,6144,expected.data()+c*10240+4096);
++        }
++        failures += verify_reduction("T5 GDN qkv",from_device_bf16(dqkv.data(),expected.size()),expected,kA8);
++        failures += verify_reduction("T5 GDN z",from_device_bf16(dz.data(),std::size_t(6144)*t),oracle(second,6144,6144,x,t),kA8);
++        failures += dqkv.verify_guards("T5 GDN qkv") + dz.verify_guards("T5 GDN z");
++        if(ws.used()!=0 || ws.peak_used()>bytes) ++failures;
++    }
++    // Split attention output order and composed SwiGLU, independent FP64 references.
++    for (int t : {1, 5, 33, 65}) {
++        const Ternary qk(7168,5120,81), gv(7168,5120,82);
++        auto x=activation(5120,t,83+t); auto dx=to_device_bf16(x);
++        Tensor tx(dx.p,DType::BF16,{5120,t});
++        std::array<GuardedDeviceBuffer,4> storage{
++            GuardedDeviceBuffer(std::size_t(6144)*t*2), GuardedDeviceBuffer(std::size_t(6144)*t*2),
++            GuardedDeviceBuffer(std::size_t(1024)*t*2), GuardedDeviceBuffer(std::size_t(1024)*t*2)};
++        Tensor q(storage[0].data(),DType::BF16,{6144,t}), gate(storage[1].data(),DType::BF16,{6144,t}),
++               k(storage[2].data(),DType::BF16,{1024,t}), v(storage[3].data(),DType::BF16,{1024,t});
++        auto policy=ops::LinearPolicy::AllowA8;
++        auto bytes=ops::attn_input_proj_split_workspace_capacity_bytes(
++            QType::T5_G128_FP16,7168,QType::T5_G128_FP16,7168,5120,policy,t,t);
++        DeviceArena ws(bytes);
++        ops::attn_input_proj(tx,qk.rows(0,7168),gv.rows(0,7168),q,gate,k,v,policy,ws,nullptr);
++        cuda_synchronize();
++        const Ternary* weights[]={&qk,&gv,&qk,&gv};
++        for(int i=0;i<4;++i) {
++            const int count=i<2?6144:1024, first=i<2?0:6144;
++            failures+=verify_reduction("T5 attention output "+std::to_string(i),
++                from_device_bf16(storage[i].data(),std::size_t(count)*t),
++                oracle(*weights[i],first,count,x,t),kA8);
++            failures+=storage[i].verify_guards("T5 attention");
++        }
++        if(ws.used()!=0 || ws.peak_used()>bytes) ++failures;
++    }
++    {
++        const Ternary w(34816,5120,91); const int t=5;
++        auto x=activation(5120,t,92); auto dx=to_device_bf16(x);
++        GuardedDeviceBuffer dest(std::size_t(17408)*t*2);
++        Tensor tx(dx.p,DType::BF16,{5120,t}), out(dest.data(),DType::BF16,{17408,t});
++        auto policy=ops::LinearPolicy::AllowA8;
++        auto bytes=ops::linear_swiglu_workspace_capacity_bytes(QType::T5_G128_FP16,34816,5120,policy,t,t);
++        DeviceArena ws(bytes);
++        ops::linear_swiglu(tx,w.rows(0,34816),out,policy,ws,nullptr);
++        cuda_synchronize();
++        auto gate=oracle(w,0,17408,x,t), up=oracle(w,17408,17408,x,t);
++        for(std::size_t i=0;i<gate.size();++i) gate[i]=gate[i]/(1+std::exp(-gate[i]))*up[i];
++        failures+=verify_reduction("T5 SwiGLU",from_device_bf16(dest.data(),gate.size()),gate,kA8);
++        failures+=dest.verify_guards("T5 SwiGLU");
++        if(ws.used()!=0 || ws.peak_used()>bytes) ++failures;
++    }
++    Ternary table(301,5120,33);
++    failures += embedding_case(table,{0,300,7,7,150});
++    table.rotate(34);
++    failures += embedding_case(table,{0,300,7,7,150});
++    {
++        // Constant represented inputs are exact under s8 quantization. Thus the full-vocabulary
++        // FP64 score oracle tests mapping, valid-row exclusion and stable BF16 ties independently.
++        const Ternary head(248320,5120,111); const int valid=248077, tokens=9;
++        std::vector<float> ones(5120,1.0f);
++        auto ideal=oracle(head,0,valid,ones,1);
++        std::vector<std::pair<float,int>> ranked;
++        for(int i=0;i<valid;++i) ranked.emplace_back(bf16_to_f32(f32_to_bf16(float(ideal[i]))),i);
++        std::sort(ranked.begin(),ranked.end(),[](auto a,auto b){return a.first!=b.first?a.first>b.first:a.second<b.second;});
++        auto x=to_device_bf16(std::vector<float>(std::size_t(5120)*tokens,1.0f));
++        GuardedDeviceBuffer ids(std::size_t(16)*tokens*4),scores(std::size_t(16)*tokens*4);
++        Tensor tx(x.p,DType::BF16,{5120,tokens}), ti(ids.data(),DType::I32,{16,tokens}),
++               ts(scores.data(),DType::FP32,{16,tokens});
++        auto bytes=ops::linear_topk_workspace_capacity_bytes(QType::T5_G128_FP16,248320,5120,1,tokens);
++        DeviceArena ws(bytes);
++        ops::linear_topk(tx,head.rows(0,head.n),valid,ti,ts,ws,nullptr); cuda_synchronize();
++        auto actual=from_device<std::int32_t>(ids.data(),16*tokens);
++        auto values=from_device<float>(scores.data(),16*tokens);
++        for(int t=0;t<tokens;++t) for(int r=0;r<16;++r) {
++            if(actual[t*16+r]!=ranked[r].second || values[t*16+r]!=ranked[r].first) {
++                if(t==0) std::cerr << "T5 topk rank " << r << ": " << actual[r] << "/" << values[r]
++                                  << " expected " << ranked[r].second << "/" << ranked[r].first << '\n';
++                ++failures;
++            }
++        }
++        CUDA_CHECK(cudaMemset(x.p,0,std::size_t(5120)*tokens*2));
++        ops::linear_topk(tx,head.rows(0,head.n),valid,ti,ts,ws,nullptr); cuda_synchronize();
++        actual=from_device<std::int32_t>(ids.data(),16*tokens);
++        values=from_device<float>(scores.data(),16*tokens);
++        for(int t=0;t<tokens;++t) for(int r=0;r<16;++r)
++            if(actual[t*16+r]!=r || values[t*16+r]!=0) ++failures;
++        failures+=ids.verify_guards("T5 topk ids")+scores.verify_guards("T5 topk scores");
++        if(ws.used()!=0 || ws.peak_used()>bytes) ++failures;
++        std::cout << "T5 full-vocabulary topk checked\n";
++    }
++    bool rejected=false;
++    try { (void)ops::linear_workspace_capacity_bytes(QType::T5_G128_FP16,128,5120,ops::LinearPolicy::A16Only,1,1); }
++    catch(const std::invalid_argument&) {rejected=true;}
++    if(!rejected) ++failures;
++    for (const auto [n,k] : std::array<std::pair<int,int>,3>{{{0,5120},{128,0},{128,5121}}}) {
++        bool invalid=false;
++        try { (void)ops::linear_workspace_capacity_bytes(QType::T5_G128_FP16,n,k,ops::LinearPolicy::AllowA8,1,1); }
++        catch(const std::invalid_argument&) {invalid=true;}
++        if(!invalid) ++failures;
++    }
++    std::cout << (failures ? "FAIL" : "OK") << " T5 A8\n";
++    return failures ? 1 : 0;
++}
+diff --git a/tests/ops/linear/tests.cmake b/tests/ops/linear/tests.cmake
+index c9887d6e2e868e01cfaa42605cea253b6ea3e43e..62346bf50d9c78963d759c00fab75845b7357bc7 100644
+--- a/tests/ops/linear/tests.cmake
++++ b/tests/ops/linear/tests.cmake
+@@ -77,3 +77,7 @@ ninfer_add_op_test(ninfer_linear_gguf_mmq_store_test
+ 
+ ninfer_add_op_test(ninfer_linear_gguf_mmq_limits_test
+   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_gguf_mmq_limits.cpp")
++
++ninfer_add_op_test(ninfer_linear_t5_test STANDALONE
++  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_t5.cpp" LIBRARIES ninfer_ops)
++ninfer_stage_runtime_dlls(ninfer_linear_t5_test)
+diff --git a/tools/artifact/codecs/row_split.py b/tools/artifact/codecs/row_split.py
+index 79322ba2bf6ee26b809a602e0291a1fd4caf3d8b..21ae0d3befe588d7a4330b2b05573e085adac790 100644
+--- a/tools/artifact/codecs/row_split.py
++++ b/tools/artifact/codecs/row_split.py
+@@ -87,6 +87,9 @@ def _unpack_two_bit(packed: torch.Tensor, group_size: int) -> torch.Tensor:
+ def _pack_codes(
+     codes: torch.Tensor, spec: QuantFormat
+ ) -> tuple[torch.Tensor, torch.Tensor]:
++    if spec.name == "t5_g128_fp16":
++        from .t5 import pack
++        return pack(codes), torch.empty((codes.shape[0], 0), dtype=torch.uint8, device=codes.device)
+     if spec.name == "ptq1_g128_fp16":
+         from .ptq1 import pack
+         return pack(codes)
+@@ -136,7 +139,7 @@ def encode_row_split(
+         raise ValueError("codes and scales must be on the same device")
+     if spec.code_bias and bool(((codes < spec.qmin) | (codes > spec.qmax)).any()):
+         raise ValueError("Q2 codes must be in [-1, 2]")
+-    if (spec.code_bias or spec.name == "ptq1_g128_fp16") and not bool(torch.isfinite(scales).all()):
++    if (spec.code_bias or spec.name in ("ptq1_g128_fp16", "t5_g128_fp16")) and not bool(torch.isfinite(scales).all()):
+         raise ValueError("grouped scales must be finite binary16 words")
+     grouped = codes.reshape(-1, spec.group_size)
+     base, high = _pack_codes(grouped, spec)
+@@ -407,6 +410,9 @@ def _unpack_codes(
+     scales = planes.scale.view(torch.float16).reshape(
+         geometry.n, geometry.groups_per_row
+     )
++    if spec.name == "t5_g128_fp16":
++        from .t5 import unpack
++        return scales, unpack(planes.base).reshape(geometry.n, geometry.groups_per_row, spec.group_size)
+     if spec.name == "ptq1_g128_fp16":
+         from .ptq1 import unpack
+         return scales, unpack(planes.base, planes.high).reshape(
+@@ -564,7 +570,7 @@ def dequantize_row_split(
+     geometry = row_split_geometry(spec, shape)
+     target = torch.device(device)
+     planes = _planes_on_device(source, geometry, target)
+-    if dtype == torch.bfloat16 and spec.name != "ptq1_g128_fp16":
++    if dtype == torch.bfloat16 and spec.name not in ("ptq1_g128_fp16", "t5_g128_fp16"):
+         byte_indices, shifts = _high_indices(
+             target.type, target.index, spec.bits, spec.group_size
+         )
+diff --git a/tools/artifact/codecs/t5.py b/tools/artifact/codecs/t5.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5612924b7ce77a7e3f593dd744fb537fe1e77eba
+--- /dev/null
++++ b/tools/artifact/codecs/t5.py
+@@ -0,0 +1,41 @@
++"""Exact T5 layout from JGamboa/ninfer-4090-windows (Apache-2.0, see NOTICE).
++
++Two 13-byte units of 64 ternary coordinates per 128-column scale group.
++This codec rearranges represented integers; it never requantizes weights.
++"""
++from __future__ import annotations
++
++import torch
++
++
++def _columns(device):
++    return torch.tensor([[20 * (i // 4) + 4 * m + i % 4 for m in range(5)]
++                         for i in range(12)] + [[60, 61, 62, 63, 64]],
++                        dtype=torch.long, device=device)
++
++
++def pack(codes: torch.Tensor) -> torch.Tensor:
++    if codes.dtype != torch.int8 or codes.ndim != 2 or codes.shape[1] != 128:
++        raise ValueError("T5 codes must be int8 [groups,128]")
++    if bool(((codes < -1) | (codes > 1)).any()):
++        raise ValueError("T5 codes must be in {-1,0,1}")
++    units = codes.reshape(-1, 64).to(torch.int32) + 1
++    units = torch.cat((units, torch.zeros_like(units[:, :1])), dim=1)
++    digits = units[:, _columns(codes.device)]
++    powers = torch.tensor([81, 27, 9, 3, 1], device=codes.device)
++    integers = (digits * powers).sum(-1)
++    return ((256 * integers + 242) // 243).to(torch.uint8).reshape(-1, 26)
++
++
++def unpack(base: torch.Tensor) -> torch.Tensor:
++    if base.dtype != torch.uint8 or base.numel() % 26:
++        raise ValueError("T5 codes require whole 26-byte scale groups")
++    words = base.reshape(-1, 13).to(torch.int32)
++    digits = torch.stack([(((words * 3**i) & 255) * 3) >> 8 for i in range(5)], -1)
++    powers = torch.tensor([81, 27, 9, 3, 1], device=base.device)
++    canonical = (256 * (digits * powers).sum(-1) + 242) // 243
++    if bool((canonical != words).any()) or bool((digits[:, 12, 4] != 0).any()):
++        raise ValueError("T5 requires canonical bytes and a zero padding trit")
++    output = torch.empty((words.shape[0], 65), dtype=torch.int32, device=base.device)
++    output[:, _columns(base.device).flatten()] = digits.flatten(1)
++    return (output[:, :64] - 1).to(torch.int8).reshape(-1, 128)
+diff --git a/tools/artifact/formats.py b/tools/artifact/formats.py
+index 4008e735ea749b580c34dbbe180bdc135cc56e11..f4bbc15896bae1c62a3e7db478ac29b2646b258e 100644
+--- a/tools/artifact/formats.py
++++ b/tools/artifact/formats.py
+@@ -81,6 +81,7 @@ Q8_G32_FP16 = QuantFormat("q8_g32_fp16", 8, 32, -127, 127)
+ T2_G128_FP16 = QuantFormat("t2_g128_fp16", 2, 128, -1, 1)
+ # bits describes the logical ternary code domain; PTQ1 uses its own base-3 codec.
+ PTQ1_G128_FP16 = QuantFormat("ptq1_g128_fp16", 2, 128, -1, 1)
++T5_G128_FP16 = QuantFormat("t5_g128_fp16", 2, 128, -1, 1)
+ NVFP4 = Nvfp4Format("nvfp4", 16)
+ FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16")
+ FP8_E4M3FN_ROW_FP16 = Fp8RowFormat("fp8_e4m3fn_row_fp16", "fp16")
+@@ -111,7 +112,7 @@ DIRECT_FORMATS = MappingProxyType({item.name: item for item in (BF16, FP32, INT3
+ QUANT_FORMATS = MappingProxyType(
+     {
+         item.name: item
+-        for item in (Q2_G64_FP16, Q4_G64_FP16, Q5_G64_FP16, Q6_G64_FP16, Q8_G32_FP16, T2_G128_FP16, PTQ1_G128_FP16)
++        for item in (Q2_G64_FP16, Q4_G64_FP16, Q5_G64_FP16, Q6_G64_FP16, Q8_G32_FP16, T2_G128_FP16, PTQ1_G128_FP16, T5_G128_FP16)
+     }
+ )
+ NVFP4_FORMATS = MappingProxyType({NVFP4.name: NVFP4})
+diff --git a/tools/artifact/layouts.py b/tools/artifact/layouts.py
+index 21416782795aed8f2a43dc937ab326153353af9b..d19216113e5ca4f3fc6ddd198de82fc1517441a8 100644
+--- a/tools/artifact/layouts.py
++++ b/tools/artifact/layouts.py
+@@ -101,7 +101,7 @@ CONTIGUOUS_LE_V1 = Layout("contiguous_le_v1", 256, frozenset(("bf16", "fp32", "i
+ ROW_SPLIT_K128_V1 = Layout(
+     "row_split_k128_v1",
+     256,
+-    frozenset(("q2_g64_fp16", "q4_g64_fp16", "q5_g64_fp16", "q6_g64_fp16", "q8_g32_fp16", "t2_g128_fp16", "ptq1_g128_fp16")),
++    frozenset(("q2_g64_fp16", "q4_g64_fp16", "q5_g64_fp16", "q6_g64_fp16", "q8_g32_fp16", "t2_g128_fp16", "ptq1_g128_fp16", "t5_g128_fp16")),
+ )
+ BLOCK_SCALE_K16_M128X4_V1 = Layout(
+     "block_scale_k16_m128x4_v1",
+@@ -191,10 +191,10 @@ def row_split_geometry(
+     n, k = _shape(shape, rank=2)
+     k_pad = align_up(k, K_ALIGNMENT)
+     groups_per_row = k_pad // spec.group_size
+-    if spec.name == "ptq1_g128_fp16":
++    if spec.name in ("ptq1_g128_fp16", "t5_g128_fp16"):
+         if k % 128:
+             raise ValueError("PTQ1 requires whole 128-column groups")
+-        base_bytes_per_group, high_bytes_per_group = 24, 2
++        base_bytes_per_group, high_bytes_per_group = (24, 2) if spec.name == "ptq1_g128_fp16" else (26, 0)
+     else:
+         # 2- and 8-bit codes pack whole; 4/5/6-bit codes keep a 4-bit base plane plus a high plane.
+         base_bytes_per_group = (
+diff --git a/tools/convert/repack_t5.py b/tools/convert/repack_t5.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8d4a224c697690afbd10984e992125a4429142c
+--- /dev/null
++++ b/tools/convert/repack_t5.py
+@@ -0,0 +1,125 @@
++"""Repack a native PTQ1 artifact to T5, preserving other objects byte for byte.
++
++Run: python -m tools.convert.repack_t5 INPUT.ninfer OUTPUT.ninfer
++The output is a separate artifact; the input is never modified.
++"""
++from __future__ import annotations
++
++import argparse
++from copy import deepcopy
++import hashlib
++import json
++from pathlib import Path
++
++import torch
++
++from ..artifact.reader import Artifact
++from ..artifact.writer import ArtifactWriter
++from ..artifact.schema import TensorObject, TensorSpec, ResourceSpec
++from ..artifact.layouts import row_split_geometry
++from ..artifact.tensor_output import TensorOutput
++from ..artifact.codecs.ptq1 import unpack as unpack_ptq1
++from ..artifact.codecs.t5 import pack, unpack
++
++
++def repack(source: Path, destination: Path) -> dict:
++    with Artifact(source) as original:
++        targets = {o.id for o in original.objects
++                   if isinstance(o, TensorObject) and o.format == 'ptq1_g128_fp16'}
++        if not targets:
++            raise ValueError('input has no native PTQ1 objects')
++        specs = [TensorSpec(o.id, o.shape, 't5_g128_fp16' if o.id in targets else o.format,
++                            o.layout, o.divisors) if isinstance(o, TensorObject)
++                 else ResourceSpec(o.id, o.bytes, o.encoding) for o in original.objects]
++        directory = original.directory
++        uses = deepcopy(list(directory.uses))
++        for use in uses:
++            binding = directory.bindings[use['parameter']]
++            parts = binding.get('parts', [binding])
++            objects = {part['object'] for part in parts}
++            if objects & targets:
++                if not objects <= targets:
++                    raise ValueError('one parameter mixes PTQ1 and another representation')
++                use['activation_policy'] = 'AllowA8'
++        report = {'source': str(source.resolve()), 'destination': str(destination.resolve()),
++                  'source_artifact_id': original.artifact_id.hex(), 'repacked': [], 'copied': []}
++        provenance = deepcopy(directory.provenance)
++        provenance['t5_repack'] = {'source_artifact_id': original.artifact_id.hex(),
++            'kernel_source': 'JGamboa/ninfer-4090-windows@e905787f067de89ef6ef28c52d65a2ce91d425ca',
++            'weights': 'exact PTQ1 codes and FP16 scale bits; A8 execution permission'}
++        with ArtifactWriter(destination, specs, components=directory.components,
++                            bindings=directory.bindings, uses=uses, metadata=directory.metadata,
++                            provenance=provenance) as writer:
++            for obj in original.objects:
++                if obj.id not in targets:
++                    digest = hashlib.sha256()
++                    def chunks():
++                        for chunk in original.iter_object(obj.id):
++                            digest.update(chunk)
++                            yield chunk
++                    writer.write_object(obj.id, chunks())
++                    report['copied'].append({'id': obj.id, 'bytes': obj.bytes, 'sha256': digest.hexdigest()})
++                    continue
++                n, k = obj.shape
++                geometry = row_split_geometry(obj.format, obj.shape)
++                output = TensorOutput(writer, obj.id)
++                logical_hash = hashlib.sha256()
++                scale_hash = hashlib.sha256()
++                # Bound temporary tensors even for the vocabulary head.
++                rows_per_chunk = max(1, (4 << 20) // k)
++                for begin in range(0, n, rows_per_chunk):
++                    rows = min(rows_per_chunk, n - begin)
++                    def plane(offset, pitch):
++                        return torch.frombuffer(bytearray(original.read_range(
++                            obj.offset + offset + begin * pitch, rows * pitch)), dtype=torch.uint8)
++                    low = plane(geometry.base_offset, geometry.base_row_bytes)
++                    high = plane(geometry.high_offset, geometry.high_row_bytes)
++                    scales = plane(geometry.scale_offset, geometry.scale_row_bytes).view(torch.float16)
++                    codes = unpack_ptq1(low, high)
++                    if not torch.equal(unpack(pack(codes)), codes):
++                        raise ValueError(f'{obj.id}: exact T5 round trip failed')
++                    logical_hash.update(codes.numpy().tobytes())
++                    scale_hash.update(scales.view(torch.uint8).numpy().tobytes())
++                    output.write_codes(begin, codes.reshape(rows, k//128, 128),
++                                       scales.reshape(rows, k//128))
++                report['repacked'].append({'id': obj.id, 'shape': list(obj.shape),
++                    'codes_sha256': logical_hash.hexdigest(), 'scale_sha256': scale_hash.hexdigest()})
++                print(f'T5 {obj.id} {n}x{k}', flush=True)
++        # Re-read the persisted artifact, including unchanged MTP, norms and resources.
++        with Artifact(destination) as converted:
++            for item in report['copied']:
++                digest = hashlib.sha256()
++                for chunk in converted.iter_object(item['id']): digest.update(chunk)
++                if digest.hexdigest() != item['sha256']:
++                    raise ValueError(f"{item['id']}: unchanged object mismatch")
++            for item in report['repacked']:
++                obj = converted.object(item['id'])
++                n,k = obj.shape
++                geometry = row_split_geometry(obj.format, obj.shape)
++                code_hash, scale_hash = hashlib.sha256(), hashlib.sha256()
++                for begin in range(0,n,max(1,(4<<20)//k)):
++                    rows=min(max(1,(4<<20)//k),n-begin)
++                    raw=converted.read_range(obj.offset+begin*geometry.base_row_bytes, rows*geometry.base_row_bytes)
++                    codes=unpack(torch.frombuffer(bytearray(raw),dtype=torch.uint8))
++                    code_hash.update(codes.numpy().tobytes())
++                    scale_hash.update(converted.read_range(obj.offset+geometry.scale_offset+begin*geometry.scale_row_bytes,rows*geometry.scale_row_bytes))
++                if (code_hash.hexdigest()!=item['codes_sha256'] or scale_hash.hexdigest()!=item['scale_sha256']):
++                    raise ValueError(f"{item['id']}: persisted codes/scales mismatch")
++        report['verified'] = True
++        destination.with_suffix(destination.suffix+'.repack.json').write_text(
++            json.dumps(report, indent=2), encoding='utf-8')
++        return report
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument('source',type=Path)
++    p.add_argument('destination',type=Path)
++    args=p.parse_args()
++    torch.set_num_threads(4)
++    report=repack(args.source,args.destination)
++    print(f"Verified {len(report['repacked'])} T5 objects and {len(report['copied'])} copied objects")
++
++
++if __name__=='__main__':
++    main()
+diff --git a/tools/convert/ternary.py b/tools/convert/ternary.py
+index e0a2d9b0f03090e8a90dc75dac66df951a48a069..2e4e411b04a0be1f25ec16ce37f2d8beacead8c2 100644
+--- a/tools/convert/ternary.py
++++ b/tools/convert/ternary.py
+@@ -26,6 +26,7 @@ from .sources.logical import EncodedRows, LogicalSource, array_source
+ 
+ T2 = "t2_g128_fp16"
+ PTQ1 = "ptq1_g128_fp16"
++T5 = "t5_g128_fp16"
+ 
+ # The DFlash2 adapter projections a ternary artifact encodes as Q4. The fused query/key/value
+ # projection, which the context key/value Uses share, stays Q8 for its Q8-only three-output op.
+@@ -426,7 +427,8 @@ def bonsai2_27b_ternary(model, recipe, sources, *, format=T2):
+             recipe.assign(name, format=Q4, method=grouped_absmax)
+     encoded, direct = text_sources(gguf, format=format)
+     for name, source in encoded.items():
+-        recipe.assign(name, format=format, method=import_encoded, source=source)
++        recipe.assign(name, format=format, method=import_encoded, source=source,
++                      activation_policy="AllowA8" if format == T5 else "A16Only")
+     for name, source in direct.items():
+         recipe.assign(
+             name,
+@@ -488,7 +490,13 @@ def bonsai2_27b_ptq1(model, recipe, sources):
+     bonsai2_27b_ternary(model, recipe, sources, format=PTQ1)
+ 
+ 
+-RECIPES = {"bonsai2_27b_ptq1": bonsai2_27b_ptq1,
++def bonsai2_27b_t5(model, recipe, sources):
++    """Exact Bonsai ternary weights in the JGamboa T5 layout with A8 execution."""
++    bonsai2_27b_ternary(model, recipe, sources, format=T5)
++
++
++RECIPES = {"bonsai2_27b_t5": bonsai2_27b_t5,
++           "bonsai2_27b_ptq1": bonsai2_27b_ptq1,
+            "bonsai2_27b_ternary": bonsai2_27b_ternary,
+            "bonsai2_27b_ternary_gguf_mtp": bonsai2_27b_ternary_gguf_mtp}
+ 

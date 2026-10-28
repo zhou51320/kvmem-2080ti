@@ -14,7 +14,7 @@ Reopening an existing controller does not print instructions implying the second
 
 An offline console package includes the official Windows x64 embeddable Python runtime in
 `runtime/python`. No Python installation, pip packages, Node.js or build tools are needed.
-A source checkout can use installed 64-bit Python 3.9+ instead. The entry does not download
+A source checkout can use installed 64-bit Python 3.10+ instead. The entry does not download
 or install anything, alter PATH, request administrator access, or load a model automatically.
 Model/worker selection, browser drafts, personal templates and API key behavior follow the
 [console documentation](../ui/README.md#independent-local-console-windows).
@@ -30,7 +30,11 @@ Recognized filenames are `ninfer-kvmem-server.exe`, `ninfer-serve.exe`, and
 `llama-kvmem-server.exe`. The console also checks `bin/` and `workers/<backend>/`.
 It checks the selected backend root first, then its own installation when different;
 within each root the order is root, bin, workers, with the canonical NInfer name preferred
-within a directory. Manual paths override registrations, which override discovery.
+within a directory. When either BAT entry finds a worker inside its own extracted
+installation, that bundled worker takes priority over browser drafts, saved templates and
+`worker-paths.json`. This prevents the same browser origin from silently selecting an older
+package. Direct source launches without a bundled worker retain the previous order: manual
+paths override registrations, which override discovery.
 Missing manual/registered paths remain errors. Discovery does not load a model or certify
 the worker's version/dependencies. It does not search other build trees recursively.
 
@@ -86,19 +90,25 @@ To add the console to a worker package, or create a console-only folder:
 .\scripts\windows\package-console.ps1 `
     -OutputDir 'D:\packages\KVMem' `
     -PythonArchive 'D:\downloads\python-X.Y.Z-embed-amd64.zip' `
-    -PythonSha256 '<official release SHA-256>'
+    -PythonSha256 '<official release SHA-256>' `
+    -PsutilWheel 'D:\downloads\psutil-7.2.2-cp37-abi3-win_amd64.whl' `
+    -PsutilSha256 '<PyPI wheel SHA-256>'
 ```
 
 The script copies the root entry, controller, canonical launch bridge and local monitor
 assets. It refuses to replace differing files or an existing runtime. Use a fresh staging
 directory on rebuild. Console-only output does not contain inference engines or models.
 
-The combined worker packager also accepts `-PythonArchive`, `-PythonSha256` and
+Download the psutil 7.2.2 Windows x64 ABI3 wheel from PyPI and verify its published
+SHA-256. The offline packager installs it with its license and validates its import;
+no pip or network access is required on the end-user machine.
+
+The combined worker packager also accepts `-PsutilWheel`, `-PsutilSha256`, `-PythonArchive`, `-PythonSha256` and
 `-LlamaUiDir` (the built llama.cpp chat directory). These add the offline console before
-the package's final checksums are generated. llama.cpp chat files are placed under
-`workers/share/kvmem/ui`, matching the worker's binary-relative lookup; NInfer must be
-built with its chat and monitor assets embedded. Keep monitor-enabled workers and console
-assets on the same source revision.
+the package's final checksums are generated. Unified chat files are placed under
+`workers/share/kvmem/ui`, where the local console serves them for either backend.
+The standalone NInfer web UI is a separate native build option. Keep monitor-enabled
+workers and console assets on the same source revision.
 
 Default executable locations:
 
@@ -109,6 +119,23 @@ Supply each worker's DLL dependencies too. A separately installed worker may ins
 selected in the console's engine-specific settings. Shipping the console does not certify
 those binaries, their model compatibility, or their performance. Run the complete final ZIP
 through start/chat/monitor/stop acceptance before publishing.
+
+### NInfer-only NVIDIA 50-series package (0.19.0)
+
+Use `package-backends.ps1 -Backend ninfer`, omit `-LlamaWorker` and PolyStrata
+options, and supply `-NinferWorker`, `-NinferSource`, `-LlamaUiDir`, the verified
+Python/psutil archives and their SHA-256 values. `-LlamaSource` identifies the
+source/license for the unified chat UI; it does not add a llama.cpp worker.
+Build NInfer with `-DCMAKE_CUDA_ARCHITECTURES=120a -DNINFER_SM120_NATIVE=ON`
+for this package. Other architectures require a separately built package.
+
+This variant contains one inference worker and exposes only NInfer in the console.
+Saved configurations for absent backends fall back to NInfer defaults. The package
+records `VERSION`, its backend source manifest and runtime checks. Include the
+actual build/GPU/model validation in `-ValidationReport`; do not infer qualification
+from successful dependency loading. Qwen dense, TP limitations and deferred
+features are recorded in [the integration report](ninfer-upstream-63428ac2-integration.md).
+Models are supplied separately. Creating this ZIP does not create a release tag.
 
 Model-free verification:
 

@@ -151,7 +151,7 @@ def main():
     ap.add_argument('--mmproj', type=Path, default=ROOT / 'models/unsloth/Qwen3.8-27B-GGUF/mmproj-Q8_0.gguf')
     ap.add_argument('--no-projector', action='store_true')
     ap.add_argument('--query-replay', choices=['legacy', 'auto'])
-    ap.add_argument('--query-policy', choices=['legacy', 'user'])
+    ap.add_argument('--query-policy', choices=['user'])
     ap.add_argument('--mtp-state', choices=['snapshots', 'auto', 'replay'])
     ap.add_argument('--mtp', type=int, default=2, help='Maximum MTP draft length')
     ap.add_argument('--load-mode', choices=['auto', 'none', 'mmap', 'dio'], default='none')

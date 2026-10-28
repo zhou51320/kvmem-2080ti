@@ -40,6 +40,26 @@ class WorkerArgsTests(unittest.TestCase):
                                 ['-DraftModel', str(draft), '-Concurrency', '9']):
                     self.assertNotEqual(llama(invalid).returncode, 0)
 
+    def test_cpu_vision_idle_timeout_reaches_worker(self):
+        for shell in SHELLS:
+            for seconds in ('0', '2', '300'):
+                with self.subTest(shell=shell, seconds=seconds):
+                    args = self.plan(self.run_launcher(shell, 'start-backend.ps1',
+                        ['-Vision', '-VisionResidency', 'cpu', '-CpuVisionIdleSeconds', seconds]))['argv']
+                    self.assertEqual(args[args.index('--cpu-vision-idle-seconds') + 1], seconds)
+            args = self.plan(self.run_launcher(shell, 'start-backend.ps1', []))['argv']
+            self.assertNotIn('--cpu-vision-idle-seconds', args)
+            shortcut = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-File', str(ROOT / 'scripts/windows/start-ninfer.ps1'), '-Model', str(self.model),
+                '-Worker', sys.executable, '-Gpu', 'GPU-test', '-CpuVisionIdleSeconds', '12', '-DryRun'],
+                capture_output=True, encoding='utf-8', errors='replace', timeout=45)
+            args = self.plan(shortcut)['argv']
+            self.assertEqual(args[args.index('--cpu-vision-idle-seconds') + 1], '12')
+            conflict = self.run_launcher(shell, 'start-backend.ps1', ['-Vision', '-VisionResidency', 'cpu',
+                '-CpuVisionIdleSeconds', '12', '-WorkerArgs', '--cpu-vision-idle-seconds', '2'])
+            self.assertNotEqual(conflict.returncode, 0)
+
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='kvmem-argv-')
         self.folder = Path(self.tmp.name)

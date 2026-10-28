@@ -12,7 +12,7 @@ try {
     foreach ($dir in 'source/scripts/windows', 'source/backends/llamacpp/vendor', 'build/bin', 'ui') {
         $null = New-Item -ItemType Directory -Path (Join-Path $temp $dir) -Force
     }
-    foreach ($name in 'native-process.ps1', 'start-server.ps1', 'start-iq3.ps1', 'start-iq4.ps1', 'README.md', 'README-quantizer.md') {
+    foreach ($name in 'native-process.ps1', 'query-scoring.ps1', 'start-server.ps1', 'start-iq3.ps1', 'start-iq4.ps1', 'README.md', 'README-quantizer.md') {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $source 'scripts/windows')
     }
     [IO.File]::WriteAllText((Join-Path $source 'VERSION'), 'test-fixture')

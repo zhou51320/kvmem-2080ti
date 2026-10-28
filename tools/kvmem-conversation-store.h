@@ -53,6 +53,7 @@ struct kvmem_store_match {
     uint64_t bytes      = 0;  // accounted host bytes of this store
     uint64_t used       = 0;  // LRU stamp; larger is more recent
     std::string client_id;    // bound kvmem.conversation_id, empty when inferred
+    bool allow_bound_edit = false; // spread policy: an explicit owner may replace its suffix
 };
 
 enum class kvmem_store_action {
@@ -201,7 +202,8 @@ inline kvmem_store_plan kvmem_store_select(const std::vector<kvmem_store_match> 
         // keep == 0 has nothing to resume, so extending buys nothing and only
         // risks truncating the store. Rank by keep, which is the prefix the
         // hybrid model can actually restore; lcp is aspiration.
-        if (!found || keep <= 0 || !kvmem_store_continuation(*store)) {
+        const bool owner_edit = id_bound && store->allow_bound_edit;
+        if (!found || keep <= 0 || (!owner_edit && !kvmem_store_continuation(*store))) {
             continue;
         }
         if (!best || keep > best_keep || (keep == best_keep && store->used > best->used)) {

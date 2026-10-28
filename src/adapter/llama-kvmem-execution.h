@@ -23,6 +23,8 @@ struct llama_kvmem_execution_state {
     std::unique_ptr<kvmem_conv_pool> conversations;
     kvmem_gpu_state * gpu = nullptr;
     std::shared_ptr<kvmem::HostKvStorage> payload_storage;
+    std::shared_ptr<kvmem::GraphStatisticsBudget> graph_budget=
+        std::make_shared<kvmem::GraphStatisticsBudget>(256u<<20);
     uint32_t payload_domains = 1;
 };
 

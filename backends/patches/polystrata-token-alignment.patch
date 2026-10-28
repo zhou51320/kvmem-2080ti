@@ -1,0 +1,75 @@
+diff --git a/src/poly/engine.cpp b/src/poly/engine.cpp
+index 22f88793..bdb62cca 100644
+--- a/src/poly/engine.cpp
++++ b/src/poly/engine.cpp
+@@ -1963,6 +1963,9 @@ void Engine::follow(int written) {
+ 
+ void Engine::load(const Options& o) {
+     opt_ = o;
++#ifdef STRATA_KVMEM
++    opt_.memory.normalize(opt_.prompt_batch);
++#endif
+     asked_reserve_mib_ = o.vram_reserve_mib;
+     if (opt_.max_context < 16) throw std::runtime_error("the context must be at least 16 tokens");
+     if (opt_.prompt_batch < 1 || opt_.prompt_batch > 4096)
+diff --git a/src/poly/kvmem.cpp b/src/poly/kvmem.cpp
+index fed083c6..5919ed52 100644
+--- a/src/poly/kvmem.cpp
++++ b/src/poly/kvmem.cpp
+@@ -1,6 +1,7 @@
+ #include "kvmem.hpp"
+ #include "engine.hpp"
+ #include "runtime.hpp"
++#include "kvmem/token_options.hpp"
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -26,6 +27,14 @@ std::shared_ptr<kvmem::HostKvStorage> storage(const KvmemOptions& opt) {
+ }
+ }
+ 
++void KvmemOptions::normalize(int & batch) {
++    require(block_tokens == 32 || block_tokens == 64, "KVMem block tokens must be 32 or 64");
++    if (!budget) return;
++    require(batch > 0, "Prefill must be positive");
++    kvmem::normalize_memory_tokens(budget, reserve, sink, recent, block_tokens, false, true);
++    batch = int(kvmem::normalize_prefill(uint32_t(batch), reserve, 1));
++}
++
+ void KvmemOptions::validate(int context, int batch, int window, bool draft) const {
+     require(block_tokens == 32 || block_tokens == 64, "KVMem block tokens must be 32 or 64");
+     require(sessions >= 1 && sessions <= 16 && (sessions == 1 || (history_reuse && budget)),
+diff --git a/src/poly/kvmem.hpp b/src/poly/kvmem.hpp
+index f3d526cf..e1a4f12f 100644
+--- a/src/poly/kvmem.hpp
++++ b/src/poly/kvmem.hpp
+@@ -22,7 +22,7 @@ namespace strata::poly {
+ class Engine;
+ 
+ struct KvmemOptions {
+-    uint32_t block_tokens = 64; // startup-fixed token management granularity
++    uint32_t block_tokens = 32; // startup-fixed token management granularity
+     uint32_t budget = 0, reserve = 1024;
+     uint32_t sink = 64, recent = 64;
+     uint32_t sessions = 1; // total retained histories, including the GPU owner
+@@ -37,6 +37,7 @@ struct KvmemOptions {
+     uint32_t query_max_tokens = kvmem::default_query_tokens;
+     uint32_t replay_max_tokens = kvmem::default_query_replay_tokens;
+     int64_t query_begin = -1, query_end = -1;
++    void normalize(int & batch);
+     void validate(int context, int batch, int window, bool draft) const;
+ };
+ 
+diff --git a/src/poly/main.cpp b/src/poly/main.cpp
+index 735a1e86..a4920151 100644
+--- a/src/poly/main.cpp
++++ b/src/poly/main.cpp
+@@ -1337,7 +1337,7 @@ void usage() {
+         "KVMem (opt-in, qwen35moe, single CUDA GPU, F16/Q8 KV, native batch 1..8):\n"
+         "  --kvmem-budget B --kvmem-gen-reserve R --kvmem-host-mib H\n"
+         "  --kvmem-sink-tokens N --kvmem-recent-tokens N (alignment to --kvmem-block-tokens)\n"
+-        "  --kvmem-block-tokens 32|64 (default 64; fixed at startup)\n"
++        "  --kvmem-block-tokens 32|64 (default 32; fixed at startup)\n"
+         "  --kvmem-query-begin N --kvmem-query-end N (raw token prompt span)\n"
+         "  --kvmem-query-max-tokens N --kvmem-query-replay-max-tokens N (bounded Query/replay)\n"
+         "  --kvmem-query-scorer page-softmax|meanq-cosine --kvmem-graph-alpha X\n"

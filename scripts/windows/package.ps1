@@ -88,7 +88,7 @@ while ($queue.Count) {
     }
 }
 if ($Component -eq 'Runtime') {
-foreach ($name in 'native-process.ps1', 'start-server.ps1', 'start-iq3.ps1', 'start-iq4.ps1') {
+foreach ($name in 'native-process.ps1', 'query-scoring.ps1', 'start-server.ps1', 'start-iq3.ps1', 'start-iq4.ps1') {
     Copy-Item -LiteralPath (Join-Path $SourceDir "scripts/windows/$name") -Destination (Join-Path $OutputDir 'scripts/windows')
 }
 }

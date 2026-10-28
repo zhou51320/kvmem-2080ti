@@ -1,4 +1,21 @@
 /* Configuration uses the monitor palette. Its layout must not restyle other views. */
+#app .s-launch .l-model-health { border:1px solid var(--s-line); border-radius:12px; padding:14px 16px; background:var(--s-soft); min-width:0; font-size:13px; }
+#app .s-launch .l-model-health[data-state=blocked] { border-color:var(--s-error-text); }
+#app .s-launch .l-health-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+#app .s-launch .l-health-head .s-button { min-height:30px; padding:4px 10px; }
+#app .s-launch .l-model-health[data-state=ready] .l-health-head strong { color:var(--s-green-text); }
+#app .s-launch .l-model-health[data-state=blocked] .l-health-head strong, #app .s-launch .l-model-health [data-severity=error] { color:var(--s-error-text); }
+#app .s-launch .l-model-health [data-severity=warning] { color:var(--s-warn-text); }
+#app .s-launch .l-health-meta, #app .s-launch .l-health-note { margin:7px 0; color:var(--s-muted); line-height:1.6; }
+#app .s-launch .l-health-features { display:flex; flex-wrap:wrap; gap:7px; margin:12px 0; }
+#app .s-launch .l-health-features span { padding:4px 8px; border:1px solid var(--s-line); border-radius:6px; background:var(--s-surface); font-size:11px; }
+#app .s-launch .l-health-issue { display:grid; gap:4px; margin:10px 0; overflow-wrap:anywhere; }
+#app .s-launch .l-model-health > .s-button { margin:4px 8px 4px 0; }
+#app .s-launch .l-model-health details { border-top:1px solid var(--s-line); padding-top:10px; margin-top:12px; }
+#app .s-launch .l-model-health summary { cursor:pointer; color:var(--s-muted); }
+#app .s-launch .l-model-health h4 { margin:16px 0 8px; font-size:12px; }
+#app .s-launch .l-model-health details p { margin:8px 0; overflow-wrap:anywhere; }
+#app .s-launch .l-model-health details small { display:block; margin-top:4px; font-size:11px; color:var(--s-muted); white-space:pre-wrap; }
 #app .s-launch { padding: 24px; width: 100%; max-width:1560px; margin:auto; }
 #app .s-launch .l-layout { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 20px; align-items: start; }
 #app .s-launch .l-main, #app .s-launch .l-side { display: grid; gap: 16px; min-width: 0; }
@@ -66,6 +83,8 @@
 #app .s-launch .l-scan-trigger { align-self:flex-start; }
 #app .s-launch .l-model-tools { display:flex; align-items:center; justify-content:space-between; gap:6px; }
 #app .s-launch .l-model-tools .s-button { height:28px; font-size:12px; }
+#app .s-launch .l-model-picker > [data-recent-model] { width:100%; min-width:0; max-width:100%; height:32px; padding:5px 10px; font-size:12px; color:var(--s-muted); background:transparent; text-overflow:ellipsis; }
+#app .s-launch [data-recent-model] option { color:var(--s-ink); background:var(--s-surface); }
 #app .s-launch .l-model-dialog { width:min(800px,calc(100% - 32px)); max-height:85vh; overflow:auto; padding:22px; background:var(--s-surface); color:var(--s-ink); border:1px solid var(--s-line); border-radius:16px; }
 #app .s-launch .l-model-dialog::backdrop { background:#0008; }
 #app .s-launch .l-scan-results { display:grid; gap:8px; max-height:45vh; overflow:auto; margin:14px 0; }
@@ -106,7 +125,6 @@
 #app .s-launch button:disabled { opacity:.45; cursor:default; }
 #app .s-launch .l-native summary { cursor: pointer; font-size: 14px; }
 #app .s-launch .l-native .l-fields { grid-template-columns: repeat(2,minmax(0,1fr)); }
-#app .s-launch .l-primary { background: var(--s-info); border-color: var(--s-info); color: #fff; }
 #app .s-launch .l-side .s-card { padding: 20px; }
 #app .s-launch .l-side dl { margin: 6px 0 18px; display: grid; grid-template-columns:62px minmax(0,1fr); gap: 10px 12px; }
 #app .s-launch .l-side dt { color: var(--s-muted); font-size: 12px; }
@@ -253,3 +271,51 @@
 #app .s-launch .l-kv-side > select { flex:1; width:0; min-height:var(--l-control-height); padding-inline:8px; }
 #app .s-launch .l-kv-status { grid-column:2; margin:0; line-height:1.5; }
 @media(max-width:600px) { #app .s-launch .l-kv-pair, #app .s-launch .l-kv-status { grid-column:1; grid-row:auto; } }
+
+/* Running parameters remain readable; disabling editing does not mean a feature is off. */
+#app .s-launch [data-running-config] .l-field input[data-launch-locked=true],
+#app .s-launch [data-running-config] .l-field select[data-launch-locked=true],
+#app .s-launch [data-running-config] textarea[data-launch-locked=true] { opacity:1; cursor:default; }
+#app .s-launch [data-running-config] .l-save-state { color:var(--s-info); }
+#app .s-launch input[data-launch-locked=true] + .l-toggle-state [data-toggle-unavailable] { display:none; }
+#app .s-launch input[data-launch-locked=true]:checked + .l-toggle-state [data-toggle-on],
+#app .s-launch input[data-launch-locked=true]:not(:checked) + .l-toggle-state [data-toggle-off] { display:inline; }
+
+/* Recall policy has its own settings tab; explanations stay in contextual help. */
+#app .s-launch .l-recall-panel { grid-template-columns:minmax(0,1fr); gap:24px; }
+#app .s-launch .l-recall-section { min-width:0; }
+#app .s-launch .l-recall-section + .l-recall-section { border-top:1px solid var(--s-line); padding-top:22px; }
+#app .s-launch .l-recall-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; margin-bottom:18px; }
+#app .s-launch .l-recall-heading .s-title { margin:0; font-size:16px; display:flex; align-items:center; }
+#app .s-launch .l-recall-badge { display:inline-flex; align-items:center; gap:8px; padding:6px 11px; border-radius:8px; background:var(--s-info-tint); color:var(--s-info-text); font-size:14px; line-height:1.4; }
+#app .s-launch .l-recall-badge::before { content:''; width:6px; height:6px; border-radius:50%; background:currentColor; }
+#app .s-launch .l-recall-section > .l-fields { grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px 24px; }
+#app .s-launch .l-recall-section .l-field { font-size:14px; }
+#app .s-launch .l-help-popover { font-size:14px; }
+#app .s-launch .l-help-popover strong { font-size:15px; }
+@media(max-width:700px) { #app .s-launch .l-recall-section > .l-fields { grid-template-columns:minmax(0,1fr); } }
+
+/* Keep context/output limits beside the KV budgets without changing model rows. */
+#app .s-launch .l-resource-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px 18px; }
+@media(max-width:1000px) { #app .s-launch .l-resource-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:600px) { #app .s-launch .l-resource-grid { grid-template-columns:minmax(0,1fr); } }
+
+/* PolyStrata's native elastic options are also editable as ordinary controls. */
+#app .s-launch .l-elastic { padding:16px; border:1px solid var(--s-line); border-radius:12px; background:var(--s-soft); }
+#app .s-launch .l-elastic > .s-title { font-size:16px; margin:0; }
+#app .s-launch .l-elastic > .l-fields { grid-template-columns:repeat(2,minmax(0,1fr)); }
+@media(max-width:700px) { #app .s-launch .l-elastic > .l-fields { grid-template-columns:minmax(0,1fr); } }
+
+/* Rare runtime overrides stay out of the everyday settings surface. */
+#app .s-launch .l-native > .l-engine-summary { color:var(--s-ink); font-size:14px; }
+#app .s-launch .l-engine-badge { display:inline-block; margin-left:10px; padding:3px 8px; border:1px solid var(--s-line); border-radius:6px; color:var(--s-muted); font-size:12px; font-weight:400; }
+#app .s-launch .l-engine-disclosure { margin-top:16px; border:1px solid var(--s-line); border-radius:10px; background:var(--s-soft); padding:0 16px; }
+#app .s-launch .l-engine-disclosure > summary { padding:15px 0; color:var(--s-ink); font-size:14px; cursor:pointer; }
+#app .s-launch .l-engine-status { float:right; color:var(--s-muted); font-size:13px; margin-left:12px; }
+#app .s-launch .l-engine-disclosure[open] > summary { border-bottom:1px solid var(--s-line); }
+#app .s-launch .l-engine-disclosure .l-engine-fields { grid-template-columns:repeat(2,minmax(0,1fr)); margin:18px 0; gap:18px; }
+#app .s-launch .l-engine-fields .l-field { font-size:14px; gap:8px; }
+#app .s-launch .l-engine-fields input,#app .s-launch .l-engine-fields textarea { background:var(--s-surface); }
+#app .s-launch .l-engine-fields textarea { font:13px/1.7 "Cascadia Code",Consolas,monospace; resize:vertical; min-height:100px; }
+#app .s-launch .l-vision-assets { grid-template-columns:1fr; }
+@media(max-width:700px) { #app .s-launch .l-engine-disclosure .l-engine-fields { grid-template-columns:1fr; } }

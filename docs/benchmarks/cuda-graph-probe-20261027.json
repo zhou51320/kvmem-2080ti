@@ -1,0 +1,286 @@
+{
+  "date": "2026-10-27",
+  "purpose": "Startup and functional qualification; timings are diagnostics, not a controlled throughput comparison.",
+  "gpu_model": "NVIDIA GeForce RTX 5060 Ti",
+  "gpu_uuid": "GPU-A",
+  "prepared_tree": "eacfd97a2bd32165130ce5886b17cba5abbba7bb",
+  "build": "CUDA 13.2, MSVC 19.44, sm_120a; necessary C++ objects rebuilt, existing unchanged CUDA archive reused; CMake-generated link commands.",
+  "unit_policy_cases_passed": 9,
+  "patch_preparation_tests_passed": 10,
+  "q4_settings": {
+    "context": 262144,
+    "budget": 36864,
+    "reserve": 2048,
+    "kv": "int8",
+    "gdn_state": "fp32",
+    "prefill": 256,
+    "fast_prefill": true,
+    "dflash_drafts": 7,
+    "ngram_drafts": 31,
+    "ngram_min_match": 12,
+    "concurrency": 1,
+    "vision": "cpu",
+    "vision_tokens": 1024,
+    "host_mib": 12288,
+    "device_profile": "auto"
+  },
+  "mtp_settings": {
+    "context": 131072,
+    "budget": 4096,
+    "reserve": 1024,
+    "kv": "int8",
+    "prefill": 128,
+    "drafts": 3,
+    "concurrency": 1,
+    "host_mib": 256,
+    "vision": false,
+    "device_profile": "off"
+  },
+  "cases": [
+    {
+      "case": "q4-old",
+      "gpu_uuid": "GPU-A",
+      "worker_sha256": "d1ea3def4ca9a1663c33c82c800b425a525d09794d6e246184a406eeacf50d37",
+      "ready": false,
+      "exit_code": 1,
+      "probe_logs": [],
+      "failures": [
+        "2026-10-26 23:26:02.011  FATAL server failed during startup | requested Engine runtime reservation requires 2791748352 bytes, but only 2290089984 bytes are available for runtime capacity"
+      ],
+      "planning_mib": [],
+      "sampled_gpu_peak_mib": 13102,
+      "passed": true,
+      "model": "Qwen3.8-27B-IQ3_S-vision-mtp-dflash2-q4",
+      "gpu_idle_before": true
+    },
+    {
+      "case": "q4-control",
+      "gpu_uuid": "GPU-A",
+      "worker_sha256": "d1ea3def4ca9a1663c33c82c800b425a525d09794d6e246184a406eeacf50d37",
+      "ready": true,
+      "startup_seconds": 11.985000000000582,
+      "answer": "4",
+      "answer_correct": true,
+      "copy_exact_prefix": true,
+      "exit_code": null,
+      "probe_logs": [],
+      "failures": [],
+      "planning_mib": [],
+      "sampled_gpu_peak_mib": 14948,
+      "ngram_accepted_tokens": 107,
+      "passed": true,
+      "model": "Qwen3.8-27B-IQ3_S-vision-mtp-dflash2-q4",
+      "gpu_idle_before": true,
+      "startup_memory": {
+        "available_after_startup_bytes": 436207616,
+        "available_after_weights_bytes": 2290089984,
+        "cuda_graph_allowance_bytes": 268435456,
+        "cuda_graph_measured_bytes": 67108864,
+        "runtime_reservation_bytes": 2053550848
+      }
+    },
+    {
+      "case": "q4-auto",
+      "gpu_uuid": "GPU-A",
+      "worker_sha256": "54afd15eb0724edbaa2729e018bd1fedb1d3e3f03803d8816dca364723a65a15",
+      "ready": true,
+      "startup_seconds": 11.843999999997322,
+      "answer": "4",
+      "answer_correct": true,
+      "copy_exact_prefix": true,
+      "exit_code": null,
+      "probe_logs": [
+        "2026-10-27 00:01:49.359  INFO  engine | CUDA graph probe starting",
+        "2026-10-27 00:01:53.171  INFO  engine | CUDA graph probe measured 64.0 MiB; planning allowance 256.0 MiB (second not needed)"
+      ],
+      "failures": [],
+      "planning_mib": [
+        256.0
+      ],
+      "sampled_gpu_peak_mib": 14948,
+      "startup_memory": {
+        "available_after_startup_bytes": 436207616,
+        "available_after_weights_bytes": 2222981120,
+        "cuda_graph_allowance_bytes": 268435456,
+        "cuda_graph_measured_bytes": 0,
+        "runtime_reservation_bytes": 2053550848
+      },
+      "ngram_accepted_tokens": 107,
+      "passed": true,
+      "model": "Qwen3.8-27B-IQ3_S-vision-mtp-dflash2-q4",
+      "gpu_idle_before": true
+    },
+    {
+      "case": "q4-manual",
+      "gpu_uuid": "GPU-A",
+      "worker_sha256": "54afd15eb0724edbaa2729e018bd1fedb1d3e3f03803d8816dca364723a65a15",
+      "ready": true,
+      "startup_seconds": 9.952999999994063,
+      "answer": "4",
+      "answer_correct": true,
+      "copy_exact_prefix": true,
+      "exit_code": null,
+      "probe_logs": [],
+      "failures": [],
+      "planning_mib": [],
+      "sampled_gpu_peak_mib": 14948,
+      "startup_memory": {
+        "available_after_startup_bytes": 436207616,
+        "available_after_weights_bytes": 2290089984,
+        "cuda_graph_allowance_bytes": 268435456,
+        "cuda_graph_measured_bytes": 67108864,
+        "runtime_reservation_bytes": 2053550848
+      },
+      "ngram_accepted_tokens": 107,
+      "passed": true,
+      "model": "Qwen3.8-27B-IQ3_S-vision-mtp-dflash2-q4",
+      "gpu_idle_before": true
+    },
+    {
+      "case": "mtp-auto",
+      "gpu_uuid": "GPU-A",
+      "worker_sha256": "54afd15eb0724edbaa2729e018bd1fedb1d3e3f03803d8816dca364723a65a15",
+      "ready": true,
+      "startup_seconds": 3.312000000005355,
+      "answer": "4\n",
+      "answer_correct": true,
+      "exit_code": null,
+      "probe_logs": [
+        "2026-10-27 00:02:17.746  INFO  engine | CUDA graph probe starting",
+        "2026-10-27 00:02:18.404  INFO  engine | CUDA graph probe measured 2.0 MiB; planning allowance 256.0 MiB (second not needed)"
+      ],
+      "failures": [],
+      "planning_mib": [
+        256.0
+      ],
+      "sampled_gpu_peak_mib": 3012,
+      "startup_memory": {
+        "available_after_startup_bytes": 12874416128,
+        "available_after_weights_bytes": 13094617088,
+        "cuda_graph_allowance_bytes": 268435456,
+        "cuda_graph_measured_bytes": 0,
+        "runtime_reservation_bytes": 486391296
+      },
+      "ngram_accepted_tokens": 0,
+      "passed": true,
+      "model": "Qwen3.5-4B-MTP-Q4_K_M",
+      "gpu_idle_before": true
+    },
+    {
+      "case": "mtp-manual",
+      "gpu_uuid": "GPU-A",
+      "worker_sha256": "54afd15eb0724edbaa2729e018bd1fedb1d3e3f03803d8816dca364723a65a15",
+      "ready": true,
+      "startup_seconds": 3.2819999999992433,
+      "answer": "4\n",
+      "answer_correct": true,
+      "exit_code": null,
+      "probe_logs": [],
+      "failures": [],
+      "planning_mib": [],
+      "sampled_gpu_peak_mib": 3012,
+      "startup_memory": {
+        "available_after_startup_bytes": 12874416128,
+        "available_after_weights_bytes": 13096714240,
+        "cuda_graph_allowance_bytes": 67108864,
+        "cuda_graph_measured_bytes": 2097152,
+        "runtime_reservation_bytes": 285064704
+      },
+      "ngram_accepted_tokens": 0,
+      "passed": true,
+      "model": "Qwen3.5-4B-MTP-Q4_K_M",
+      "gpu_idle_before": true
+    },
+    {
+      "case": "mtp-disabled",
+      "gpu_uuid": "GPU-A",
+      "worker_sha256": "54afd15eb0724edbaa2729e018bd1fedb1d3e3f03803d8816dca364723a65a15",
+      "ready": true,
+      "startup_seconds": 3.0940000000045984,
+      "answer": "4\n",
+      "answer_correct": true,
+      "exit_code": null,
+      "probe_logs": [],
+      "failures": [],
+      "planning_mib": [],
+      "sampled_gpu_peak_mib": 3012,
+      "startup_memory": {
+        "available_after_startup_bytes": 12876513280,
+        "available_after_weights_bytes": 13096714240,
+        "cuda_graph_allowance_bytes": 0,
+        "cuda_graph_measured_bytes": 0,
+        "runtime_reservation_bytes": 217955840
+      },
+      "ngram_accepted_tokens": 0,
+      "passed": true,
+      "model": "Qwen3.5-4B-MTP-Q4_K_M",
+      "gpu_idle_before": true
+    },
+    {
+      "case": "ordinary",
+      "gpu_uuid": "GPU-A",
+      "worker_sha256": "54afd15eb0724edbaa2729e018bd1fedb1d3e3f03803d8816dca364723a65a15",
+      "ready": true,
+      "startup_seconds": 3.0789999999979045,
+      "answer": "4\n",
+      "answer_correct": true,
+      "exit_code": null,
+      "probe_logs": [
+        "2026-10-27 00:02:30.755  INFO  engine | CUDA graph probe starting",
+        "2026-10-27 00:02:31.384  INFO  engine | CUDA graph probe measured 2.0 MiB; planning allowance 256.0 MiB (second not needed)"
+      ],
+      "failures": [],
+      "planning_mib": [
+        256.0
+      ],
+      "sampled_gpu_peak_mib": 2922,
+      "startup_memory": {
+        "available_after_startup_bytes": 12968787968,
+        "available_after_weights_bytes": 13174308864,
+        "cuda_graph_allowance_bytes": 268435456,
+        "cuda_graph_measured_bytes": 0,
+        "runtime_reservation_bytes": 470420992
+      },
+      "ngram_accepted_tokens": 0,
+      "passed": true,
+      "model": "Qwen3.5-4B-MTP-Q4_K_M",
+      "gpu_idle_before": true
+    },
+    {
+      "case": "mtp-ngram",
+      "gpu_uuid": "GPU-A",
+      "worker_sha256": "54afd15eb0724edbaa2729e018bd1fedb1d3e3f03803d8816dca364723a65a15",
+      "ready": true,
+      "startup_seconds": 3.3280000000013388,
+      "answer": "4\n",
+      "answer_correct": true,
+      "copy_exact_prefix": true,
+      "exit_code": null,
+      "probe_logs": [
+        "2026-10-27 00:02:35.127  INFO  engine | CUDA graph probe starting",
+        "2026-10-27 00:02:35.868  INFO  engine | CUDA graph probe measured 6.0 MiB; planning allowance 256.0 MiB (second not needed)"
+      ],
+      "failures": [],
+      "planning_mib": [
+        256.0
+      ],
+      "sampled_gpu_peak_mib": 3022,
+      "startup_memory": {
+        "available_after_startup_bytes": 12863930368,
+        "available_after_weights_bytes": 13090422784,
+        "cuda_graph_allowance_bytes": 268435456,
+        "cuda_graph_measured_bytes": 0,
+        "runtime_reservation_bytes": 491451648
+      },
+      "ngram_accepted_tokens": 100,
+      "passed": true,
+      "model": "Qwen3.5-4B-MTP-Q4_K_M",
+      "gpu_idle_before": true
+    }
+  ],
+  "_sanitization": {
+    "version": 1,
+    "original_sha256": "b764f9db4aa3dc5c9bdb6094c40e69662f8cdbbfdc49921f2df1bfedde709833",
+    "scope": "Device identities/private paths anonymized, credential fields redacted; measurements unchanged."
+  }
+}

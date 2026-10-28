@@ -44,7 +44,7 @@ def main():
     p.add_argument('--host-mib', type=int, default=64)
     p.add_argument('--disk-mib', type=int, default=0)
     p.add_argument('--disk-path', type=Path)
-    p.add_argument('--query-policy', choices=['user', 'legacy'], default='user')
+    p.add_argument('--query-policy', choices=['user'], default='user')
     a = p.parse_args()
     if a.mtp and a.draft_model:
         p.error('choose MTP or DFlash2')

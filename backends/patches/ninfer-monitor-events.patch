@@ -1,0 +1,238 @@
+diff --git a/src/serve/generation_service.cpp b/src/serve/generation_service.cpp
+index 1eb985b4457a7edac2c8821f28756209746d1331..e0b66dce1bac60984c53ceef0f56078772e7304c 100644
+--- a/src/serve/generation_service.cpp
++++ b/src/serve/generation_service.cpp
+@@ -1,4 +1,7 @@
+ #include "serve/generation_service.h"
++#include "serve/openai_chat.h"
++#include "kvmem/monitor.hpp"
++#include "kvmem/monitor_rate.hpp"
+ 
+ #include "product/media_acquire/acquire.h"
+ #include "serve/console_log.h"
+@@ -251,17 +254,29 @@ public:
+     void progress(ninfer::PromptProgress progress) override {
+         cached_ = progress.reused_prompt_tokens;
+         if (monitor_) monitor_({{"status", "reading"}, {"prompt_tokens", progress.total_prompt_tokens}, {"cached_tokens", cached_}});
++        if (monitor_) monitor_({{"prompt_processed_tokens", progress.processed_prompt_tokens},
++            {"prefill_elapsed_ms", progress.elapsed_ns / 1e6}});
+         if (sink_->on_progress) { sink_->on_progress(progress); }
+     }
+ 
+     void timing(ninfer::GenerationTimingObservation timing) override {
+-        if (monitor_) monitor_({{"status", "generating"}, {"generated_tokens", timing.generated_tokens},
+-            {"decode_tps", timing.generation_elapsed_ns ? nlohmann::json(1e9 * timing.generated_tokens / timing.generation_elapsed_ns) : nlohmann::json(nullptr)},
+-            {"prefill_tps", timing.prompt_elapsed_ns ? nlohmann::json(1e9 * (prompt_ - cached_) / timing.prompt_elapsed_ns) : nlohmann::json(nullptr)}});
++        const auto native = completion_timings_json(prompt_, cached_, timing);
++        nlohmann::json values{{"status", "generating"}, {"generated_tokens", timing.generated_tokens},
++            {"decode_tps", native.at("predicted_per_second")},
++            {"decode_tps_mean", native.at("predicted_per_second")},
++            {"prefill_tps", native.at("prompt_per_second")}, {"prefill_ms", native.at("prompt_ms")},
++            {"ttft_ms", native.at("prompt_ms")}, {"ttft_scope", "execution"},
++            {"decode_ms", native.at("predicted_ms")}, {"prompt_new_tokens", prompt_ - cached_}};
++        values.update(rate_.sample(timing.generated_tokens, timing.generation_elapsed_ns, kvmem::monitor::now_ms()));
++        if (monitor_) monitor_(values);
+         if (sink_->on_timing) { sink_->on_timing(timing); }
+     }
+ 
+     void publish(ninfer::OutputDelta delta) override {
++        if (monitor_ && !delta.text.empty()) {
++            const auto phase = delta.channel == ninfer::OutputChannel::Reasoning ? "thinking" : "answering";
++            if (phase_ != phase) { phase_ = phase; monitor_({{"phase", phase}}); }
++        }
+         if (delta.channel == ninfer::OutputChannel::Reasoning) {
+             if (!delta.text.empty() && sink_->on_reasoning) { sink_->on_reasoning(delta.text); }
+             return;
+@@ -274,6 +289,8 @@ private:
+     const StreamSink* sink_ = nullptr;
+     std::function<void(const nlohmann::json&)> monitor_;
+     int prompt_ = 0, cached_ = 0;
++    kvmem::monitor_rate_window rate_;
++    std::string phase_;
+ };
+ 
+ } // namespace
+diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
+index 0a867b65faba3b94f78b0216f67829d7c5053df6..571c4e63295f99be78f629656f9216227633fae1 100644
+--- a/src/serve/http_server.cpp
++++ b/src/serve/http_server.cpp
+@@ -1,5 +1,6 @@
+ #include "serve/http_server.h"
+ #include "serve/openai_chat.h"
++#include "serve/kvmem_metrics.h"
+ #include "kvmem/monitor.hpp"
+ #include "kvmem/monitor_hardware.hpp"
+ #include "serve/slot_files.h"
+@@ -385,12 +386,7 @@ void HttpServer::record_request_rejected(const RequestRejectionLogContext& conte
+ 
+ void HttpServer::record_request_done(const RequestLogContext& context,
+                                      const GenerationOutcome& outcome) {
+-    const auto cached = std::min<int>(outcome.prompt_tokens, outcome.metrics.prefix_cache_hit_tokens);
+-    const auto native_timings = completion_timings_json(outcome);
+-    monitor_->update(std::to_string(context.id), {{"prompt_tokens", outcome.prompt_tokens}, {"cached_tokens", cached},
+-        {"generated_tokens", outcome.completion_tokens},
+-        {"prefill_tps", native_timings.at("prompt_per_second")},
+-        {"decode_tps", native_timings.at("predicted_per_second")}});
++    monitor_->update(std::to_string(context.id), kvmem_monitor_outcome(outcome));
+     monitor_->finish(std::to_string(context.id), "completed");
+     request_jsonl_.write_request_done(context, outcome);
+     metrics_.record_done(outcome);
+@@ -400,6 +396,8 @@ void HttpServer::record_request_done(const RequestLogContext& context,
+ 
+ void HttpServer::record_request_failure(const RequestLogContext& context,
+                                         const RequestFailure& failure) {
++    monitor_->update(std::to_string(context.id), {{"finish_reason",
++        failure.classification == RequestFailureClass::ClientDisconnected ? "disconnect" : "error"}});
+     monitor_->finish(std::to_string(context.id), failure.classification == RequestFailureClass::ClientDisconnected ? "disconnected" : "error");
+     request_jsonl_.write_request_error(context, failure.machine_message);
+     metrics_.record_failure();
+diff --git a/src/serve/kvmem_metrics.h b/src/serve/kvmem_metrics.h
+index 3c188b9236a0ab46d409efe3c806090378d93f2d..02dad3ab4dcf294a637a1fe87f7f209eca5d4732 100644
+--- a/src/serve/kvmem_metrics.h
++++ b/src/serve/kvmem_metrics.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "serve/generation_service.h"
++#include "serve/openai_chat.h"
+ #include "product/speculative_options.h"
+ #include <nlohmann/json.hpp>
+ 
+@@ -17,6 +18,8 @@ inline nlohmann::json kvmem_generation_metrics(const GenerationOutcome& outcome)
+               {"accepted_tokens", m.speculative_accepted_tokens},
+               {"verification_steps", m.speculative_rounds},
+               {"fallback_rounds", m.speculative_fallback_steps},
++              {"ngram_drafted_tokens", m.ngram_drafted_tokens},
++              {"ngram_accepted_tokens", m.ngram_accepted_tokens},
+               {"accepted_per_position", m.speculative_accepted_per_position},
+               {"generation_rounds", rounds}, {"output_tokens", tokens},
+               {"wall_ms", m.generation_wall_seconds * 1000.0},
+@@ -26,7 +29,50 @@ inline nlohmann::json kvmem_generation_metrics(const GenerationOutcome& outcome)
+               {"tokens_per_round", rounds ? Json(double(tokens) / rounds) : Json(nullptr)},
+               {"ms_per_round", rounds ? Json(m.generation_wall_seconds * 1000.0 / rounds) : Json(nullptr)}};
+     if (!rounds) spec["unavailable_reason"] = "no_decode_rounds_observed";
++    if (m.speculative_backend == SpeculativeBackend::Mtp &&
++        m.speculative_draft_tokens >= m.ngram_drafted_tokens &&
++        m.speculative_accepted_tokens >= m.ngram_accepted_tokens) {
++        spec["mtp_drafted_tokens"] = m.speculative_draft_tokens - m.ngram_drafted_tokens;
++        spec["mtp_accepted_tokens"] = m.speculative_accepted_tokens - m.ngram_accepted_tokens;
++    }
+     return {{"speculative", std::move(spec)}};
+ }
+ 
++// Native request results, independent of whether the client requested SSE timing
++// chunks. TTFT execution is admission-to-first-token; request TTFT also includes
++// preparation and queue wait. Keep both boundaries explicit.
++inline nlohmann::json kvmem_monitor_outcome(const GenerationOutcome& outcome) {
++    using Json = nlohmann::json;
++    const auto timings = completion_timings_json(outcome);
++    const auto& m = outcome.metrics;
++    const bool cancelled = outcome.finish_reason == ninfer::FinishReason::Cancelled;
++    const char* finish = cancelled ? "cancelled" : !outcome.tool_calls.empty()
++        ? "tool_calls" : openai_finish_reason(outcome.finish_reason);
++    auto spec = kvmem_generation_metrics(outcome).at("speculative");
++    spec["ngram_archive_drafted_tokens"] = m.ngram_archive_drafted_tokens;
++    spec["ngram_archive_accepted_tokens"] = m.ngram_archive_accepted_tokens;
++    Json result{{"prompt_tokens", outcome.prompt_tokens},
++        {"cached_tokens", std::min<int>(outcome.prompt_tokens, m.prefix_cache_hit_tokens)},
++        {"prompt_new_tokens", timings.at("prompt_n")},
++        {"generated_tokens", outcome.completion_tokens},
++        {"prefill_tps", timings.at("prompt_per_second")},
++        {"prefill_ms", timings.at("prompt_ms")},
++        {"decode_tps", timings.at("predicted_per_second")},
++        {"decode_tps_mean", timings.at("predicted_per_second")},
++        {"decode_ms", timings.at("predicted_ms")},
++        {"ttft_ms", outcome.completion_tokens > 0 ? timings.at("prompt_ms") : Json(nullptr)},
++        {"ttft_request_ms", outcome.completion_tokens > 0 ? Json(m.ttft_seconds * 1000) : Json(nullptr)},
++        {"ttft_scope", "execution"}, {"finish_reason", finish},
++        {"drafts_offered", m.speculative_draft_tokens},
++        {"drafts_accepted", m.speculative_accepted_tokens}, {"speculative", std::move(spec)}};
++    // Native total speculation includes copy drafts. Do not label them as MTP.
++    if (m.speculative_backend == SpeculativeBackend::Mtp &&
++        m.speculative_draft_tokens >= m.ngram_drafted_tokens &&
++        m.speculative_accepted_tokens >= m.ngram_accepted_tokens) {
++        result["mtp_drafts_offered"] = m.speculative_draft_tokens - m.ngram_drafted_tokens;
++        result["mtp_drafts_accepted"] = m.speculative_accepted_tokens - m.ngram_accepted_tokens;
++    }
++    return result;
++}
++
+ } // namespace ninfer::serve
+diff --git a/src/serve/openai_chat_http.cpp b/src/serve/openai_chat_http.cpp
+index 205a499625fbb36ad80b1ec4401c79bf20a613cd..7683ba6d0edeb108f85f26ba7983fe48b2072711 100644
+--- a/src/serve/openai_chat_http.cpp
++++ b/src/serve/openai_chat_http.cpp
+@@ -73,6 +73,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
+     const OpenAIChatResponseIdentity identity = make_openai_chat_response_identity(request.model);
+     auto lifecycle                            = begin_request(make_request_log_context(
+         req_id, "openai_chat_completions", request.generation, metadata, prepared), prepared);
++    prepared.monitor_update({{"native_request_id", identity.id}});
+ 
+     if (!request.stream) {
+         GenerationOutcome outcome;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 52498b39f4925d6d8fd5c7c9cd05ad2605180659..157c26f1e0a3f45a1e6ad4a8b28e76856553b42f 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -234,3 +234,8 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_ptq1_tests_PROGRAMS
+   ninfer_linear_topk_test ninfer_linear_t2_a16_test ninfer_linear_t2_a8_test)
+ ninfer_finalize_bundle(ninfer_ptq1_tests)
+ ninfer_stage_runtime_dlls(ninfer_ptq1_tests)
++
++# Focused serving contract bundle; does not pull in GPU numerical tests.
++set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_monitor_tests_PROGRAMS ninfer_openai_schema_test)
++ninfer_finalize_bundle(ninfer_monitor_tests)
++ninfer_stage_runtime_dlls(ninfer_monitor_tests)
+diff --git a/tests/test_openai_schema.cpp b/tests/test_openai_schema.cpp
+index 01bae096d31a6fd4f725e790dec2536e3e193f73..c02e3f50053b7bf78aa591368343bf844885be81 100644
+--- a/tests/test_openai_schema.cpp
++++ b/tests/test_openai_schema.cpp
+@@ -1,4 +1,5 @@
+ #include "serve/generation_service.h"
++#include "serve/kvmem_metrics.h"
+ #include "serve/openai_chat.h"
+ #include "serve/openai_common.h"
+ #include "serve/structured_output.h"
+@@ -1237,6 +1238,34 @@ OpenAIChatResponseIdentity identity() {
+     return OpenAIChatResponseIdentity{.id = "chatcmpl-test", .model = "qwen", .created = 42};
+ }
+ 
++int test_monitor_outcome() {
++    int failures = 0;
++    auto outcome = sample_outcome();
++    outcome.metrics.ttft_seconds = 0.8;
++    outcome.metrics.prompt_wall_seconds = 0.2;
++    outcome.metrics.generation_wall_seconds = 0.3;
++    outcome.metrics.speculative_backend = ninfer::SpeculativeBackend::Mtp;
++    outcome.metrics.speculative_draft_tokens = 40;
++    outcome.metrics.speculative_accepted_tokens = 25;
++    outcome.metrics.ngram_drafted_tokens = 10;
++    outcome.metrics.ngram_accepted_tokens = 5;
++    outcome.finish_reason = ninfer::FinishReason::OutputLimit;
++    outcome.tool_calls.clear();
++    const auto row = kvmem_monitor_outcome(outcome);
++    const auto timings = completion_timings_json(outcome);
++    failures += check(row["prefill_ms"] == timings["prompt_ms"] && row["decode_ms"] == timings["predicted_ms"], "monitor uses native phase timings");
++    failures += check(row["ttft_ms"] == 200 && row["ttft_request_ms"] == 800 && row["ttft_scope"] == "execution", "monitor separates execution and queued TTFT");
++    failures += check(row["finish_reason"] == "length" && row["drafts_offered"] == 40 && row["mtp_drafts_offered"] == 30 && row["mtp_drafts_accepted"] == 20, "monitor reports actual MTP separately from copy drafts");
++    failures += check(row["decode_tps_mean"] == timings["predicted_per_second"], "monitor retains native request mean");
++    outcome.finish_reason = ninfer::FinishReason::Cancelled;
++    failures += check(kvmem_monitor_outcome(outcome)["finish_reason"] == "cancelled", "monitor retains cancellation");
++    outcome.completion_tokens = 0;
++    failures += check(kvmem_monitor_outcome(outcome)["ttft_ms"].is_null(), "no first token means unavailable TTFT");
++    outcome.metrics.speculative_backend = ninfer::SpeculativeBackend::None;
++    failures += check(!kvmem_monitor_outcome(outcome).contains("mtp_drafts_offered"), "copy-only runs do not claim MTP");
++    return failures;
++}
++
+ int test_aggregate_response() {
+     int failures              = 0;
+     GenerationOutcome outcome = sample_outcome();
+@@ -1735,6 +1764,7 @@ int main(int argc, char** argv) {
+     failures += test_messages_and_media();
+     failures += test_reasoning_and_extensions();
+     failures += test_stops_and_ranges();
++    failures += test_monitor_outcome();
+     failures += test_aggregate_response();
+     failures += test_stream_response();
+     failures += test_stream_observations();

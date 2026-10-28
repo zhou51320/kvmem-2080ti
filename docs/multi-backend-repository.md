@@ -31,6 +31,22 @@ comparison at equal Main KV capacity (native context = KVMem B+G). It does not q
 35B MoE, Flash-Next or Gemma 4 for KVMem. Current evidence is recorded in the same
 migration record; the earlier release results apply to their dated baseline.
 
+The 2026-10-23 upstream/KV refresh pins `db8c114802a070a7903f84d01142fda0b00fa7df`.
+It includes the INT8/rk8v4 and NVFP4 page-feedback specializations while preserving
+master's independent Query controls and native tool constraints. The separate
+`13thblade/ninfer-all-nvfp4` kernel/route/codec import is deferred and is not included.
+The [migration record](ninfer-all-migration-validation.md) separates historical runtime
+evidence from the static-only checks of this split and its integration with current master.
+
+The 2026-10-25 candidate pins `63428ac249da8a6c5d891b508d7e483d8c7def6c`
+and includes the NVFP4 fork from `c02c7692bd10a9b4a7effef67b60f58673985aa6`
+as two author layers plus a local integration layer. The current scope is Qwen
+dense, including upstream's restricted GGUF tensor-parallel route. KVMem shared
+prefill batching and early first-token publication remain deferred. See the
+[current integration record](ninfer-upstream-63428ac2-integration.md) for completed
+checks, performance costs and remaining qualification; the records above remain
+historical evidence for their pinned revisions.
+
 ## Checkout and preparation
 
 ```sh
@@ -99,6 +115,13 @@ An existing compatible dependency installation can be passed with
 operator libraries are needed. The backend CMake default resolves the portable
 core at `../../kvmem` relative to `backends/ninfer`.
 
+Keep shared dependency installations outside dated experiment or worktree folders.
+Pin a versioned bundle and verify its headers, libraries and runtime DLLs before
+building; use the same bundle when running the worker. When a cached dependency
+root has disappeared or changed, reconfigure dependency discovery before resuming
+compilation. Reusable CUDA objects need not be deleted. Never overwrite a bundle
+still used by another build or remove it during ordinary experiment cleanup.
+
 The equivalent portable-core commands on Linux are:
 
 ```sh
@@ -121,17 +144,35 @@ The resulting workers are `build-backends/llamacpp/bin/llama-kvmem-server.exe` a
 
 ## Development and release
 
-Backend changes are recorded in `backends/patches/<backend>-kvmem.patch` in the same
-commit as matching core/adapter changes. Export a binary/full-index Git diff against
-the backend's `HEAD`, including any newly added files, then update `patch_sha256`
-and `patched_tree` in `backends/versions.json`. Keep patch output byte-for-byte
-(avoid PowerShell text redirection changing its encoding). The tree hash is the
-result of staging those backend source changes and running `git write-tree`; no
-backend commit is needed. Validate with `prepare-backends.py --check` and a fresh
-checkout before publishing.
+### README maintenance
+
+Keep `README.md` and `README.zh-CN.md` as a concise, version-independent project
+introduction, quick start and documentation index. Keep the two languages in sync.
+Use `/releases/latest` for the stable release and `/releases` for previews and history.
+
+Routine version releases and package refreshes do not require README edits. Put
+version numbers, per-GPU downloads, package sizes, checksums, driver requirements,
+release-specific defaults and qualification results in GitHub Releases, package
+notes and the relevant documentation. Update the homepage only when the project
+scope, basic startup steps or permanent navigation changes, or when correcting an
+error. Do not replace its stable links with direct versioned asset URLs.
+
+Backend changes are an ordered `patches` list in `backends/versions.json`. Each
+entry records its `id`, repository-relative `path`, SHA-256, preceding `requires`,
+and exact `after_tree`. The backend's `patched_tree` is the final entry's tree.
+The existing `<backend>-kvmem.patch` stays first. Bonsai format support and its
+optional performance changes are separate layers; see [Bonsai integration](bonsai-integration.md).
+
+Export each binary/full-index Git diff against the preceding prepared tree (the
+first patch uses `base_commit`), including newly added files. Keep patch bytes
+unchanged by text redirection. Use an isolated Git index to compute tree hashes;
+no backend commit or change to the developer's index is necessary. Preparation
+preflights the entire series before editing sources and can resume an exact known
+intermediate tree. Unknown source edits are preserved and rejected, never reset.
+Validate `prepare-backends.py --check` and replay from the pinned base before publishing.
 
 For upstream updates, deliberately update the submodule gitlink and `base_commit`,
-rebase the integration patch onto that revision, update hashes and run affected
+rebase the required patch series onto that revision, update hashes and run affected
 checks. Do not follow an unpinned branch. Root `patches/` remains historical material;
 the active patches live under `backends/patches/`.
 

@@ -1,6 +1,6 @@
 # Open a local Windows file picker. Inputs are data, never executable text.
 param(
-    [Parameter(Mandatory)][ValidateSet('ninfer', 'llamacpp')][string]$Backend,
+    [Parameter(Mandatory)][ValidateSet('ninfer', 'llamacpp', 'polystrata')][string]$Backend,
     [string]$InitialDirectory = '',
     [switch]$Folder,
     [switch]$Template

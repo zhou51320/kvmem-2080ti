@@ -1,5 +1,7 @@
 # Query replay：执行策略与验证
 
+> 本文保留 2026-09-14 的历史实现与验证记录。其中旧 Q 重选路径已于 2026-10-21 删除；当前工具续接统一为追加＋Pressure，回放具有独立长度和容量准入。当前规则见 [Graph recall C](graph-recall.md#unified-request-and-replay-policy)。
+
 KVMem 在检索改变可见历史时，需要恢复 recurrent/MTP 状态并重新处理受影响的输入。当前实现会检查历史视图是否保持有效，在满足条件时省去第二遍计算；同一用户问题下的工具续接还可以复用已捕获的查询特征。
 
 实现位于 [host runtime](../kvmem/src/host/kvmem_runtime.cpp)、[内存适配层](../src/adapter/llama-memory-kvmem.cpp) 和[多模态请求执行器](../tools/llama-kvmem-driver.cpp)，继续复用 llama.cpp 的 decode、MTP、聊天模板和 mtmd 能力。

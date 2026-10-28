@@ -1,0 +1,45 @@
+From 3fb431eb4b17c5c3ea06d057c21c98188878d7d5 Mon Sep 17 00:00:00 2001
+From: Yonghye Kwon <developer.0hye@gmail.com>
+Date: Wed, 28 Oct 2026 17:13:01 +0900
+Subject: [PATCH 3/3] cuda : add top-k MoE fusion for 384 experts (#31288)
+
+Assisted-by: Codex
+
+diff --git a/ggml/src/ggml-cuda/topk-moe.cu b/ggml/src/ggml-cuda/topk-moe.cu
+index 81d6ec3..4f138f9 100644
+--- a/ggml/src/ggml-cuda/topk-moe.cu
++++ b/ggml/src/ggml-cuda/topk-moe.cu
+@@ -402,6 +402,10 @@ static void launch_topk_moe_cuda(ggml_backend_cuda_context & ctx,
+             ggml_cuda_kernel_launch(topk_moe_cuda<288, has_bias>, launch_params,
+                 logits, weights, ids, bias, n_rows, n_expert_used, clamp_val, scale_val, config);
+             break;
++        case 384: // DeepSeek V4.1
++            ggml_cuda_kernel_launch(topk_moe_cuda<384, has_bias>, launch_params,
++                logits, weights, ids, bias, n_rows, n_expert_used, clamp_val, scale_val, config);
++            break;
+         case 512:
+             ggml_cuda_kernel_launch(topk_moe_cuda<512, has_bias>, launch_params,
+                 logits, weights, ids, bias, n_rows, n_expert_used, clamp_val, scale_val, config);
+@@ -472,7 +476,7 @@ bool ggml_cuda_should_use_topk_moe(const ggml_tensor * gating_op,
+     // must match an instantiation of launch_topk_moe_cuda: a power of 2 up to 512,
+     // or one of the non-power-of-2 expert counts of supported models
+     const int n_expert = ids->nb[1] / ids->nb[0];
+-    if (((n_expert & (n_expert - 1)) != 0 || n_expert > 512) && n_expert != 288 && n_expert != 576) {
++    if (((n_expert & (n_expert - 1)) != 0 || n_expert > 512) && n_expert != 288 && n_expert != 384 && n_expert != 576) {
+         return false;
+     }
+ 
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 6187469..1385d98 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -11955,6 +11955,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+                     test_cases.emplace_back(new test_topk_moe({160, 4, 1, 1}, 160, with_norm, bias_probs, gate, scale_w));
+                     test_cases.emplace_back(new test_topk_moe({256, 22, 1, 1}, 6, with_norm, bias_probs, gate, scale_w)); // Used by DeepSeek-V4
+                     test_cases.emplace_back(new test_topk_moe({288, 22, 1, 1}, 8, with_norm, bias_probs, gate, scale_w)); // Used by StepFun 3.7
++                    test_cases.emplace_back(new test_topk_moe({384,  1, 1, 1}, 6, with_norm, bias_probs, gate, scale_w)); // Used by DeepSeek-V4.1
++                    test_cases.emplace_back(new test_topk_moe({384,  8, 1, 1}, 6, with_norm, bias_probs, gate, scale_w));
++                    test_cases.emplace_back(new test_topk_moe({384, 22, 1, 1}, 6, with_norm, bias_probs, gate, scale_w));
+                     // rows at and just past the limit where one block still covers all rows
+                     test_cases.emplace_back(new test_topk_moe({32, 8, 1, 1}, 4, with_norm, bias_probs, gate, scale_w));
+                     test_cases.emplace_back(new test_topk_moe({32, 8, 1, 1}, 8, with_norm, bias_probs, gate, scale_w));

@@ -1,0 +1,115 @@
+diff --git a/src/ops/linear/nvfp4/nvfp4_codec_unified.cuh b/src/ops/linear/nvfp4/nvfp4_codec_unified.cuh
+index 050dfc3431bb02fa70da91347308fea06d1853ed..44d8aaa40331d76593ff66c4434d2512a8608fc1 100644
+--- a/src/ops/linear/nvfp4/nvfp4_codec_unified.cuh
++++ b/src/ops/linear/nvfp4/nvfp4_codec_unified.cuh
+@@ -53,6 +53,9 @@ __device__ __forceinline__ float decode_nvfp4_e4m3(std::uint8_t storage) {
+ 
+ __device__ __forceinline__ unsigned nvfp4_scaled_pair_bf16(std::uint8_t code, std::uint8_t scale) {
+ #if NINFER_NATIVE_FP8_FP4_PAIR_CVT
++    // Stored UE4M3 weight scales map 0x7F to zero, like the software table.
++    // Native E4M3 conversion would otherwise inject NaNs into the matrix product.
++    if (scale == 0x7Fu) { scale = 0; }
+     // E2M1 times a finite E4M3 scale needs at most six significand bits, so the BF16 product is
+     // exact and equals the FP32 expansion below.
+     unsigned values, multiplier, result;
+@@ -94,6 +97,7 @@ __device__ __forceinline__ unsigned nvfp4_scaled_pair_bf16(std::uint8_t code, st
+ __device__ __forceinline__ void nvfp4_scaled_quad_bf16(unsigned codes, std::uint8_t scale,
+                                                        unsigned out[4]) {
+ #if NINFER_NATIVE_FP8_FP4_PAIR_CVT
++    if (scale == 0x7Fu) { scale = 0; }
+     const auto scale_pair = static_cast<std::uint16_t>(scale | (static_cast<unsigned>(scale) << 8));
+     unsigned multiplier;
+     asm("cvt.rn.bf16x2.e4m3x2 %0, %1;" : "=r"(multiplier) : "h"(scale_pair));
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 157c26f1e0a3f45a1e6ad4a8b28e76856553b42f..2499048d9f7ae636d00cef53e0ff127ab9b7b548 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -212,10 +212,12 @@ set_tests_properties(ninfer_nvfp4_mode_binding PROPERTIES SKIP_RETURN_CODE 77)
+ ninfer_stage_runtime_dlls(ninfer_nvfp4_mode_binding)
+ 
+ # Reuse the five relevant oracle objects without building unrelated test families.
++ninfer_add_op_test(ninfer_nvfp4_native_scale_test
++  SOURCES experimental/nvfp4_native_scale.cu LIBRARIES ninfer_ops)
+ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_nvfp4_fork_tests_PROGRAMS
+   ninfer_linear_nvfp4_a16_test ninfer_linear_nvfp4_int8_test
+   ninfer_linear_nvfp4_int8_fused_norm_test ninfer_linear_swiglu_nvfp4_test
+-  ninfer_linear_add_nvfp4_test)
++  ninfer_linear_add_nvfp4_test ninfer_nvfp4_native_scale_test)
+ ninfer_finalize_bundle(ninfer_nvfp4_fork_tests)
+ ninfer_stage_runtime_dlls(ninfer_nvfp4_fork_tests)
+ 
+diff --git a/tests/experimental/nvfp4_native_scale.cu b/tests/experimental/nvfp4_native_scale.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f83e1b39cf09fd2743a64fe8969b77aab9b093b
+--- /dev/null
++++ b/tests/experimental/nvfp4_native_scale.cu
+@@ -0,0 +1,69 @@
++#include "ops/linear/nvfp4/nvfp4_codec_unified.cuh"
++#include <cuda_runtime.h>
++#include <bit>
++#include <cmath>
++#include <cstdint>
++#include <iostream>
++#include <stdexcept>
++#include <vector>
++
++namespace {
++constexpr unsigned cases = 256 * 128;
++__global__ void decode(std::uint32_t* output) {
++    const unsigned index = blockIdx.x * blockDim.x + threadIdx.x;
++    if (index >= cases) return;
++    const auto code = static_cast<std::uint8_t>(index & 255);
++    const auto scale = static_cast<std::uint8_t>(index >> 8);
++    output[5 * index] = ninfer::ops::detail::unified::nvfp4_scaled_pair_bf16(code, scale);
++    unsigned word = 0;
++    for (unsigned i = 0; i < 4; ++i) word |= unsigned(code ^ (i * 0x55u)) << (8 * i);
++    ninfer::ops::detail::unified::nvfp4_scaled_quad_bf16(word, scale, output + 5 * index + 1);
++}
++void check(cudaError_t error) {
++    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
++}
++std::uint16_t expected(unsigned code, unsigned scale) {
++    constexpr double magnitudes[]{0, 0.5, 1, 1.5, 2, 3, 4, 6};
++    const double value = (code & 8) ? -magnitudes[code & 7] : magnitudes[code & 7];
++    const unsigned exponent = scale >> 3, mantissa = scale & 7;
++    const double multiplier = scale == 127 ? 0 : exponent == 0
++        ? std::ldexp(double(mantissa), -9)
++        : std::ldexp(1 + double(mantissa) / 8, int(exponent) - 7);
++    // These represented products need at most six significand bits and fit BF16 exactly.
++    const float represented = static_cast<float>(value * multiplier);
++    return static_cast<std::uint16_t>(std::bit_cast<std::uint32_t>(represented) >> 16);
++}
++std::uint32_t expected_pair(unsigned code, unsigned scale) {
++    return unsigned(expected(code & 15, scale)) | (unsigned(expected(code >> 4, scale)) << 16);
++}
++}
++int main() {
++    int count = 0;
++    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) return 77;
++    std::uint32_t* device = nullptr;
++    try {
++        check(cudaMalloc(reinterpret_cast<void**>(&device), cases * 5 * sizeof(std::uint32_t)));
++        decode<<<(cases + 255) / 256, 256>>>(device);
++        check(cudaGetLastError());
++        std::vector<std::uint32_t> values(cases * 5);
++        check(cudaMemcpy(values.data(), device, values.size() * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
++        check(cudaFree(device)); device = nullptr;
++        for (unsigned index = 0; index < cases; ++index) {
++            const unsigned code = index & 255, scale = index >> 8;
++            for (unsigned part = 0; part < 5; ++part) {
++                const unsigned selected = part ? code ^ ((part - 1) * 0x55u) : code;
++                if (values[5 * index + part] != expected_pair(selected, scale)) {
++                    std::cerr << "NVFP4 scale decode differs: code=" << selected << " scale="
++                              << scale << " part=" << part << '\n';
++                    return 1;
++                }
++            }
++        }
++        std::cout << "NVFP4 pair/quad decode: all 32768 code/scale pairs match independent FP64 oracle\n";
++        return 0;
++    } catch (const std::exception& error) {
++        if (device) cudaFree(device);
++        std::cerr << error.what() << '\n';
++        return 1;
++    }
++}

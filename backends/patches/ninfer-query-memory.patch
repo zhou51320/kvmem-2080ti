@@ -1,0 +1,1245 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 75583ddf503c91e25fa1c4594ac9b2197b579937..1a9dd050755a6bbd5dd9b6391c5d0b8a7c1c9224 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -333,9 +333,22 @@ if(NOT EXISTS "${NINFER_KVMEM_SOURCE_DIR}/include/kvmem/memory_contract.hpp")
+ endif()
+ add_subdirectory("${NINFER_KVMEM_SOURCE_DIR}" "kvmem-core" EXCLUDE_FROM_ALL)
+ kvmem_enable_cuda_recall(CUDART_TARGET ${NINFER_CUDART_TARGET})
++option(NINFER_KVMEM_QUERY_TEST_HOOKS "Enable deterministic native Query lifecycle test rendezvous and fingerprints" OFF)
+ 
+ # --- Subdirectories ----------------------------------------------------------
+ add_subdirectory(src)
++if(NINFER_KVMEM_QUERY_TEST_HOOKS)
++  if(NOT BUILD_TESTING)
++    message(FATAL_ERROR "NINFER_KVMEM_QUERY_TEST_HOOKS requires BUILD_TESTING")
++  endif()
++  set_property(SOURCE
++    src/models/qwen3_5/program/prefill.cpp
++    src/models/qwen3_5/program/storage/memory_statistics.cpp
++    src/models/qwen3_5/program/storage/kvmem_window.cpp
++    TARGET_DIRECTORY ninfer_model_runtime
++    APPEND PROPERTY COMPILE_DEFINITIONS NINFER_KVMEM_QUERY_TEST_HOOKS=1)
++endif()
++
+ if(NINFER_BUILD_APPS)
+   add_subdirectory(apps)
+   add_subdirectory(tools)
+diff --git a/docs/serving.md b/docs/serving.md
+index b4f66a9b95e573bb9a3dffb6a57b46b408ab13d9..94f795abd0f7a3a237076bac0cc41f1783a5c7b5 100644
+--- a/docs/serving.md
++++ b/docs/serving.md
+@@ -1229,9 +1229,15 @@ last JSON chunk before `[DONE]`: the empty `choices` usage chunk when
+ }
+ ```
+ 
+-`cache_n` is the exact Engine-proven reused prompt prefix and `prompt_n` is the remaining prompt
+-suffix, so `cache_n + prompt_n` equals `usage.prompt_tokens`. Prompt time starts when admission
+-commits that exact reuse choice and ends when the first output token is committed. Generation time
++`cache_n` is the exact Engine-proven reused prompt prefix and terminal `prompt_n` is the
++uncached prompt tokens actually accepted at completed prefill boundaries. For a completed
++prefill, `cache_n + prompt_n` equals `usage.prompt_tokens`; cancellation during prefill can
++leave a smaller sum, and cancellation before admission reports zero for both.
++`request_done.result.computed_prefill_tokens` and console prefill rates use the same actual progress,
++excluding internal replay. Logical input usage still reports the full prompt.
++Prompt time starts when admission
++commits that exact reuse choice and ends when the first output token is committed, or at
++termination if prefill is cancelled before output. Generation time
+ starts at that first token and ends at the last committed output token. Accordingly, generation
+ speed uses `max(predicted_n - 1, 0)` token intervals; the first token belongs to prompt latency and
+ is not counted again as a decode interval. Zero-token, one-token, zero-duration, and exact-cache-hit
+diff --git a/include/ninfer/observability/execution.h b/include/ninfer/observability/execution.h
+index f50a8b1f6a08c47d43c467359cd7785b7a49da26..3040d7bead70850c1f74e7178488297fed3aa44f 100644
+--- a/include/ninfer/observability/execution.h
++++ b/include/ninfer/observability/execution.h
+@@ -32,7 +32,8 @@ struct GenerationTimings {
+     std::uint32_t overlay_exclusive_windows = 0;
+     double decode_seconds      = 0.0;
+     // Request wall phases at committed model-state boundaries. Prompt begins when admission and
+-    // its exact reuse choice are published and ends at the first accepted output token. Generation
++    // its exact reuse choice are published and ends at the first accepted output token, or
++    // at termination when prefill is cancelled before output. Generation
+     // spans the first through last accepted output token and therefore has N-1 token intervals.
+     double prompt_wall_seconds     = 0.0;
+     double generation_wall_seconds = 0.0;
+diff --git a/include/ninfer/ops/token_sums.h b/include/ninfer/ops/token_sums.h
+index 9c7ede518ca14fd2f735f9cfe5336c5fe09f40a4..1e044764a2463435b1ad462e7038f44bd1859094 100644
+--- a/include/ninfer/ops/token_sums.h
++++ b/include/ninfer/ops/token_sums.h
+@@ -16,4 +16,23 @@ namespace ninfer::ops {
+ // Numerical reference: naive FP64 sums of the represented BF16 inputs.
+ void token_sums(const Tensor& input, const Tensor& origin, const Tensor& range,
+                 std::uint32_t block_tokens, Tensor& output, cudaStream_t stream);
++
++// Copy the represented BF16 rows in the intersection of [origin,origin+T) and
++// range into contiguous output [channels,capacity], starting at row zero. The
++// intersection must fit capacity; unused output rows are zeroed. No conversion
++// or token reduction occurs. Input, origin and range have the token_sums layout;
++// every buffer is contiguous and disjoint. Origin/range may change on replay.
++// The reference is an exact copy of the selected represented input bits.
++void capture_query_rows(const Tensor& input, const Tensor& origin, const Tensor& range,
++                        Tensor& output, cudaStream_t stream);
++
++// Add that intersection, in increasing token order, to an FP32 [channels,1]
++// accumulator. The caller seeds it with the accepted Query prefix before each
++// invocation (including graph replay); this preserves the sequential FP32 sum
++// across chunk boundaries and interleaved sequences. Non-Query rows contribute
++// nothing. All buffers are disjoint and the Op owns no allocation or state.
++// Numerical reference: FP64 sum including the represented FP32 seed. The
++// chronological FP32 additions are also a state boundary across chunk splits.
++void accumulate_query_sum(const Tensor& input, const Tensor& origin, const Tensor& range,
++                          Tensor& output, cudaStream_t stream);
+ } // namespace ninfer::ops
+diff --git a/include/ninfer/request.h b/include/ninfer/request.h
+index c657bec75808f67fa5d5563f17947d84bba7e128..d7478db81fad8591473a14e7ffefbc46e149a3fd 100644
+--- a/include/ninfer/request.h
++++ b/include/ninfer/request.h
+@@ -657,6 +657,9 @@ struct GenerationResult {
+     std::uint32_t reasoning_tokens = 0;
+     FinishReason finish_reason     = FinishReason::None;
+     std::optional<std::string> matched_stop_string;
++    // Logical uncached prompt tokens accepted at completed prefill boundaries.
++    // Excludes reused prefixes and internal replay; may be partial or zero on cancellation.
++    std::uint32_t computed_prompt_tokens = 0;
+     std::uint32_t reused_prompt_tokens = 0;
+     PrefixReusePath prefix_reuse_path  = PrefixReusePath::Root;
+     MaterializationDiagnostics materialization;
+diff --git a/src/models/qwen3_5/execution/attention.cpp b/src/models/qwen3_5/execution/attention.cpp
+index a6ba5e7d2f631bbef9fc07e69947ef99cb820fc8..979b34748d607893c8bc93c24534ad63e7de7adb 100644
+--- a/src/models/qwen3_5/execution/attention.cpp
++++ b/src/models/qwen3_5/execution/attention.cpp
+@@ -133,10 +133,15 @@ void text_qk_norm_rope(const Tensor& positions, const RopeConfig& rope,
+         ops::token_sums(normalized_key.view({dimension(attention.key_width()), tokens}),
+                         origin, statistics->ranges.slice(0, 0, 2), block, k_sum, stream);
+         if (block != 1) {
+-            Tensor q_rows = statistics->query_sums.slice(2, layer, 1).slice(1, 0, tokens)
+-                                .view({dimension(attention.query_width()), tokens});
+-            ops::token_sums(normalized_query.view({dimension(attention.query_width()), tokens}),
+-                            origin, statistics->ranges.slice(0, 2, 2), 1, q_rows, stream);
++            Tensor q_values = statistics->query_values.slice(2, layer, 1)
++                                  .view({dimension(attention.query_width()), statistics->query_values.ne[1]});
++            const auto q_input = normalized_query.view({dimension(attention.query_width()), tokens});
++            const auto q_range = statistics->ranges.slice(0, 2, 2);
++            if (q_values.dtype == DType::FP32) {
++                ops::accumulate_query_sum(q_input, origin, q_range, q_values, stream);
++            } else {
++                ops::capture_query_rows(q_input, origin, q_range, q_values, stream);
++            }
+         }
+     }
+     ops::rope(positions, dimension(rope.rotary_dim), rope.rope_theta, yarn, normalized_query,
+diff --git a/src/models/qwen3_5/execution/memory_statistics.h b/src/models/qwen3_5/execution/memory_statistics.h
+index 30b1bb0f297c7af4d572fb270c0cef2b10dfab20..8292e8aa0d0d22b5af61df13749f239577f4cb03 100644
+--- a/src/models/qwen3_5/execution/memory_statistics.h
++++ b/src/models/qwen3_5/execution/memory_statistics.h
+@@ -5,12 +5,14 @@
+ namespace ninfer::models::qwen3_5::execution {
+ // Stable Program-owned buffers, borrowed by eager execution and graph capture.
+ // Each shard holds its stage's attention layers. Host stores use global layer order.
+-// Key sums: [key_width,buckets,layers]; query sums: [query_width,1,layers].
++// Key sums: FP32 [key_width,buckets,layers]. Query values are either compact
++// BF16 [query_width,query_capacity,layers] or seeded FP32 [query_width,1,layers]
++// for Mean-Q; attention feedback uses its separate post-RoPE capture.
+ // Ranges: [K begin,end,Q begin,end].
+ // Only normalized, represented BF16 values BEFORE RoPE enter these reductions.
+ struct MemoryStatisticsShard {
+     Tensor key_sums;
+-    Tensor query_sums;
++    Tensor query_values;
+     Tensor attention_queries; // BF16 post-RoPE target Q, three global spread3 slots
+     Tensor attention_tokens;
+     Tensor attention_rows, attention_positions, attention_scratch, attention_norms, attention_output;
+@@ -30,6 +32,11 @@ struct MemoryStatistics {
+     std::uint32_t layers = 0;
+     std::uint32_t columns = 0;
+     std::uint32_t query_columns = 0;
++    bool mean_query = false;
++
++    [[nodiscard]] std::size_t query_element_bytes() const noexcept {
++        return mean_query ? sizeof(float) : sizeof(std::uint16_t);
++    }
+ 
+     [[nodiscard]] std::size_t key_bytes() const noexcept {
+         return std::size_t(key_width) * columns * layers * sizeof(float);
+@@ -38,7 +45,7 @@ struct MemoryStatistics {
+         return std::size_t(query_width) * query_columns * layers;
+     }
+     [[nodiscard]] std::size_t query_bytes() const noexcept {
+-        return query_elements() * sizeof(float);
++        return query_elements() * query_element_bytes();
+     }
+ };
+ } // namespace ninfer::models::qwen3_5::execution
+diff --git a/src/models/qwen3_5/program/planning/startup.cpp b/src/models/qwen3_5/program/planning/startup.cpp
+index a42162a6c0bb8fc0bbac2d105d0219b0996690dc..02a8bacd954bc3f8b4a0f8be4c9161234c443363 100644
+--- a/src/models/qwen3_5/program/planning/startup.cpp
++++ b/src/models/qwen3_5/program/planning/startup.cpp
+@@ -363,8 +363,11 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
+                  dimension((widest_verify_window(plan) + 1) * plan.max_concurrency), layers},
+                  "memory candidate keys");
+             stats.candidate_origin = add_tensor(local, DType::I32, {1}, "memory candidate origin");
+-            stats.query_sums = add_tensor(local, DType::FP32,
+-                {dimension(config.attention->query_width()), dimension(effective_prefill_chunk), layers}, "memory query rows");
++            const auto query_columns = plan.kvmem.query_meanq_cosine ? 1U :
++                std::min<std::uint32_t>(effective_prefill_chunk, plan.kvmem.query_max_tokens);
++            stats.query_values = add_tensor(local, plan.kvmem.query_meanq_cosine ? DType::FP32 : DType::BF16,
++                {dimension(config.attention->query_width()), dimension(query_columns), layers},
++                plan.kvmem.query_meanq_cosine ? "memory query sums" : "memory query rows");
+             const auto capture_columns=std::max<std::size_t>(effective_prefill_chunk,
+                 (widest_verify_window(plan)+1U)*plan.max_concurrency);
+             stats.attention_queries=add_tensor(local,DType::BF16,
+@@ -385,9 +388,11 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
+         out.memory_statistics.front().attention_tokens=add_tensor(builder,DType::I32,
+             {dimension(std::max<std::size_t>(effective_prefill_chunk,(widest_verify_window(plan)+1U)*plan.max_concurrency))},
+             "memory consumed token capture");
+-        const auto query_bytes=kvmem::PageSoftmaxCuda::workspace_bytes((plan.capacity+63U)/64U,
+-            config.attention->num_attention_heads,config.attention->num_key_value_heads,config.attention->head_dim);
+-        out.memory_query_workspace=add_tensor(builder,DType::U8,{dimension(query_bytes)},"memory page-softmax workspace");
++        if (!plan.kvmem.query_meanq_cosine) {
++            const auto query_bytes=kvmem::PageSoftmaxCuda::workspace_bytes((plan.capacity+63U)/64U,
++                config.attention->num_attention_heads,config.attention->num_key_value_heads,config.attention->head_dim);
++            out.memory_query_workspace=add_tensor(builder,DType::U8,{dimension(query_bytes)},"memory page-softmax workspace");
++        }
+     }
+     if (plan.causal_scoring) {
+         out.score_hidden =
+diff --git a/src/models/qwen3_5/program/planning/startup.h b/src/models/qwen3_5/program/planning/startup.h
+index f6fccb09d911bcafdc2fa769372017ed5d7747ce..d36e2a59a6a51d609809311c4e01765fddb2a60d 100644
+--- a/src/models/qwen3_5/program/planning/startup.h
++++ b/src/models/qwen3_5/program/planning/startup.h
+@@ -42,7 +42,7 @@ struct MemoryStatisticsLayout {
+     TensorLayout candidate_keys;
+     TensorLayout candidate_origin;
+     TensorLayout prefill_origin;
+-    TensorLayout query_sums;
++    TensorLayout query_values;
+     TensorLayout attention_queries;
+     TensorLayout attention_tokens;
+     TensorLayout attention_rows, attention_positions, attention_scratch, attention_norms, attention_output;
+@@ -50,7 +50,7 @@ struct MemoryStatisticsLayout {
+ };
+ 
+ struct PersistentLayout {
+-    TensorLayout memory_query_workspace;
++    std::optional<TensorLayout> memory_query_workspace;
+     qwen3_5::DecoderStateLayout decoder;
+     qwen3_5::StateImageDeviceLayout state_images;
+     // ReplaySSM records, one layout per state shard: the first here, the rest in `extra`.
+diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
+index 9b0e197bd5059ebef25d8fe6931f48c301f71a09..b3f46c31c0920bd72530c0047749cea1d5db3469 100644
+--- a/src/models/qwen3_5/program/prefill.cpp
++++ b/src/models/qwen3_5/program/prefill.cpp
+@@ -1,5 +1,8 @@
+ #include "runtime/contract/lookup_draft.h"
+ #include "models/qwen3_5/program/program_impl.h"
++#ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
++#include "models/qwen3_5/program/query_test_support.h"
++#endif
+ #include "kvmem/mean_key_retrieval.hpp"
+ #include "models/qwen3_5/program/context_work.h"
+ #include "models/qwen3_5/program/context.h"
+@@ -1241,6 +1244,24 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
+     return timing.finish();
+ }
+ 
++void RequestControl::snapshot_prefill_timings() noexcept {
++    if (!prefill) { return; }
++    const auto& staged = *prefill;
++    const double vision_seconds = staged.vision ? staged.vision->elapsed_seconds() : 0.0;
++    timings.vision_seconds  = vision_seconds;
++    timings.prefill_seconds = std::max(0.0, staged.elapsed_seconds - vision_seconds);
++    if (staged.vision) {
++        const execution::VisionOverlayWindowStats overlay = staged.vision->overlay_stats();
++        timings.overlay_windows           = overlay.windows;
++        timings.overlay_exclusive_windows = overlay.exclusive_windows;
++        timings.overlay_window_seconds    = overlay.window_seconds;
++        timings.overlay_evict_seconds     = overlay.evict_seconds;
++        timings.overlay_restore_seconds   = overlay.restore_seconds;
++        timings.overlay_evicted_bytes     = overlay.evicted_bytes;
++        timings.overlay_staged_bytes      = overlay.staged_bytes;
++    }
++}
++
+ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+                                                         RequestControl& request,
+                                                         runtime::ExecutionTiming* failed_timing) {
+@@ -1683,6 +1704,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
+                     throw std::logic_error("staged prefill reached the prompt without sampling");
+                 }
+                 if (!finalized) {
++#ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
++                    query_test_boundary(sequence.lane, sequence.window.query_tokens,
++                        sequence.window.query_end-sequence.window.query_begin,
++                        sequence.window.query_replayed);
++#endif
+                     staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
+                     return runtime::PrefillStepResult{.summary=summary,
+                         .processed_prompt_tokens=reported_tokens(),.timing=timing.finish()};
+@@ -1810,7 +1836,6 @@ runtime::PrefillStepResult ProgramImpl::complete_prefill_step(
+     std::uint32_t processed_prompt_tokens, std::span<const TokenId> initial_drafts,
+     bool drafts_pending, runtime::ExecutionTimingRecorder& timing) {
+     RequestControl::Prefill& staged   = *request.prefill;
+-    const double vision_seconds       = staged.vision ? staged.vision->elapsed_seconds() : 0.0;
+     const std::uint32_t prompt_tokens = staged.prompt_tokens;
+     sequence.window.query_replay_active = false;
+ 
+@@ -1835,18 +1860,7 @@ runtime::PrefillStepResult ProgramImpl::complete_prefill_step(
+         throw std::logic_error("staged DFlash prefill did not reach the prompt frontier");
+     }
+     sequence.tail_hidden_valid      = true;
+-    request.timings.vision_seconds  = vision_seconds;
+-    request.timings.prefill_seconds = std::max(0.0, staged.elapsed_seconds - vision_seconds);
+-    if (staged.vision) {
+-        const execution::VisionOverlayWindowStats overlay = staged.vision->overlay_stats();
+-        request.timings.overlay_windows           = overlay.windows;
+-        request.timings.overlay_exclusive_windows = overlay.exclusive_windows;
+-        request.timings.overlay_window_seconds    = overlay.window_seconds;
+-        request.timings.overlay_evict_seconds     = overlay.evict_seconds;
+-        request.timings.overlay_restore_seconds   = overlay.restore_seconds;
+-        request.timings.overlay_evicted_bytes     = overlay.evicted_bytes;
+-        request.timings.overlay_staged_bytes      = overlay.staged_bytes;
+-    }
++    request.snapshot_prefill_timings();
+     staged.prompt.release_all_media_payloads();
+     if (staged.vision) { staged.vision->retire_handoff(); }
+ 
+diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
+index 5e421ded9a647a0410fcf2bc20850864466d4aa9..c488999d46d22e2ab727779834bb917e2bc3950a 100644
+--- a/src/models/qwen3_5/program/program_impl.cpp
++++ b/src/models/qwen3_5/program/program_impl.cpp
+@@ -651,15 +651,19 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
+     prefill_hidden = plan.persistent.prefill_hidden.bind(backing);
+     if (!plan.persistent.memory_statistics.empty()) {
+         const auto& config = parameters.model.config().text;
+-        const auto query_workspace=plan.persistent.memory_query_workspace.bind(backing);
+-        memory_query_scorer=std::make_unique<kvmem::PageSoftmaxCuda>(device.rank(0).device,
+-            query_workspace.data,query_workspace.bytes(),(capacity+63U)/64U,
+-            config.attention->num_attention_heads,config.attention->num_key_value_heads,config.attention->head_dim);
++        if (plan.persistent.memory_query_workspace) {
++            const auto query_workspace=plan.persistent.memory_query_workspace->bind(backing);
++            memory_query_scorer=std::make_unique<kvmem::PageSoftmaxCuda>(device.rank(0).device,
++                query_workspace.data,query_workspace.bytes(),(capacity+63U)/64U,
++                config.attention->num_attention_heads,config.attention->num_key_value_heads,config.attention->head_dim);
++        }
+         memory_statistics.emplace();
+         memory_statistics->key_width = config.attention->key_width();
+         memory_statistics->query_width = config.attention->query_width();
+         memory_statistics->layers = config.full_attention_layers;
+-        memory_statistics->query_columns = std::min(plan.prefill_chunk, plan.capacity);
++        memory_statistics->mean_query = kvmem_options.query_meanq_cosine;
++        memory_statistics->query_columns = memory_statistics->mean_query ? 1U :
++            std::min({plan.prefill_chunk, plan.capacity, kvmem_options.query_max_tokens});
+         memory_statistics->columns = (std::min(plan.prefill_chunk, plan.capacity) + 126U) / 64U;
+         memory_statistics->ranks.resize(device.size());
+         memory_candidate_statistics = *memory_statistics;
+@@ -679,7 +683,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
+             candidates.attention_tokens=stats.attention_tokens;
+             if (!layout.layers) { continue; }
+             stats.key_sums = layout.key_sums.bind(backings[rank]);
+-            stats.query_sums = layout.query_sums.bind(backings[rank]);
++            stats.query_values = layout.query_values.bind(backings[rank]);
+             stats.attention_queries = layout.attention_queries.bind(backings[rank]);
+             stats.attention_rows=layout.attention_rows.bind(backings[rank]);
+             stats.attention_positions=layout.attention_positions.bind(backings[rank]);
+@@ -688,7 +692,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
+             stats.attention_output=layout.attention_output.bind(backings[rank]);
+             stats.ranges = layout.ranges.bind(backings[rank]);
+             candidates.key_sums = layout.candidate_keys.bind(backings[rank]);
+-            candidates.query_sums = stats.query_sums;
++            candidates.query_values = stats.query_values;
+             candidates.attention_queries = stats.attention_queries;
+             candidates.attention_tokens = stats.attention_tokens;
+             candidates.attention_rows=stats.attention_rows;
+diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
+index c09fe371ebc4693a5f4c59011c6e37ef3b8dc40e..6274cfdce6e89b96e8f86a0ef5db01581ab1890f 100644
+--- a/src/models/qwen3_5/program/program_impl.h
++++ b/src/models/qwen3_5/program/program_impl.h
+@@ -628,6 +628,9 @@ struct KvmemWindowState {
+     std::unique_ptr<kvmem::RawKvStore> statistics;
+     std::unique_ptr<kvmem::KvMemStore> selector;
+     std::vector<std::vector<float>> query_rows;
++    // Mean-Q keeps the chronological FP32 sum instead of retaining token rows.
++    // The per-step device accumulator is always reseeded from this accepted state.
++    std::vector<float> query_sums;
+     kvmem::GraphSnapshot graph;
+     kvmem::AttentionFeedback feedback;
+     kvmem::OutputSampleState attention_scope;
+@@ -815,6 +818,9 @@ struct RequestControl {
+ 
+     std::optional<Prefill> prefill;
+ 
++    // Snapshot completed prefill work before normal completion or cancellation retires it.
++    void snapshot_prefill_timings() noexcept;
++
+     // Returns the request slot to Empty once its lane's resources have been released. Nothing of
+     // the request survives into the lane's next one: its grammar, its tool-open ban, and its
+     // logprob switch belong to the request, whichever admission path installs the next.
+diff --git a/src/models/qwen3_5/program/query_test_support.h b/src/models/qwen3_5/program/query_test_support.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..95e42affc37f0fa026fdc6667bec8f9a4ca8f42a
+--- /dev/null
++++ b/src/models/qwen3_5/program/query_test_support.h
+@@ -0,0 +1,45 @@
++#pragma once
++
++// Only included by the explicitly enabled Query lifecycle test build. No
++// request fields or production scheduling policy depend on this rendezvous.
++#include <bit>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <filesystem>
++#include <fstream>
++#include <stdexcept>
++#include <thread>
++
++namespace ninfer::models::qwen3_5::detail {
++inline void query_test_hash(std::uint64_t& hash, float value) {
++    const auto bits = std::bit_cast<std::uint32_t>(value);
++    for (unsigned shift = 0; shift < 32; shift += 8) {
++        hash ^= (bits >> shift) & 255U;
++        hash *= 1099511628211ULL;
++    }
++}
++
++inline void query_test_boundary(std::uint32_t lane, std::uint32_t accepted,
++                                std::uint32_t total, bool replayed) {
++    if (!accepted || accepted >= total || replayed) return;
++    const char* directory = std::getenv("NINFER_QUERY_TEST_GATE");
++    if (!directory || !*directory) return;
++    const std::filesystem::path root(directory);
++    if (!std::filesystem::exists(root / "arm") || std::filesystem::exists(root / "ready")) return;
++    // The HTTP test queues another real request or disconnects the current
++    // client here, then releases the worker to its normal scheduling boundary.
++    {
++        std::ofstream ready(root / "ready.tmp");
++        ready << lane << ' ' << accepted << ' ' << total << '\n';
++        if (!ready) throw std::runtime_error("Query test gate could not publish readiness");
++    }
++    std::filesystem::rename(root / "ready.tmp", root / "ready");
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
++    while (!std::filesystem::exists(root / "release")) {
++        if (std::chrono::steady_clock::now() >= deadline)
++            throw std::runtime_error("Query lifecycle test gate timed out");
++        std::this_thread::sleep_for(std::chrono::milliseconds(5));
++    }
++}
++} // namespace ninfer::models::qwen3_5::detail
+diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+index 5d7887107ac74e1407c89231672e4a532563fe45..1b102a9c9520862b35ab49cfc3223ffc71f3bb8d 100644
+--- a/src/models/qwen3_5/program/storage/kvmem_window.cpp
++++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
+@@ -1040,6 +1040,11 @@ bool ProgramImpl::rewind_memory_query(SequenceState& sequence) {
+     for(uint32_t id=0;id<pages;++id) {candidates.push_back(id);scores.push_back(window.selector->selection_score(id));}
+     window.query_selected=window.selector->pick_scored_blocks(candidates,scores,window.query_required,
+         kvmem_options.selected_tokens/page_tokens,true);
++#ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
++    std::fprintf(stderr,"KVMEM_QUERY_TEST phase=selected lane=%u rows=%u pages=",sequence.lane,window.query_tokens);
++    for (auto page:window.query_selected) std::fprintf(stderr,"%u,",page);
++    std::fprintf(stderr,"\n");
++#endif
+     const auto admission=kvmem::query_replay_plan({window.query_begin,window.query_end},frontier,
+         sequence.text_kv_valid,kvmem_options.query_replay_max_tokens,page_tokens,
+         window.query_selected.size(),kvmem_window_tokens/page_tokens,
+@@ -1372,6 +1377,7 @@ bool ProgramImpl::restore_memory_history(SequenceState& sequence, RequestControl
+     // determines continuation; never retain features from a discarded suffix.
+     window.query_tokens = 0;
+     for(auto& rows:window.query_rows) rows.clear();
++    window.query_sums.clear();
+     // The durable archive already covers the quoted prefix. This is not a
+     // native allocation frontier; force-selection creates only B resident rows.
+     sequence.text_kv_valid = *frontier;
+@@ -1524,6 +1530,7 @@ void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestCo
+     window.query_tokens=0;
+     window.query_capture=false;
+     for(auto& rows:window.query_rows) std::vector<float>().swap(rows);
++    std::vector<float>().swap(window.query_sums);
+     if (window.session_key) {
+         for (const auto& publication : memory_publications) {
+             if (publication.key == window.session_key && publication.order > window.publication_order) return;
+diff --git a/src/models/qwen3_5/program/storage/memory_statistics.cpp b/src/models/qwen3_5/program/storage/memory_statistics.cpp
+index ad0bcd504c995ffff7d9d117b2acee7a69971ca9..df8017461587ae2797dab84aad9d00b1a1c4c3d9 100644
+--- a/src/models/qwen3_5/program/storage/memory_statistics.cpp
++++ b/src/models/qwen3_5/program/storage/memory_statistics.cpp
+@@ -1,16 +1,32 @@
+ #include "models/qwen3_5/program/program_impl.h"
++#ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
++#include "models/qwen3_5/program/query_test_support.h"
++#endif
++#include <bit>
+ #include <cmath>
+ #include <cstdio>
+ #include "ninfer/ops/attention_page_mass.h"
+ 
+ namespace ninfer::models::qwen3_5::detail {
+ namespace {
++#ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
++std::uint64_t query_test_fingerprint(const KvmemWindowState& state, bool mean) {
++    std::uint64_t hash=14695981039346656037ULL;
++    if (mean) {
++        for (auto value:state.query_sums) query_test_hash(hash,value);
++    } else {
++        for (const auto& layer:state.query_rows)
++            for (auto value:layer) query_test_hash(hash,value);
++    }
++    return hash;
++}
++#endif
+ void read_statistics(DeviceContext& device, const execution::MemoryStatistics& statistics,
+                      void* destination, bool include_query,
+-                     std::uint32_t query_first=0,std::uint32_t query_count=0) {
++                     std::uint32_t query_count=0) {
+     auto* host = static_cast<std::byte*>(destination);
+     const auto key_stride = std::size_t(statistics.key_width) * statistics.columns * sizeof(float);
+-    const auto query_stride = std::size_t(statistics.query_width) * statistics.query_columns * sizeof(float);
++    const auto query_stride = std::size_t(statistics.query_width) * statistics.query_columns * statistics.query_element_bytes();
+     for (std::size_t rank = 0; rank < statistics.ranks.size(); ++rank) {
+         const auto& shard = statistics.ranks[rank];
+         if (shard.key_sums.data == nullptr) { continue; }
+@@ -19,11 +35,12 @@ void read_statistics(DeviceContext& device, const execution::MemoryStatistics& s
+         CUDA_CHECK(cudaMemcpyAsync(host + shard.first_layer * key_stride,
+             shard.key_sums.data, shard.key_sums.bytes(), cudaMemcpyDeviceToHost, stream));
+         if (include_query) {
+-            const auto count=query_count ? query_count : statistics.query_columns;
+-            const auto offset=std::size_t(query_first)*statistics.query_width*sizeof(float);
+-            CUDA_CHECK(cudaMemcpy2DAsync(host+statistics.key_bytes()+shard.first_layer*query_stride+offset,
+-                query_stride,static_cast<const std::byte*>(shard.query_sums.data)+offset,query_stride,
+-                std::size_t(count)*statistics.query_width*sizeof(float),shard.query_sums.ne[2],
++            const auto count=statistics.mean_query ? 1U : query_count;
++            if (!count || count > statistics.query_columns)
++                throw std::logic_error("KVMem Query capture exceeds its planned capacity");
++            CUDA_CHECK(cudaMemcpy2DAsync(host+statistics.key_bytes()+shard.first_layer*query_stride,
++                query_stride,shard.query_values.data,query_stride,
++                std::size_t(count)*statistics.query_width*statistics.query_element_bytes(),shard.query_values.ne[2],
+                 cudaMemcpyDeviceToHost,stream));
+         }
+     }
+@@ -63,6 +80,12 @@ void ProgramImpl::prepare_memory_statistics(SequenceState& sequence, std::uint32
+     // Query consumer either: avoid per-token/head D2H, validation and copies.
+     // Mean-K and the separate native attention-feedback capture stay enabled.
+     state.query_capture=memory_query_probe(sequence,prompt_tokens);
++    if (memory_statistics->mean_query && state.query_capture && !state.query_replayed) {
++        const auto elements=std::size_t(memory_statistics->layers)*memory_statistics->query_width;
++        if (state.query_sums.empty()) state.query_sums.assign(elements,0.0F);
++        if (state.query_sums.size()!=elements)
++            throw std::logic_error("KVMem Mean-Q layer coverage mismatch");
++    }
+     memory_statistics_ranges = {0, static_cast<std::int32_t>(capacity),
+         state.query_capture ? static_cast<std::int32_t>(query_begin) : 0,
+         state.query_capture ? static_cast<std::int32_t>(query_end) : 0};
+@@ -72,6 +95,14 @@ void ProgramImpl::prepare_memory_statistics(SequenceState& sequence, std::uint32
+         DeviceBinding binding(device.rank(rank).device);
+         CUDA_CHECK(cudaMemcpyAsync(shard.ranges.data, memory_statistics_ranges.data(),
+             sizeof(memory_statistics_ranges), cudaMemcpyHostToDevice, device.stream_for_rank(rank)));
++        if (memory_statistics->mean_query && state.query_capture && !state.query_replayed) {
++            // A Program buffer can have been used by another sequence, an aborted
++            // forward, or graph preparation. Seed it from this accepted prefix
++            // before every step; the kernel never owns conversation state.
++            CUDA_CHECK(cudaMemcpyAsync(shard.query_values.data,
++                state.query_sums.data()+std::size_t(shard.first_layer)*memory_statistics->query_width,
++                shard.query_values.bytes(),cudaMemcpyHostToDevice,device.stream_for_rank(rank)));
++        }
+     }
+ }
+ 
+@@ -88,8 +119,7 @@ void ProgramImpl::commit_memory_statistics(SequenceState& sequence, std::uint32_
+     const auto query_first = std::max(begin, state.query_begin);
+     const auto query_last = std::min(end, state.query_end);
+     const bool read_query=state.query_capture && !state.query_replayed && query_last>query_first;
+-    read_statistics(device,buffers,host,read_query,read_query?query_first-begin:0,
+-        read_query?query_last-query_first:0);
++    read_statistics(device,buffers,host,read_query,read_query?query_last-query_first:0);
+     const auto width = buffers.key_width;
+     const auto layer_stride = static_cast<std::size_t>(width) * buffers.columns;
+     const auto* keys = reinterpret_cast<const float*>(host);
+@@ -106,16 +136,34 @@ void ProgramImpl::commit_memory_statistics(SequenceState& sequence, std::uint32_
+         }
+     }
+     if (read_query) {
+-        const auto* query = reinterpret_cast<const float*>(host + buffers.key_bytes());
+-        for (std::uint32_t layer=0;layer<buffers.layers;++layer) {
+-            const auto* first=query+(std::size_t(layer)*buffers.query_columns+query_first-begin)*buffers.query_width;
+-            const auto elements=std::size_t(query_last-query_first)*buffers.query_width;
+-            for(std::size_t i=0;i<elements;++i) {
+-                if(!std::isfinite(first[i])) throw std::runtime_error("Nonfinite KVMem Query row");
++        if (buffers.mean_query) {
++            const auto* sums=reinterpret_cast<const float*>(host+buffers.key_bytes());
++            const auto elements=std::size_t(buffers.layers)*buffers.query_width;
++            for (std::size_t i=0;i<elements;++i) {
++                if (!std::isfinite(sums[i])) throw std::runtime_error("Nonfinite KVMem Mean-Q sum");
++            }
++            state.query_sums.assign(sums,sums+elements);
++        } else {
++            const auto* query=reinterpret_cast<const std::uint16_t*>(host+buffers.key_bytes());
++            for (std::uint32_t layer=0;layer<buffers.layers;++layer) {
++                const auto* first=query+std::size_t(layer)*buffers.query_columns*buffers.query_width;
++                const auto elements=std::size_t(query_last-query_first)*buffers.query_width;
++                auto& rows=state.query_rows[layer];
++                const auto at=rows.size();
++                rows.resize(at+elements);
++                for(std::size_t i=0;i<elements;++i) {
++                    const float value=std::bit_cast<float>(std::uint32_t(first[i])<<16);
++                    if(!std::isfinite(value)) throw std::runtime_error("Nonfinite KVMem Query row");
++                    rows[at+i]=value;
++                }
+             }
+-            state.query_rows[layer].insert(state.query_rows[layer].end(),first,first+elements);
+         }
+         state.query_tokens += query_last - query_first;
++#ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
++        std::fprintf(stderr,"KVMEM_QUERY_TEST phase=accepted lane=%u begin=%u end=%u query_begin=%u query_end=%u rows=%u hash=%016llx\n",
++            sequence.lane,begin,end,state.query_begin,state.query_end,state.query_tokens,
++            static_cast<unsigned long long>(query_test_fingerprint(state,buffers.mean_query)));
++#endif
+     }
+     if (state.selector->total_tokens() != begin) {
+         throw std::logic_error("KVMem block catalog lost its statistics frontier");
+@@ -139,30 +187,38 @@ void ProgramImpl::score_memory_query(SequenceState& sequence,
+     std::vector<const float*> layers(config.full_attention_layers);
+     std::vector<std::uint32_t> counts(config.full_attention_layers,state.query_tokens);
+     const auto width=config.attention->query_width();
+-    if(state.query_rows.size()!=layers.size()) throw std::logic_error("KVMem Query layer coverage mismatch");
+-    for(std::size_t layer=0;layer<layers.size();++layer) {
+-        if(state.query_rows[layer].size()!=std::size_t(state.query_tokens)*width)
+-            throw std::logic_error("KVMem Query token coverage mismatch");
+-        layers[layer]=state.query_rows[layer].data();
++    if (kvmem_options.query_meanq_cosine) {
++        if (state.query_sums.size()!=layers.size()*width)
++            throw std::logic_error("KVMem Mean-Q layer coverage mismatch");
++    } else {
++        if(state.query_rows.size()!=layers.size()) throw std::logic_error("KVMem Query layer coverage mismatch");
++        for(std::size_t layer=0;layer<layers.size();++layer) {
++            if(state.query_rows[layer].size()!=std::size_t(state.query_tokens)*width)
++                throw std::logic_error("KVMem Query token coverage mismatch");
++            layers[layer]=state.query_rows[layer].data();
++        }
+     }
+     const auto& policy=*state.selector;
+     const auto& options=policy.config();
+     const auto frontier=prefix ? uint32_t(prefix->prefix.size()) : state.statistics_frontier;
+     const auto frame=kvmem::query_score_frame(frontier,64,policy.budget_blocks(),
+         options.sink_blocks,options.recent_blocks,mandatory);
+-    if(!memory_query_scorer)
++    if(!kvmem_options.query_meanq_cosine && !memory_query_scorer)
+         throw std::logic_error("KVMem Query scorer lost its startup workspace");
+     const auto previous=prefix ? state.statistics->mean_checkpoint(frontier) : std::vector<float>{};
+     if(prefix) state.statistics->restore_mean_checkpoint(frontier,prefix->mean_tail);
+     std::vector<double> scores;
+     try {
+-        const kvmem::PageQueryView query{nullptr,counts.data(),
+-            config.full_attention_layers,state.query_tokens,config.attention->num_attention_heads,
+-            config.attention->num_key_value_heads,config.attention->head_dim,layers.data()};
+         const auto aggregation=kvmem_options.score_agg_max ? kvmem::GqaScoreAggregation::Max : kvmem::GqaScoreAggregation::Mean;
+         if (kvmem_options.query_meanq_cosine) {
+-            scores=kvmem::mean_query_cosine_scores(*state.statistics,query,uint32_t(frame.starts.size()),aggregation);
++            scores=kvmem::mean_key_retrieval_scores(*state.statistics,uint32_t(frame.starts.size()),
++                {state.query_sums.data(),counts.data(),config.full_attention_layers,
++                 config.attention->head_dim,config.attention->num_attention_heads,
++                 config.attention->num_key_value_heads,aggregation});
+         } else {
++            const kvmem::PageQueryView query{nullptr,counts.data(),
++                config.full_attention_layers,state.query_tokens,config.attention->num_attention_heads,
++                config.attention->num_key_value_heads,config.attention->head_dim,layers.data()};
+             scores=memory_query_scorer->score(*state.statistics,query,frame,aggregation);
+         }
+         if (kvmem_options.graph_alpha > 0)
+@@ -173,6 +229,19 @@ void ProgramImpl::score_memory_query(SequenceState& sequence,
+     }
+     if(prefix) state.statistics->restore_mean_checkpoint(frontier,previous);
+     state.selector->set_retrieval_scores(scores);
++#ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
++    std::uint64_t score_hash=14695981039346656037ULL;
++    for (double value:scores) {
++        const auto bits=std::bit_cast<std::uint64_t>(value);
++        for (unsigned shift=0;shift<64;shift+=8) {
++            score_hash^=(bits>>shift)&255U; score_hash*=1099511628211ULL;
++        }
++    }
++    std::fprintf(stderr,"KVMEM_QUERY_TEST phase=scored lane=%u rows=%u hash=%016llx scores=%016llx\n",
++        sequence.lane,state.query_tokens,
++        static_cast<unsigned long long>(query_test_fingerprint(state,kvmem_options.query_meanq_cosine)),
++        static_cast<unsigned long long>(score_hash));
++#endif
+     if(kvmem_options.verify_transfers) std::fprintf(stderr,"KVMEM_QUERY scorer=%s agg=%s lrfu=%d graph_alpha=%.6g rows=%u blocks=%zu\n",
+         kvmem_options.query_meanq_cosine ? "meanq-cosine" : "page-softmax",
+         kvmem_options.score_agg_max ? "max" : "mean",int(kvmem_options.lrfu),kvmem_options.graph_alpha,
+@@ -214,6 +283,9 @@ void ProgramImpl::commit_memory_candidates(SequenceState& sequence, std::uint32_
+     state.selector->register_append(end - begin);
+     observe_memory_attention(sequence,begin,end,first_column,row_width,false);
+     state.statistics_frontier = end;
++#ifdef NINFER_KVMEM_QUERY_TEST_HOOKS
++    std::fprintf(stderr,"KVMEM_QUERY_TEST phase=decode lane=%u begin=%u end=%u\n",sequence.lane,begin,end);
++#endif
+ }
+ 
+ void ProgramImpl::observe_memory_attention(SequenceState& sequence,std::uint32_t begin,std::uint32_t end,
+diff --git a/src/models/qwen3_5/program/transactions/commit.cpp b/src/models/qwen3_5/program/transactions/commit.cpp
+index f8a81c442b99c5abd4b546fa57656c0bcfabbd24..e4029a1ae59ecd9804f49583fdbae495ff8d2416 100644
+--- a/src/models/qwen3_5/program/transactions/commit.cpp
++++ b/src/models/qwen3_5/program/transactions/commit.cpp
+@@ -997,6 +997,7 @@ AbortResult ProgramImpl::abort(SequenceHandle sequence) noexcept {
+     try {
+         device.synchronize();
+     } catch (...) { return out; }
++    request.snapshot_prefill_timings();
+     if (hybrid_) {
+         // The committed state is publishable as an endpoint when no model unit is in flight.
+         out.timings     = request.timings;
+diff --git a/src/ops/token_sums/token_sums.cu b/src/ops/token_sums/token_sums.cu
+index 2babaf6c913138a59714e56977f2d210097a9220..9a750fbe22fa272a9b6cca23d3accac638b73d3c 100644
+--- a/src/ops/token_sums/token_sums.cu
++++ b/src/ops/token_sums/token_sums.cu
+@@ -32,13 +32,90 @@ __global__ void sum_tokens(const __nv_bfloat16* input, const std::int32_t* origi
+     }
+ }
+ 
++__global__ void capture_rows(const __nv_bfloat16* input, const std::int32_t* origin,
++                             const std::int32_t* range, std::int64_t channels,
++                             std::int64_t tokens, std::int64_t count,
++                             __nv_bfloat16* output) {
++    const auto first = max(std::int64_t{0}, std::int64_t(range[0]) - origin[0]);
++    const auto last = min(tokens, std::int64_t(range[1]) - origin[0]);
++    for (std::int64_t cell = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
++         cell < count; cell += std::int64_t(gridDim.x) * blockDim.x) {
++        const auto row = cell / channels;
++        output[cell] = first + row < last ? input[(first + row) * channels + cell % channels]
++                                         : __float2bfloat16(0.0F);
++    }
++}
++
++__global__ void accumulate_rows(const __nv_bfloat16* input, const std::int32_t* origin,
++                                const std::int32_t* range, std::int64_t channels,
++                                std::int64_t tokens, float* output) {
++    const auto first = max(std::int64_t{0}, std::int64_t(range[0]) - origin[0]);
++    const auto last = min(tokens, std::int64_t(range[1]) - origin[0]);
++    if (first >= last) { return; }
++    for (std::int64_t channel = std::int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
++         channel < channels; channel += std::int64_t(gridDim.x) * blockDim.x) {
++        float sum = output[channel];
++        for (auto row = first; row < last; ++row) {
++            sum += __bfloat162float(input[row * channels + channel]);
++        }
++        output[channel] = sum;
++    }
++}
++
+ bool overlaps(const Tensor& a, const Tensor& b) {
+     const auto first = reinterpret_cast<std::uintptr_t>(a.data);
+     const auto second = reinterpret_cast<std::uintptr_t>(b.data);
+     return first < second + b.bytes() && second < first + a.bytes();
+ }
++
++void require_query_buffers(const Tensor& input, const Tensor& origin, const Tensor& range,
++                           const Tensor& output, DType dtype) {
++    if (!input.data || !origin.data || !range.data || !output.data ||
++        !input.is_contiguous() || !origin.is_contiguous() || !range.is_contiguous() ||
++        !output.is_contiguous() || input.dtype != DType::BF16 || output.dtype != dtype ||
++        origin.dtype != DType::I32 || origin.numel() != 1 ||
++        range.dtype != DType::I32 || range.numel() != 2 ||
++        input.ne[0] <= 0 || input.ne[1] <= 0 || input.ne[2] != 1 || input.ne[3] != 1 ||
++        output.ne[0] != input.ne[0] || output.ne[1] <= 0 || output.ne[2] != 1 || output.ne[3] != 1 ||
++        (dtype == DType::FP32 && output.ne[1] != 1) ||
++        overlaps(input, output) || overlaps(origin, output) || overlaps(range, output) ||
++        overlaps(input, origin) || overlaps(input, range) || overlaps(origin, range)) {
++        throw std::invalid_argument("query statistics: invalid shape, type, or aliased buffers");
++    }
++}
++
++void check_query_launch() {
++    const auto status = cudaGetLastError();
++    if (status != cudaSuccess) {
++        throw std::runtime_error(std::string("query statistics: ") + cudaGetErrorString(status));
++    }
++}
+ } // namespace
+ 
++void capture_query_rows(const Tensor& input, const Tensor& origin, const Tensor& range,
++                        Tensor& output, cudaStream_t stream) {
++    require_query_buffers(input, origin, range, output, DType::BF16);
++    constexpr int threads = 128;
++    const auto blocks = static_cast<unsigned>(std::min<std::int64_t>(65535,
++        (output.numel() + threads - 1) / threads));
++    capture_rows<<<blocks, threads, 0, stream>>>(static_cast<const __nv_bfloat16*>(input.data),
++        static_cast<const std::int32_t*>(origin.data), static_cast<const std::int32_t*>(range.data),
++        input.ne[0], input.ne[1], output.numel(), static_cast<__nv_bfloat16*>(output.data));
++    check_query_launch();
++}
++
++void accumulate_query_sum(const Tensor& input, const Tensor& origin, const Tensor& range,
++                          Tensor& output, cudaStream_t stream) {
++    require_query_buffers(input, origin, range, output, DType::FP32);
++    constexpr int threads = 128;
++    const auto blocks = static_cast<unsigned>(std::min<std::int64_t>(65535,
++        (input.ne[0] + threads - 1) / threads));
++    accumulate_rows<<<blocks, threads, 0, stream>>>(static_cast<const __nv_bfloat16*>(input.data),
++        static_cast<const std::int32_t*>(origin.data), static_cast<const std::int32_t*>(range.data),
++        input.ne[0], input.ne[1], static_cast<float*>(output.data));
++    check_query_launch();
++}
++
+ void token_sums(const Tensor& input, const Tensor& origin, const Tensor& range,
+                 std::uint32_t block_tokens, Tensor& output, cudaStream_t stream) {
+     const auto tokens = static_cast<std::int64_t>(input.ne[1]);
+diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
+index 366a3b9783ad186f5a9cb8ce98d4ecc133f68c2c..0b218d10c0f118960e4b514f9e7b650f9f7a02a1 100644
+--- a/src/runtime/engine/engine_core.h
++++ b/src/runtime/engine/engine_core.h
+@@ -1422,6 +1422,9 @@ private:
+                     .count();
+             generation_wall_seconds =
+                 std::chrono::duration<double>(*request->last_token - *request->first_token).count();
++        } else if (request->observation.phase_timings && request->admitted_at) {
++            prompt_wall_seconds =
++                std::chrono::duration<double>(Clock::now() - *request->admitted_at).count();
+         }
+         release_planning_state(request);
+         request->prompt      = {};
+@@ -1443,9 +1446,10 @@ private:
+         result.finish_reason           = reason;
+         result.matched_stop_string     = request->output.matched_stop_string();
+         result.timings.prepare_seconds = request->prepare_seconds;
+-        if (request->begin) {
+-            result.reused_prompt_tokens = request->begin->reused_prompt_tokens;
+-            result.prefix_reuse_path    = request->begin->prefix_reuse_path;
++        result.computed_prompt_tokens = request->computed_prompt_tokens;
++        if (request->admitted_begin) {
++            result.reused_prompt_tokens = request->admitted_begin->reused_prompt_tokens;
++            result.prefix_reuse_path    = request->admitted_begin->prefix_reuse_path;
+         }
+         result.timings                 = request->generation_timings;
+         result.timings.prepare_seconds = request->prepare_seconds;
+diff --git a/src/runtime/engine/gemma4_core.cpp b/src/runtime/engine/gemma4_core.cpp
+index 39720c9f01f6cb8dbe4ac4558176ca0c92380a71..ec707451d3f1f868d37c677651bf122211f1b0e2 100644
+--- a/src/runtime/engine/gemma4_core.cpp
++++ b/src/runtime/engine/gemma4_core.cpp
+@@ -1495,6 +1495,7 @@ struct Gemma4Core::Impl {
+         result.matched_stop_string             = r.output.matched_stop_string();
+         result.thinking                        = r.output.thinking_stats();
+         result.thinking.post_thinking_sampling = r.post_thinking;
++        result.computed_prompt_tokens          = r.prefilled - r.reused;
+         result.reused_prompt_tokens            = r.reused;
+         result.prefix_reuse_path               = r.reuse_path;
+         result.branches                        = std::move(r.branch_results);
+diff --git a/src/runtime/engine/qwen4_exp_core.cpp b/src/runtime/engine/qwen4_exp_core.cpp
+index a1f964d9df16cba007e97bfc220200ed50a6f856..66f0d40e6106a573ee36e4d6a8cd3625ebe585b2 100644
+--- a/src/runtime/engine/qwen4_exp_core.cpp
++++ b/src/runtime/engine/qwen4_exp_core.cpp
+@@ -1721,6 +1721,7 @@ struct Qwen4ExpCore::Impl {
+         result.matched_stop_string             = r.output.matched_stop_string();
+         result.thinking                        = r.output.thinking_stats();
+         result.thinking.post_thinking_sampling = r.post_thinking;
++        result.computed_prompt_tokens          = r.prefilled - r.reused;
+         result.reused_prompt_tokens            = r.reused;
+         result.prefix_reuse_path               = r.reuse_path;
+         result.branches                        = std::move(r.branch_results);
+diff --git a/src/serve/console_stats.cpp b/src/serve/console_stats.cpp
+index 6d050aef4aee146e54e40148db1cbcb3b40dcb40..6931be115505adc424c8d8a93a5bcd43cf36e6fb 100644
+--- a/src/serve/console_stats.cpp
++++ b/src/serve/console_stats.cpp
+@@ -122,7 +122,7 @@ ConsoleRequestSample make_console_request_sample(const GenerationOutcome& outcom
+         .ttft_seconds            = metrics.ttft_seconds,
+         .prompt_tokens           = prompt_tokens,
+         .cache_hit_tokens        = cache_hit_tokens,
+-        .computed_prefill_tokens = saturating_sub(prompt_tokens, cache_hit_tokens),
++        .computed_prefill_tokens = metrics.computed_prefill_tokens,
+         .prefill_seconds         = metrics.prefill_seconds,
+         // The first output token comes from prefill; the decode rate covers the rest, as the
+         // request-done record does.
+diff --git a/src/serve/generation_service.cpp b/src/serve/generation_service.cpp
+index 5f5d0ed3e48527169bb67906f1131fedbb496e3e..a855e057da000b776a40d602f341f6d7cbc48ed8 100644
+--- a/src/serve/generation_service.cpp
++++ b/src/serve/generation_service.cpp
+@@ -870,6 +870,7 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
+         prepared.prepare_seconds +
+         std::max(0.0, result.timings.total_seconds - result.timings.prepare_seconds);
+     outcome.metrics.engine_timing                = result.engine_timing;
++    outcome.metrics.computed_prefill_tokens      = result.computed_prompt_tokens;
+     outcome.metrics.prefix_cache_hit_tokens      = result.reused_prompt_tokens;
+     outcome.id_slot                              = result.slot;
+     outcome.session_digest                       = result.session_digest;
+diff --git a/src/serve/generation_service.h b/src/serve/generation_service.h
+index c41e43afbafcf60015be7cd2023527de5ff2ff28..f3a3880aca9a81c533f6613f992a9761395c9cdc 100644
+--- a/src/serve/generation_service.h
++++ b/src/serve/generation_service.h
+@@ -60,6 +60,8 @@ struct GenerationMetrics {
+     std::uint64_t ngram_archive_drafted_tokens  = 0;
+     std::uint64_t ngram_archive_accepted_tokens = 0;
+     NgramArchiveStats ngram_archive;
++    // Actual logical prefill progress, including partial progress on cancellation.
++    std::uint32_t computed_prefill_tokens     = 0;
+     std::uint32_t prefix_cache_hit_tokens     = 0;
+     ninfer::PrefixReusePath prefix_reuse_path = ninfer::PrefixReusePath::Root;
+     ninfer::MaterializationDiagnostics materialization;
+diff --git a/src/serve/openai_chat_response.cpp b/src/serve/openai_chat_response.cpp
+index 9b9c96b268984bf8209740a84296be8f6096d72e..b93037ece20447ad122ed4857bdc3648935b0e23 100644
+--- a/src/serve/openai_chat_response.cpp
++++ b/src/serve/openai_chat_response.cpp
+@@ -54,13 +54,13 @@ double tokens_per_second(std::uint32_t tokens, double milliseconds) {
+     return milliseconds > 0.0 ? 1000.0 * static_cast<double>(tokens) / milliseconds : 0.0;
+ }
+ 
+-CompletionTimings make_completion_timings(std::uint32_t prompt_tokens, std::uint32_t cached_tokens,
++CompletionTimings make_completion_timings(std::uint32_t computed_tokens, std::uint32_t cached_tokens,
+                                           std::uint32_t generated_tokens, double prompt_ms,
+                                           double generation_ms, std::uint64_t draft_tokens = 0,
+                                           std::uint64_t accepted_draft_tokens = 0) {
+     CompletionTimings timings;
+-    timings.cache_n             = std::min(cached_tokens, prompt_tokens);
+-    timings.prompt_n            = prompt_tokens - timings.cache_n;
++    timings.cache_n             = cached_tokens;
++    timings.prompt_n            = computed_tokens;
+     timings.prompt_ms           = finite_nonnegative(prompt_ms);
+     timings.prompt_per_token_ms = milliseconds_per_token(timings.prompt_n, timings.prompt_ms);
+     timings.prompt_per_second   = tokens_per_second(timings.prompt_n, timings.prompt_ms);
+@@ -94,8 +94,7 @@ Json timings_json(const CompletionTimings& timings) {
+ 
+ CompletionTimings outcome_timings(const GenerationOutcome& outcome) {
+     return make_completion_timings(
+-        static_cast<std::uint32_t>(std::max(0, outcome.prompt_tokens)),
+-        outcome.metrics.prefix_cache_hit_tokens,
++        outcome.metrics.computed_prefill_tokens, outcome.metrics.prefix_cache_hit_tokens,
+         static_cast<std::uint32_t>(std::max(0, outcome.completion_tokens)),
+         outcome.metrics.prompt_wall_seconds * 1000.0,
+         outcome.metrics.generation_wall_seconds * 1000.0, outcome.metrics.speculative_draft_tokens,
+@@ -105,8 +104,10 @@ CompletionTimings outcome_timings(const GenerationOutcome& outcome) {
+ CompletionTimings observation_timings(std::uint32_t prompt_tokens, std::uint32_t cached_tokens,
+                                       const ninfer::GenerationTimingObservation& observation) {
+     constexpr double kNanosecondsToMilliseconds = 1.0e-6;
++    // Output timing observations start only after the complete prompt has been accepted.
++    cached_tokens = std::min(cached_tokens, prompt_tokens);
+     return make_completion_timings(
+-        prompt_tokens, cached_tokens, observation.generated_tokens,
++        prompt_tokens - cached_tokens, cached_tokens, observation.generated_tokens,
+         static_cast<double>(observation.prompt_elapsed_ns) * kNanosecondsToMilliseconds,
+         static_cast<double>(observation.generation_elapsed_ns) * kNanosecondsToMilliseconds);
+ }
+diff --git a/src/serve/operational_log.cpp b/src/serve/operational_log.cpp
+index dc9ce7c2f890bca9b3d002e89e25c289aec1ab60..5209b6859e8023121435dac21be415e8274177e5 100644
+--- a/src/serve/operational_log.cpp
++++ b/src/serve/operational_log.cpp
+@@ -257,8 +257,7 @@ OperationalRecord render_request_rejected(const RequestRejectionLogContext& cont
+ OperationalRecord render_request_done(const RequestLogContext& context,
+                                       const GenerationOutcome& outcome) {
+     const GenerationMetrics& metrics     = outcome.metrics;
+-    const double computed_prefill_tokens = static_cast<double>(
+-        std::max(0, outcome.prompt_tokens - static_cast<int>(metrics.prefix_cache_hit_tokens)));
++    const double computed_prefill_tokens = metrics.computed_prefill_tokens;
+     const double decode_tokens =
+         outcome.completion_tokens > 0 ? static_cast<double>(outcome.completion_tokens - 1) : 0.0;
+     std::ostringstream out;
+diff --git a/src/serve/request_log.cpp b/src/serve/request_log.cpp
+index f81f7eb19fce5bcf41991a1bc0458a9c55712890..76244fc4ab947a32cb78dae382776cbf71689593 100644
+--- a/src/serve/request_log.cpp
++++ b/src/serve/request_log.cpp
+@@ -614,8 +614,7 @@ std::string format_request_done(const RequestLogContext& context,
+     // Prefill emits the first token; the remaining (gen - 1) come from decode.
+     const double decode_tokens =
+         outcome.completion_tokens > 0 ? static_cast<double>(outcome.completion_tokens - 1) : 0.0;
+-    const double computed_prefill_tokens = static_cast<double>(
+-        std::max(0, outcome.prompt_tokens - static_cast<int>(metrics.prefix_cache_hit_tokens)));
++    const double computed_prefill_tokens = metrics.computed_prefill_tokens;
+ 
+     std::ostringstream out;
+     out << "[req " << context.id << "] done finish="
+@@ -976,9 +975,7 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
+         Json{{"finish_reason", finish_reason_name(outcome.finish_reason)},
+              {"prompt_tokens", outcome.prompt_tokens},
+              {"completion_tokens", outcome.completion_tokens},
+-             {"computed_prefill_tokens",
+-              std::max(0, outcome.prompt_tokens -
+-                              static_cast<int>(outcome.metrics.prefix_cache_hit_tokens))},
++             {"computed_prefill_tokens", outcome.metrics.computed_prefill_tokens},
+              {"prefix_cache_hit_tokens", outcome.metrics.prefix_cache_hit_tokens},
+              {"prefix_reuse_path", prefix_reuse_path_name(outcome.metrics.prefix_reuse_path)},
+              {"thinking_budget", outcome.thinking.requested_budget
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 999daaf3ec78d62502fa2fc221492f333f4ca14e..3d9cd3c12fd51eabcf56d6707f2b50bf6d93c302 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -49,6 +49,13 @@ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_query_policy_tests_PROGRAMS
+ ninfer_finalize_bundle(ninfer_query_policy_tests)
+ ninfer_stage_runtime_dlls(ninfer_query_policy_tests)
+ 
++# Request accounting and protocol renderers, without unrelated GPU numerical tests.
++set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_request_accounting_tests_PROGRAMS
++  ninfer_request_log_test ninfer_console_stats_test
++  ninfer_openai_schema_test ninfer_text_completion_test)
++ninfer_finalize_bundle(ninfer_request_accounting_tests)
++ninfer_stage_runtime_dlls(ninfer_request_accounting_tests)
++
+ # Shape-generalization regressions without linking unrelated model test families.
+ set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_dense_family_tests_PROGRAMS
+   ninfer_gdn_gating_proj_test ninfer_linear_gguf_test ninfer_gdn_replay_fold_test
+diff --git a/tests/experimental/token_sums.cpp b/tests/experimental/token_sums.cpp
+index dd5f61073c604a3a2c0ea2b968be070cdcde4893..2444dd695f36374d7ee0c633675960540a80d4ea 100644
+--- a/tests/experimental/token_sums.cpp
++++ b/tests/experimental/token_sums.cpp
+@@ -71,6 +71,131 @@ void check_case(int channels, int tokens, int first, int block, bool clipped, bo
+     cuda_check(cudaStreamDestroy(stream), "destroy stream");
+ }
+ 
++void check_query_capture(int channels, int tokens, int capacity, bool graph) {
++    std::mt19937 rng(117U + channels + tokens);
++    std::vector<std::uint16_t> represented(std::size_t(channels) * tokens);
++    // Copying represented Q must preserve all bits, including tiny values and
++    // signed zero. No conversion or arithmetic belongs at this boundary.
++    for (auto& value : represented) value = static_cast<std::uint16_t>(rng());
++    auto input_buffer = to_device(represented);
++    auto origin_buffer = to_device(std::vector<int>{0});
++    auto range_buffer = to_device(std::vector<int>{0, 0});
++    const auto count = std::size_t(channels) * capacity;
++    constexpr std::uint16_t guard = 0xA55A;
++    auto result_buffer = to_device(std::vector<std::uint16_t>(count + 64, guard));
++    Tensor input(input_buffer.p, DType::BF16, {channels, tokens});
++    Tensor origin(origin_buffer.p, DType::I32, {1});
++    Tensor range(range_buffer.p, DType::I32, {2});
++    Tensor output(result_buffer.p, DType::BF16, {channels, capacity});
++    cudaStream_t stream = nullptr;
++    cuda_check(cudaStreamCreate(&stream), "query stream");
++    cudaGraph_t captured = nullptr;
++    cudaGraphExec_t executable = nullptr;
++    if (graph) {
++        cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "query capture begin");
++        ops::capture_query_rows(input, origin, range, output, stream);
++        cuda_check(cudaStreamEndCapture(stream, &captured), "query capture end");
++        cuda_check(cudaGraphInstantiate(&executable, captured, nullptr, nullptr, 0), "query instantiate");
++    }
++    // End-aligned large chunk, left/right clipping, and empty spans overwrite
++    // previous capture contents. Output capacity may be much smaller than T.
++    const int spans[][2] = {{tokens-capacity, tokens}, {-7, capacity/2},
++                            {tokens-capacity/2, tokens+19}, {tokens+1, tokens+2}, {-8, -1}};
++    for (int pass = 0; pass < 5; ++pass) {
++        const int start = 262000 + 37 * pass;
++        const int limits[] = {start+spans[pass][0], start+spans[pass][1]};
++        origin_buffer.copy_from_host(&start, sizeof(start));
++        range_buffer.copy_from_host(limits, sizeof(limits));
++        if (graph) cuda_check(cudaGraphLaunch(executable, stream), "query graph launch");
++        else ops::capture_query_rows(input, origin, range, output, stream);
++        cuda_check(cudaStreamSynchronize(stream), "query completion");
++        const auto actual = from_device<std::uint16_t>(result_buffer, count+64);
++        std::vector<std::uint16_t> expected(count, 0);
++        std::size_t written = 0;
++        for (int row = 0; row < tokens; ++row) {
++            if (start+row < limits[0] || start+row >= limits[1]) continue;
++            for (int channel = 0; channel < channels; ++channel)
++                expected.at(written++) = represented[std::size_t(row)*channels+channel];
++        }
++        if (!std::equal(expected.begin(), expected.end(), actual.begin()) ||
++            !std::all_of(actual.begin()+count, actual.end(), [](auto value) { return value == guard; }))
++            throw std::runtime_error("compact Query capture differs from exact represented rows");
++    }
++    if (executable) cuda_check(cudaGraphExecDestroy(executable), "destroy query executable");
++    if (captured) cuda_check(cudaGraphDestroy(captured), "destroy query graph");
++    cuda_check(cudaStreamDestroy(stream), "destroy query stream");
++}
++
++void check_query_accumulation(int channels, int tokens, bool graph) {
++    std::mt19937 rng(931U + channels + tokens);
++    std::uniform_real_distribution<float> random(-4.0F, 4.0F);
++    std::vector<std::uint16_t> represented(std::size_t(channels) * tokens);
++    for (auto& value : represented) value = f32_to_bf16(random(rng));
++    for (int row = 0; row < tokens; ++row)
++        represented[std::size_t(row)*channels] = row%3 ? 0x0001 : 0x8001;
++    auto input_buffer = to_device(represented);
++    auto origin_buffer = to_device(std::vector<int>{0});
++    auto range_buffer = to_device(std::vector<int>{0, 0});
++    auto result_buffer = to_device(std::vector<float>(channels+64, 12345.0F));
++    Tensor input(input_buffer.p, DType::BF16, {channels, tokens});
++    Tensor origin(origin_buffer.p, DType::I32, {1});
++    Tensor range(range_buffer.p, DType::I32, {2});
++    Tensor output(result_buffer.p, DType::FP32, {channels, 1});
++    std::vector<float> accepted[2] = {std::vector<float>(channels), std::vector<float>(channels)};
++    for (int lane = 0; lane < 2; ++lane) for (int channel = 0; channel < channels; ++channel)
++        accepted[lane][channel] = channel%3 ? float(lane+1) : (lane ? -1048576.0F : 1048576.0F);
++    accepted[0][0] = accepted[1][0] = 0;
++    cudaStream_t stream = nullptr;
++    cuda_check(cudaStreamCreate(&stream), "sum stream");
++    cudaGraph_t captured = nullptr;
++    cudaGraphExec_t executable = nullptr;
++    if (graph) {
++        cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "sum capture begin");
++        ops::accumulate_query_sum(input, origin, range, output, stream);
++        cuda_check(cudaStreamEndCapture(stream, &captured), "sum capture end");
++        cuda_check(cudaGraphInstantiate(&executable, captured, nullptr, nullptr, 0), "sum instantiate");
++    }
++    for (int pass = 0; pass < 5; ++pass) {
++        const int lane = pass == 1 ? 1 : 0;
++        const int start = 262000 + pass*tokens;
++        const int limits[] = {start+(pass == 3 ? tokens+1 : 7), start+tokens-3};
++        origin_buffer.copy_from_host(&start, sizeof(start));
++        range_buffer.copy_from_host(limits, sizeof(limits));
++        result_buffer.copy_from_host(accepted[lane].data(), std::size_t(channels)*sizeof(float));
++        if (graph) cuda_check(cudaGraphLaunch(executable, stream), "sum graph launch");
++        else ops::accumulate_query_sum(input, origin, range, output, stream);
++        cuda_check(cudaStreamSynchronize(stream), "sum completion");
++        const auto actual = from_device<float>(result_buffer, channels+64);
++        auto sequential = accepted[lane];
++        std::vector<double> reference(sequential.begin(), sequential.end()), absolute(channels);
++        for (int channel = 0; channel < channels; ++channel) absolute[channel] = std::abs(reference[channel]);
++        for (int row = 0; row < tokens; ++row) {
++            if (start+row < limits[0] || start+row >= limits[1]) continue;
++            for (int channel = 0; channel < channels; ++channel) {
++                const float value = bf16_to_f32(represented[std::size_t(row)*channels+channel]);
++                sequential[channel] += value;
++                reference[channel] += value;
++                absolute[channel] += std::abs(value);
++            }
++        }
++        for (int channel = 0; channel < channels; ++channel) {
++            const double bound = 2.0 * tokens * std::numeric_limits<float>::epsilon() * absolute[channel];
++            if (!std::isfinite(actual[channel]) ||
++                std::abs(actual[channel]-reference[channel]) > std::max(1e-6, bound) ||
++                actual[channel] != sequential[channel])
++                throw std::runtime_error("Mean-Q differs from FP64 oracle or chronological FP32 accumulation");
++        }
++        if (!std::all_of(actual.begin()+channels, actual.end(), [](auto value) { return value == 12345.0F; }))
++            throw std::runtime_error("Mean-Q writes outside its single-column output");
++        // Pass 1 is another sequence; pass 2 is aborted. Neither may contaminate
++        // the next accepted chunk when the Program reuses the same graph/buffer.
++        if (pass != 2) accepted[lane] = std::move(sequential);
++    }
++    if (executable) cuda_check(cudaGraphExecDestroy(executable), "destroy sum executable");
++    if (captured) cuda_check(cudaGraphDestroy(captured), "destroy sum graph");
++    cuda_check(cudaStreamDestroy(stream), "destroy sum stream");
++}
++
+ int main(int argc, char** argv) {
+     try {
+         if (cuda_unavailable()) { return 77; }
+@@ -105,6 +230,17 @@ int main(int argc, char** argv) {
+             }
+             cases += 6;
+         }
++        for (int channels : {513, 1024, 6144}) {
++            for (bool graph : {false, true}) {
++                check_query_capture(channels, 2048, 512, graph);
++                check_query_capture(channels, 128, 64, graph);
++                check_query_capture(channels, 65, 512, graph);
++                check_query_capture(channels, 1, 1, graph);
++                check_query_accumulation(channels, 2048, graph);
++                check_query_accumulation(channels, 128, graph);
++                cases += 6;
++            }
++        }
+         std::cout << "TOKEN_SUMS PASS cases=" << cases << '\n';
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/test_console_stats.cpp b/tests/test_console_stats.cpp
+index 9c63d85ed46fd1243fc3af54cf565373c4b28bf7..ff59590667691d832525cae2513ac52d88cd0798 100644
+--- a/tests/test_console_stats.cpp
++++ b/tests/test_console_stats.cpp
+@@ -27,6 +27,7 @@ GenerationOutcome outcome(int prompt, std::uint32_t cache_hit, int completion, d
+     GenerationOutcome result;
+     result.prompt_tokens                   = prompt;
+     result.completion_tokens               = completion;
++    result.metrics.computed_prefill_tokens = prompt > cache_hit ? prompt - cache_hit : 0;
+     result.metrics.prefix_cache_hit_tokens = cache_hit;
+     result.metrics.ttft_seconds            = ttft;
+     result.metrics.prefill_seconds         = prefill_seconds;
+@@ -39,6 +40,19 @@ GenerationOutcome outcome(int prompt, std::uint32_t cache_hit, int completion, d
+ int main() {
+     int failures = 0;
+ 
++    GenerationOutcome cancelled = outcome(6400, 4224, 0, 0.0, 2.0, 0.0);
++    cancelled.finish_reason = ninfer::FinishReason::Cancelled;
++    cancelled.metrics.computed_prefill_tokens = 1920;
++    const auto partial = make_console_request_sample(cancelled);
++    failures += check(partial.prompt_tokens == 6400 && partial.cache_hit_tokens == 4224 &&
++                          partial.computed_prefill_tokens == 1920 && partial.decode_tokens == 0,
++                      "console accounting includes unexecuted cancelled suffix");
++    GenerationOutcome queued;
++    queued.prompt_tokens = 6400;
++    queued.finish_reason = ninfer::FinishReason::Cancelled;
++    failures += check(make_console_request_sample(queued).computed_prefill_tokens == 0,
++                      "cancelled queued request must report zero computed tokens");
++
+     // Engine speculative totals include n-gram rounds; the model drafter gets only the remainder.
+     GenerationOutcome mixed                     = outcome(1000, 600, 101, 0.25, 0.2, 2.0);
+     mixed.metrics.speculative_backend           = ninfer::SpeculativeBackend::DFlash2;
+diff --git a/tests/test_openai_schema.cpp b/tests/test_openai_schema.cpp
+index 7bd6d9ce43934b3bd36a9738af88ac14a2451225..01bae096d31a6fd4f725e790dec2536e3e193f73 100644
+--- a/tests/test_openai_schema.cpp
++++ b/tests/test_openai_schema.cpp
+@@ -1221,6 +1221,7 @@ GenerationOutcome sample_outcome() {
+     outcome.completion_tokens                   = 7;
+     outcome.reasoning_tokens                    = 3;
+     outcome.finish_reason                       = ninfer::FinishReason::StopToken;
++    outcome.metrics.computed_prefill_tokens     = 8;
+     outcome.metrics.prefix_cache_hit_tokens     = 12;
+     outcome.metrics.prompt_wall_seconds         = 0.04;
+     outcome.metrics.generation_wall_seconds     = 0.03;
+@@ -1289,6 +1290,22 @@ int test_aggregate_response() {
+         "aggregate timings use exact cache and N-1 generation intervals");
+     failures += check(!response.contains("id_slot") && !response.contains("session_digest"),
+                       "an unretained session advertised a slot identity");
++    for (const bool admitted : {false, true}) {
++        GenerationOutcome cancelled;
++        cancelled.prompt_tokens = 6400;
++        cancelled.finish_reason = ninfer::FinishReason::Cancelled;
++        cancelled.metrics.computed_prefill_tokens = admitted ? 1920 : 0;
++        cancelled.metrics.prefix_cache_hit_tokens = admitted ? 4224 : 0;
++        cancelled.metrics.prompt_wall_seconds = 2.0;
++        const Json partial = Json::parse(make_chat_completion_response(identity(), cancelled));
++        failures += check(partial["usage"]["prompt_tokens"] == 6400 &&
++                              partial["timings"]["cache_n"] == (admitted ? 4224 : 0) &&
++                              partial["timings"]["prompt_n"] == (admitted ? 1920 : 0) &&
++                              partial["timings"]["prompt_per_second"] == (admitted ? 960.0 : 0.0) &&
++                              partial["timings"]["predicted_n"] == 0,
++                          "cancelled timings must separate logical input from completed work");
++    }
++
+     GenerationOutcome retained = outcome;
+     retained.id_slot           = 3;
+     retained.session_digest    = "0123456789abcdef";
+diff --git a/tests/test_request_log.cpp b/tests/test_request_log.cpp
+index c2134be6cec2cb1cf203cb79ab50d0e27309a7dd..9da999e19efab510029e92e3a4fdbebdd90ae1c8 100644
+--- a/tests/test_request_log.cpp
++++ b/tests/test_request_log.cpp
+@@ -459,6 +459,7 @@ int main() {
+     outcome.metrics.prefill_seconds         = 0.2345678901234;
+     outcome.metrics.decode_seconds          = 5.3456789012345;
+     outcome.metrics.total_seconds           = 5.7037035803702;
++    outcome.metrics.computed_prefill_tokens = 300;
+     outcome.metrics.prefix_cache_hit_tokens = 101;
+     outcome.metrics.prefix_reuse_path       = ninfer::PrefixReusePath::PrivateTurnClosure;
+     outcome.metrics.engine_timing           = {
+@@ -627,6 +628,27 @@ int main() {
+             "gen 3, 12 sources | thinking 256/256, control 19",
+         "pretty request-done record mismatch");
+ 
++    // A 6,400-token input cancelled after frontier 6,144, with 4,224 reused.
++    // The unexecuted 256-token tail must not inflate either log's prefill rate.
++    for (const bool admitted : {false, true}) {
++        GenerationOutcome cancelled;
++        cancelled.prompt_tokens = 6400;
++        cancelled.finish_reason = ninfer::FinishReason::Cancelled;
++        cancelled.metrics.computed_prefill_tokens = admitted ? 1920 : 0;
++        cancelled.metrics.prefix_cache_hit_tokens = admitted ? 4224 : 0;
++        cancelled.metrics.prefix_reuse_path = admitted ? ninfer::PrefixReusePath::PrivateTurnClosure
++                                                      : ninfer::PrefixReusePath::Root;
++        cancelled.metrics.prefill_seconds = 2.0;
++        const Json record = Json::parse(format_request_done_json("serve-test", 3001, context, cancelled));
++        failures += check(record["result"]["prompt_tokens"] == 6400 &&
++                              record["result"]["computed_prefill_tokens"] == (admitted ? 1920 : 0) &&
++                              record["result"]["prefix_cache_hit_tokens"] == (admitted ? 4224 : 0),
++                          "cancelled request must report only completed prefill work");
++        failures += check(render_request_done(context, cancelled).message.find(
++                              admitted ? "prefill 960.0 tok/s" : "prefill 0.0 tok/s") != std::string::npos,
++                          "cancelled request operational rate includes unexecuted prompt tokens");
++    }
++
+     GenerationOutcome normalized_tool_outcome = outcome;
+     normalized_tool_outcome.tool_calls.push_back(
+         ninfer::GeneratedToolCall{.name = "Edit", .arguments_json = R"({"file_path":"x"})"});
+diff --git a/tests/test_text_completion.cpp b/tests/test_text_completion.cpp
+index 72c611b4a2cc5adde71577e58f4c2e6a65ad2e8c..86e5eeab6694084bd9ecacb3aeb05997bece1f87 100644
+--- a/tests/test_text_completion.cpp
++++ b/tests/test_text_completion.cpp
+@@ -161,6 +161,7 @@ GenerationOutcome outcome() {
+     out.completion_tokens               = 3;
+     out.finish_reason                   = ninfer::FinishReason::StopString;
+     out.matched_stop_string             = "###";
++    out.metrics.computed_prefill_tokens = 3;
+     out.metrics.prefix_cache_hit_tokens = 2;
+     out.metrics.prompt_wall_seconds     = 0.01;
+     out.metrics.generation_wall_seconds = 0.02;

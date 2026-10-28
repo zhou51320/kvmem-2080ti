@@ -2,6 +2,7 @@
 
 两个后端共用 `kvmem/` 中的原生字节存储、配额、文件 I/O 和任务队列。
 推理、GPU 页池、逻辑 token 位置、mean-K 检索和状态 checkpoint 仍由后端负责。
+可选的 [checkpoint spread 策略](checkpoint-policy.md)为状态镜像增加覆盖目录、独立 Host 预算和活跃历史内的 SSD 换出；默认仍为 legacy。
 完整 K/V（包括量化 scale 和 MTP KV）都可以离开 RAM；活跃 mean-K 留在 RAM。
 本次实测范围与性能未验收项见 [验收记录](active-kv-tiering-validation-20261010.md)；
 分阶段历史见 [实现计划](active-kv-tiering-plan.md)。

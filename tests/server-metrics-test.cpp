@@ -10,6 +10,21 @@ static double sample(const std::string & text, const std::string & name) {
     return std::stod(text.substr(pos + name.size() + 2));
 }
 int main() {
+    // Independently paced requests must not share interval counters. MTP commits
+    // contribute accepted tokens, regardless of how many stream chunks they emit.
+    kvmem_request_metrics fast, slow;
+    fast.token(1, 1000000); slow.token(1, 1000000);
+    fast.token(31, 2000000);
+    check(fast.live_sample_us == 0);
+    fast.token(61, 4000000); slow.token(7, 4000000);
+    check(fast.live_tps == 20 && slow.live_tps == 2);
+    check(fast.live_window_us == 3000000);
+    fast.token(91, 7000000);
+    check(fast.live_tps == 10 && fast.live_sample_us == 7000000);
+    check(slow.live_tps == 2 && slow.live_sample_us == 4000000);
+    kvmem_request_metrics next;
+    next.token(1, 9000000);
+    check(next.live_sample_us == 0);
     kvmem_request_metrics r;
     r.start(1000);
     r.prefilled(100, 20, 11000);

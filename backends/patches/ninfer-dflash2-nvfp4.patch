@@ -1,0 +1,554 @@
+diff --git a/NOTICE b/NOTICE
+index a51a8a648f14ec3d951b0b403bee787650c69882..1a9ca3dbc97a6634dc6d71ce5e671a3eff6202f3 100644
+--- a/NOTICE
++++ b/NOTICE
+@@ -17,3 +17,12 @@ Adapted from JGamboa/ninfer-4090-windows, commit e905787f067de89ef6ef28c52d65a2c
+ https://github.com/JGamboa/ninfer-4090-windows (Apache License 2.0).
+ Changes: RowSplit artifact integration, explicit existing Hadamard producer boundary,
+ strided split-parent destinations, SM120 qualification, and independent codec/oracle tests.
++
++DFlash2 GGUF and NVFP4 draft projections
++======================================
++Adapted from melis2023/ninfer-kvmem-actkv, revision 664cb6daa8cba30dfe39b0d10113a72b20587853.
++Contributor: melis2023 <zhuangisme@gmail.com>.
++https://github.com/melis2023/ninfer-kvmem-actkv
++Changes here: preserved current NVFP4/INT8 dispatch and Blackwell scale handling;
++priced workspace for all admitted GGUF blocks; added native shape/conv oracles,
++exact artifact import checks and a bounded weight-only NVFP4 conversion method.
+diff --git a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
+index 51b1f59926f40d0a3c2a8f12d42479145cc46dbf..4d37cae317afef57c964637a3c9d322f4e79a8c3 100644
+--- a/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
++++ b/src/ops/linear/nvfp4/nvfp4_dispatch.cpp
+@@ -10,7 +10,7 @@
+ namespace ninfer::ops::detail {
+ namespace {
+ const std::array kShapes{&kNvfp4N14336K5120, &kNvfp4N16384K5120, &kNvfp4N34816K5120,
+-                         &kNvfp4N5120K6144, &kNvfp4N5120K17408};
++                         &kNvfp4N5120K6144, &kNvfp4N5120K17408, &kNvfp4DFlash2Feature, &kNvfp4DFlash2FeatureT, &kNvfp4DFlash2Qkv, &kNvfp4DFlash2AttnOut, &kNvfp4DFlash2ConvProj, &kNvfp4DFlash2Selector};
+ 
+ LinearRouteTable route_table(LinearPolicy policy, std::int32_t width) {
+     return linear_route_table(allows_nvfp4_int8(policy) ? LinearRouteFamily::Nvfp4Int8
+diff --git a/src/ops/linear/nvfp4/nvfp4_dispatch_unified.cpp b/src/ops/linear/nvfp4/nvfp4_dispatch_unified.cpp
+index 449335014fcdc59a2c1937de6e0613e66b9522ce..2a9fd8bf23e8ff0d224bba016d39c8d75595c4ac 100644
+--- a/src/ops/linear/nvfp4/nvfp4_dispatch_unified.cpp
++++ b/src/ops/linear/nvfp4/nvfp4_dispatch_unified.cpp
+@@ -10,7 +10,7 @@
+ namespace ninfer::ops::detail::unified {
+ namespace {
+ const std::array kShapes{&kNvfp4N14336K5120, &kNvfp4N16384K5120, &kNvfp4N34816K5120,
+-                         &kNvfp4N5120K6144, &kNvfp4N5120K17408, &kNvfp4N8192K4096};
++                         &kNvfp4N5120K6144, &kNvfp4N5120K17408, &kNvfp4DFlash2Feature, &kNvfp4DFlash2FeatureT, &kNvfp4DFlash2Qkv, &kNvfp4DFlash2AttnOut, &kNvfp4DFlash2ConvProj, &kNvfp4DFlash2Selector, &kNvfp4N8192K4096};
+ 
+ const Nvfp4LinearShape* find_shape(std::int32_t n, std::int32_t k) {
+     for (const auto* shape : kShapes)
+diff --git a/src/ops/linear/nvfp4/nvfp4_shapes.h b/src/ops/linear/nvfp4/nvfp4_shapes.h
+index 84dbd8a6bdc3bf8dafd87ab1ee14ee3a5aec9cc6..f531b015d0f57738ae40edb4b7114eec4408eb58 100644
+--- a/src/ops/linear/nvfp4/nvfp4_shapes.h
++++ b/src/ops/linear/nvfp4/nvfp4_shapes.h
+@@ -15,4 +15,12 @@ extern const Nvfp4LinearShape kNvfp4N16384K5120;
+ extern const Nvfp4LinearShape kNvfp4N34816K5120;
+ extern const Nvfp4LinearShape kNvfp4N5120K6144;
+ extern const Nvfp4LinearShape kNvfp4N5120K17408;
++
++// DFlash2 weight-only A16 projections (melis2023).
++extern const Nvfp4LinearShape kNvfp4DFlash2Feature;
++extern const Nvfp4LinearShape kNvfp4DFlash2FeatureT;
++extern const Nvfp4LinearShape kNvfp4DFlash2Qkv;
++extern const Nvfp4LinearShape kNvfp4DFlash2AttnOut;
++extern const Nvfp4LinearShape kNvfp4DFlash2ConvProj;
++extern const Nvfp4LinearShape kNvfp4DFlash2Selector;
+ } // namespace ninfer::ops::detail
+diff --git a/src/ops/linear/nvfp4/nvfp4_shapes_unified.h b/src/ops/linear/nvfp4/nvfp4_shapes_unified.h
+index 2216cfbdbf597d64065c5a3cc732af148e2cd534..b3115d230d2d5ed50e973e4a1b942366cf47b4db 100644
+--- a/src/ops/linear/nvfp4/nvfp4_shapes_unified.h
++++ b/src/ops/linear/nvfp4/nvfp4_shapes_unified.h
+@@ -42,4 +42,12 @@ extern const Nvfp4LinearShape kNvfp4N8192K4096;
+ constexpr bool nvfp4_shape_tile_aligned(std::int32_t n, std::int32_t k) {
+     return n > 0 && k > 0 && n % 128 == 0 && k % 64 == 0;
+ }
++
++// DFlash2 weight-only A16 projections (melis2023).
++extern const Nvfp4LinearShape kNvfp4DFlash2Feature;
++extern const Nvfp4LinearShape kNvfp4DFlash2FeatureT;
++extern const Nvfp4LinearShape kNvfp4DFlash2Qkv;
++extern const Nvfp4LinearShape kNvfp4DFlash2AttnOut;
++extern const Nvfp4LinearShape kNvfp4DFlash2ConvProj;
++extern const Nvfp4LinearShape kNvfp4DFlash2Selector;
+ } // namespace ninfer::ops::detail::unified
+diff --git a/src/ops/linear/nvfp4/shapes/dflash2.cu b/src/ops/linear/nvfp4/shapes/dflash2.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ec08be379383c43bfda2e85ef4707f63fb8d53d
+--- /dev/null
++++ b/src/ops/linear/nvfp4/shapes/dflash2.cu
+@@ -0,0 +1,78 @@
++// DFlash2 drafter matrices for the NVFP4-encoded draft module: weight-only A16 routes
++// (gemv for a single token, exact small-T families, 32-token chunks for wider extents).
++// The draft never quantizes activations, so no A4 route is registered for these shapes.
++//
++// Geometries follow the DFlash2 drafter: feature expansion, fused QKV, attention output,
++// convolution projection and the selector. They are registered through the same
++// Nvfp4LinearShape table the text tower uses.
++#include "ops/linear/nvfp4/nvfp4_shapes.h"
++#include "ops/linear/nvfp4/nvfp4_launch.cuh"
++
++#include <algorithm>
++#include <array>
++#include <cstddef>
++#include <stdexcept>
++#include <utility>
++
++namespace ninfer::ops::detail {
++namespace {
++
++template <std::int32_t OutputRows, std::int32_t InputRows>
++struct DFlash2Routes {
++    using Geometry = Nvfp4Geometry<OutputRows, InputRows>;
++    using Gemv =
++        Nvfp4GemvSchedule<8, 2, 16, 4, Nvfp4ScaleAccess::StagedRaw, Nvfp4CodeCache::Default, 2>;
++    template <int Tokens>
++    using Exact =
++        Nvfp4SimtSchedule<(Tokens <= 12 ? 8 : (Tokens <= 16 ? 16 : 4)), 1, 2,
++                          (Tokens >= 17 && Tokens <= 20) ? 8 : 16, Tokens, 1,
++                          Nvfp4SimtActivationAccess::TokenPacked, Nvfp4ScaleAccess::Direct,
++                          Nvfp4CodeCache::Default, 1, Nvfp4SimtBlockOrder::RowsContiguous, 1>;
++    using C2 = Nvfp4SimtSchedule<8, 1, 2, 16, 2, 1, Nvfp4SimtActivationAccess::SharedPhase,
++                                 Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
++                                 Nvfp4SimtBlockOrder::RowsContiguous, 1>;
++    using C4 = Nvfp4SimtSchedule<8, 1, 2, 16, 4, 1, Nvfp4SimtActivationAccess::SharedPhase,
++                                 Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
++                                 Nvfp4SimtBlockOrder::RowsContiguous, 1>;
++    using C32 = Nvfp4SimtSchedule<4, 1, 2, 16, 8, 1, Nvfp4SimtActivationAccess::TokenPacked,
++                                  Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
++                                  Nvfp4SimtBlockOrder::TokenTilesContiguous, 4>;
++    using FullChunk = Nvfp4SimtSchedule<4, 1, 2, 16, 32, 1, Nvfp4SimtActivationAccess::TokenPacked,
++                                        Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
++                                        Nvfp4SimtBlockOrder::RowsContiguous, 1>;
++
++    static Nvfp4Launch select_a16(std::int32_t tokens) {
++        if (tokens == 1) return launch_nvfp4_gemv<Geometry, Gemv>;
++        if (tokens == 32) return launch_nvfp4_simt<Geometry, 32, FullChunk, true>;
++        if (tokens >= 5 && tokens <= 28) return select_nvfp4_exact<Geometry, 5, 28, Exact>(tokens);
++        if (tokens <= 2) return launch_nvfp4_simt<Geometry, 2, C2, true>;
++        if (tokens <= 4) return launch_nvfp4_simt<Geometry, 4, C4, false>;
++        if (tokens <= 32) return launch_nvfp4_simt<Geometry, 32, C32, false>;
++        throw std::logic_error("nvfp4 DFlash2 A16 chunk exceeds shape capacity");
++    }
++
++    static void launch(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
++        launch_nvfp4_a16_chunks<32, select_a16>(x, weight, out, stream);
++    }
++};
++
++bool dflash2_uses_a4(std::int32_t, std::int32_t) { return false; }
++
++} // namespace
++
++const Nvfp4LinearShape kNvfp4DFlash2Feature{25600, 5120, DFlash2Routes<25600, 5120>::launch,
++                                            nullptr, dflash2_uses_a4};
++// The artifact stores the feature expansion as [hidden, 5*hidden]; this route covers
++// that ordering (the one above covers the transposed [5*hidden, hidden] form).
++const Nvfp4LinearShape kNvfp4DFlash2FeatureT{5120, 25600, DFlash2Routes<5120, 25600>::launch,
++                                            nullptr, dflash2_uses_a4};
++const Nvfp4LinearShape kNvfp4DFlash2Qkv{6144, 5120, DFlash2Routes<6144, 5120>::launch, nullptr,
++                                        dflash2_uses_a4};
++const Nvfp4LinearShape kNvfp4DFlash2AttnOut{5120, 4096, DFlash2Routes<5120, 4096>::launch, nullptr,
++                                            dflash2_uses_a4};
++const Nvfp4LinearShape kNvfp4DFlash2ConvProj{1280, 5120, DFlash2Routes<1280, 5120>::launch,
++                                             nullptr, dflash2_uses_a4};
++const Nvfp4LinearShape kNvfp4DFlash2Selector{256, 5120, DFlash2Routes<256, 5120>::launch, nullptr,
++                                             dflash2_uses_a4};
++
++} // namespace ninfer::ops::detail
+diff --git a/src/ops/linear/nvfp4/shapes/dflash2_unified.cu b/src/ops/linear/nvfp4/shapes/dflash2_unified.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..01c9721a0baa0546e6f43c8ee7f5405402fd0319
+--- /dev/null
++++ b/src/ops/linear/nvfp4/shapes/dflash2_unified.cu
+@@ -0,0 +1,70 @@
++// DFlash2 drafter matrices for the NVFP4-encoded draft module, unified routes.
++// Weight-only A16 (gemv for one token, SIMT for the draft widths, MMA for wider chunks).
++// The draft never quantizes activations, so no A4 route is registered.
++#include "ops/linear/nvfp4/nvfp4_shapes_unified.h"
++#include "ops/linear/nvfp4/nvfp4_launch_unified.cuh"
++
++#include <algorithm>
++#include <cstdint>
++#include <stdexcept>
++
++namespace ninfer::ops::detail::unified {
++namespace {
++
++template <std::int32_t OutputRows, std::int32_t InputRows>
++struct DFlash2Routes {
++    using Geometry = Nvfp4Geometry<OutputRows, InputRows>;
++    using Gemv =
++        Nvfp4A16GemvSchedule<8, 2, 16, 4, Nvfp4ScaleAccess::StagedRaw, Nvfp4CodeCache::Default, 2>;
++    using C2 = Nvfp4A16SimtSchedule<8, 1, 2, 16, 2, 1, Nvfp4SimtActivationAccess::SharedPhase,
++                                    Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
++                                    Nvfp4SimtBlockOrder::RowsContiguous, 1>;
++    using C4 = Nvfp4A16SimtSchedule<8, 1, 2, 16, 4, 1, Nvfp4SimtActivationAccess::SharedPhase,
++                                    Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
++                                    Nvfp4SimtBlockOrder::RowsContiguous, 1>;
++    using FullChunk = Nvfp4A16SimtSchedule<4, 1, 2, 16, 32, 1, Nvfp4SimtActivationAccess::TokenPacked,
++                                           Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
++                                           Nvfp4SimtBlockOrder::RowsContiguous, 1>;
++    using T32 = Nvfp4A16MmaSchedule<32, 32, 128, 16, 16, 2, 2>;
++    using T64 = Nvfp4A16MmaSchedule<32, 64, 128, 16, 16, 1, 3>;
++
++    static Nvfp4Launch select(std::int32_t tokens) {
++        if (tokens == 1) return nvfp4_linear_a16_gemv<Geometry, Gemv>;
++        if (tokens <= 2) return nvfp4_linear_a16_simt<Geometry, 2, C2, true>;
++        if (tokens <= 4) return nvfp4_linear_a16_simt<Geometry, 4, C4, false>;
++        if (tokens <= 32) return nvfp4_linear_a16_simt<Geometry, 32, FullChunk, false>;
++        if (tokens <= 64) return nvfp4_linear_a16_mma<Geometry, T32>;
++        return nvfp4_linear_a16_mma<Geometry, T64>;
++    }
++
++    static void launch(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
++        constexpr std::int32_t kChunk = 32;
++        for (std::int32_t offset = 0; offset < x.ne[1]; offset += kChunk) {
++            const std::int32_t count = std::min(kChunk, x.ne[1] - offset);
++            const Tensor input       = x.slice(1, offset, count);
++            Tensor output            = out.slice(1, offset, count);
++            select(count)(input, weight, output, stream);
++        }
++    }
++};
++
++bool dflash2_uses_a4(std::int32_t, std::int32_t) { return false; }
++
++} // namespace
++
++const Nvfp4LinearShape kNvfp4DFlash2Feature{25600, 5120, DFlash2Routes<25600, 5120>::launch,
++                                            nullptr, dflash2_uses_a4, nullptr, nullptr};
++// The artifact stores the feature expansion as [hidden, 5*hidden]; this route covers
++// that ordering (the one above covers the transposed [5*hidden, hidden] form).
++const Nvfp4LinearShape kNvfp4DFlash2FeatureT{5120, 25600, DFlash2Routes<5120, 25600>::launch,
++                                            nullptr, dflash2_uses_a4, nullptr, nullptr};
++const Nvfp4LinearShape kNvfp4DFlash2Qkv{6144, 5120, DFlash2Routes<6144, 5120>::launch, nullptr,
++                                        dflash2_uses_a4};
++const Nvfp4LinearShape kNvfp4DFlash2AttnOut{5120, 4096, DFlash2Routes<5120, 4096>::launch, nullptr,
++                                            dflash2_uses_a4};
++const Nvfp4LinearShape kNvfp4DFlash2ConvProj{1280, 5120, DFlash2Routes<1280, 5120>::launch,
++                                             nullptr, dflash2_uses_a4, nullptr, nullptr};
++const Nvfp4LinearShape kNvfp4DFlash2Selector{256, 5120, DFlash2Routes<256, 5120>::launch, nullptr,
++                                             dflash2_uses_a4};
++
++} // namespace ninfer::ops::detail::unified
+diff --git a/src/ops/linear/nvfp4/sources.cmake b/src/ops/linear/nvfp4/sources.cmake
+index 4ca4b2f653ea112156db6b3d14ccb670580e7139..fca54d281088cf5b78af43b06e010b27b6cf48ed 100644
+--- a/src/ops/linear/nvfp4/sources.cmake
++++ b/src/ops/linear/nvfp4/sources.cmake
+@@ -1,4 +1,6 @@
+ target_sources(ninfer_ops PRIVATE
++  "${CMAKE_CURRENT_LIST_DIR}/shapes/dflash2.cu"
++  "${CMAKE_CURRENT_LIST_DIR}/shapes/dflash2_unified.cu"
+   "${CMAKE_CURRENT_LIST_DIR}/nvfp4_format.cpp"
+   "${CMAKE_CURRENT_LIST_DIR}/nvfp4_int8_grouped.cu"
+   "${CMAKE_CURRENT_LIST_DIR}/nvfp4_int8_fused_norm_quant.cu"
+diff --git a/src/ops/wrapper/dynamic_grouped_conv.cpp b/src/ops/wrapper/dynamic_grouped_conv.cpp
+index 125622fc8b1cbe68cd91726e57a556a4eb11b130..90c97de421709d4a0bbf062daab60a1b7146a2d6 100644
+--- a/src/ops/wrapper/dynamic_grouped_conv.cpp
++++ b/src/ops/wrapper/dynamic_grouped_conv.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "ops/dynamic_grouped_conv/bf16/bf16_dynamic_grouped_conv_prepare_plan.h"
+ #include "ops/dynamic_grouped_conv/q8/q8_dynamic_grouped_conv_add_plan.h"
++#include "ops/linear/nvfp4/nvfp4_format.h"
+ 
+ #include <array>
+ #include <cmath>
+@@ -228,6 +229,15 @@ void linear_dynamic_grouped_conv_add(const Tensor& x, const Weight& projection_w
+     require_tensor(finish_delta, DType::BF16, kGroups, kTaps, width, batch_size, kAddOp,
+                    "finish_delta");
+     require_tensor(residual, DType::BF16, kHidden, width, batch_size, 1, kAddOp, "residual");
++    if (projection_weight.qtype == QType::NVFP4) {
++        if (projection_weight.n != kHidden || projection_weight.k != input_rows)
++            throw std::invalid_argument("linear dynamic grouped conv add: invalid projection_weight");
++        (void)detail::validate_nvfp4_weight(projection_weight, kAddOp);
++        require_finish_nonoverlap(x, projection_weight, base_kernel, finish_delta, residual, workspace);
++        detail::materialized_linear_dynamic_grouped_conv_add_dispatch(
++            x, projection_weight, base_kernel, finish_delta, residual, workspace, stream);
++        return;
++    }
+     if (materialized_projection(projection_weight, input_rows)) {
+         require_finish_nonoverlap(x, projection_weight, base_kernel, finish_delta, residual,
+                                   workspace);
+diff --git a/tests/convert/test_nvfp4_draft.py b/tests/convert/test_nvfp4_draft.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b8a04a0a8bee32b935cb3361feba151b220c4b0
+--- /dev/null
++++ b/tests/convert/test_nvfp4_draft.py
+@@ -0,0 +1,103 @@
++"""Independent E2M1 boundary and bounded-draft conversion checks."""
++import struct
++import numpy as np
++import pytest
++import torch
++from tools.convert.nvfp4 import quantize_rows, nvfp4_maxabs
++from tools.convert.model import Model, Parameter
++from tools.convert.recipe import Recipe
++from tools.convert.sources.logical import array_source
++from tools.convert.pipeline import convert
++from tools.artifact.reader import Artifact
++from tools.artifact.codecs.nvfp4 import decode_nvfp4_words
++
++
++def unpack(codes,scales,divisor):
++    # Scalar format definition: sign + E2M1 magnitude and unsigned E4M3 group scale.
++    levels=[0.,.5,1.,1.5,2.,3.,4.,6.]
++    out=np.empty((codes.shape[0],codes.shape[1]*2),dtype=np.float64)
++    for row in range(len(out)):
++        for col in range(out.shape[1]):
++            code=(int(codes[row,col//2]) >> (4*(col%2))) & 15
++            word=int(scales[row,col//16]); exponent=(word>>3)&15; fraction=word&7
++            scale=(fraction*2.**-9 if exponent==0 else (1+fraction/8)*2.**(exponent-7))
++            out[row,col]=(-1 if code&8 else 1)*levels[code&7]*scale/divisor
++    return out
++
++
++def test_fp4_midpoints_round_to_even_and_keep_sign():
++    midpoints=[.25,.75,1.25,1.75,2.5,3.5,5.]
++    row=midpoints+[-x for x in midpoints]+[6.,-6.]
++    values=torch.tensor([row*4]*128)
++    codes,scales=quantize_rows(values,1.)
++    expected=[0.,1.,1.,2.,2.,4.,4.]
++    np.testing.assert_array_equal(unpack(codes.numpy(),scales.numpy(),1.)[0,:16],
++                                 expected+[-x for x in expected]+[6.,-6.])
++
++
++def test_weight_only_roundtrip_has_finite_independently_decoded_values(tmp_path):
++    values=torch.linspace(-.071,.089,128*64).reshape(128,64)
++    model=Model({'text':{'config':{}}})
++    model.add(Parameter('dflash2/feature_projection',(128,64),array_source(values,'independent fixture'),inputs=('draft_input',)))
++    recipe=Recipe(model)
++    recipe.assign('dflash2/feature_projection',format='nvfp4',method=nvfp4_maxabs,activation_policy='A16Only')
++    path=tmp_path/'nvfp4.ninfer';convert(model,recipe,path,device='cpu',rows_per_chunk=128)
++    with Artifact(path) as artifact:
++        obj=artifact.object(artifact.directory.bindings['dflash2/feature_projection']['object'])
++        codes,scales,divisor=decode_nvfp4_words(artifact.read_object(obj.id),obj.shape)
++        actual=unpack(codes.numpy(),scales.numpy(),float(divisor))
++        assert np.isfinite(actual).all()
++        assert np.max(np.abs(actual-values.numpy())) < .015
++        assert all(u['activation_policy']=='A16Only' for u in artifact.directory.uses)
++
++
++def test_quantization_rejects_nonfinite_input():
++    with pytest.raises(ValueError,match='finite'):
++        quantize_rows(torch.full((128,64),float('nan')),1.)
++
++
++@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float8_e4m3fn])
++@pytest.mark.parametrize('chunk', [128, 512])
++def test_draft_requantization_keeps_gate_up_in_one_native_parent(tmp_path, dtype, chunk):
++    from tools.convert.recipes.dflash2_nvfp4 import configure
++
++    model = Model({'text': {'config': {}}, 'dflash2': {'config': {}}})
++    expected = []
++    for layer in range(2):
++        names = tuple(f'dflash2/layers/{layer}/mlp/{role}' for role in ('gate', 'up'))
++        rows = []
++        for index, name in enumerate(names):
++            values = (torch.linspace(-.07, .09, 256*64).reshape(256, 64)
++                      * (1 + index + layer)).to(dtype)
++            model.add(Parameter(name, (256, 64), array_source(values, name),
++                                inputs=('mlp_input',)))
++            rows.append(values.float().numpy())
++        model.packing_groups.append(names)
++        expected.append((names, np.concatenate(rows)))
++    recipe = Recipe(model)
++    configure(model, recipe, {})
++    path = tmp_path / 'draft.ninfer'
++    convert(model, recipe, path, device='cpu', rows_per_chunk=chunk)
++    with Artifact(path) as artifact:
++        for names, values in expected:
++            gate, up = (artifact.directory.bindings[name]['parts'] for name in names)
++            assert len(gate) == len(up) == 1
++            assert gate[0]['object'] == up[0]['object']
++            obj = artifact.object(gate[0]['object'])
++            assert obj.shape == (512, 64) and obj.divisors == 1
++            assert gate[0]['range'] == [0, 256*64]
++            assert up[0]['range'] == [256*64, 512*64]
++            codes, scales, divisor = decode_nvfp4_words(artifact.read_object(obj.id), obj.shape)
++            actual = unpack(codes.numpy(), scales.numpy(), float(divisor))
++            assert np.isfinite(actual).all()
++            assert np.max(np.abs(actual-values)) < .04
++
++
++def test_weight_only_requantization_rejects_activation_quantization():
++    model = Model({'text': {'config': {}}})
++    model.add(Parameter('draft', (128, 64), array_source(torch.ones(128, 64), 'fixture'),
++                        inputs=('input',)))
++    recipe = Recipe(model)
++    recipe.assign('draft', format='nvfp4', method=nvfp4_maxabs, activation_policy='AllowA4')
++    with pytest.raises(ValueError, match='weight-only'):
++        recipe.prepare(device='cpu')
+diff --git a/tests/ops/linear/test_nvfp4_a16.cpp b/tests/ops/linear/test_nvfp4_a16.cpp
+index 9842794f8f9eecd12ceee102991a759fcbd24c8d..094f1df87dec3e1c13816c0efcbd661d770817bb 100644
+--- a/tests/ops/linear/test_nvfp4_a16.cpp
++++ b/tests/ops/linear/test_nvfp4_a16.cpp
+@@ -42,6 +42,16 @@ int run_nvfp4_a16() {
+                         std::pair{5120, 6144}, std::pair{5120, 17408}}) {
+         failures += verify_workspace_envelopes(QType::NVFP4, n, k);
+     }
++    // DFlash2 feature, fused QKV, attention output, convolution projection and selector.
++    const std::vector<Invocation> draft_calls{{1},{2},{3},{5},{6},{16},{32},{33},
++        {6,CallForm::Policy,ops::LinearPolicy::A16Only,true}};
++    for (auto [n,k] : {std::pair{25600,5120}, std::pair{5120,25600},
++                       std::pair{6144,5120}, std::pair{5120,4096},
++                       std::pair{1280,5120}, std::pair{256,5120}}) {
++        failures += run_shape("NVFP4_DFLASH2",ActivationCompute::A16,make_nvfp4_weight,
++            {n,k,739U,Comparison::SampledRows,true,draft_calls});
++        failures += verify_workspace_envelopes(QType::NVFP4,n,k);
++    }
+     return failures;
+ }
+ 
+diff --git a/tests/ops/test_linear_dynamic_grouped_conv_add.cpp b/tests/ops/test_linear_dynamic_grouped_conv_add.cpp
+index d16ed241b48088348f4e935e80a75f9d44c6e4c3..cbaf04562598522b5b8c62477ce9582b847b937b 100644
+--- a/tests/ops/test_linear_dynamic_grouped_conv_add.cpp
++++ b/tests/ops/test_linear_dynamic_grouped_conv_add.cpp
+@@ -347,7 +347,8 @@ int main() {
+             run_profile(17408, QType::Q5_G64_FP16) +
+             run_profile(4096,QType::GGUF_Q3_K) + run_profile(17408,QType::GGUF_Q3_K) +
+             run_profile(4096,QType::GGUF_Q4_K) + run_profile(17408,QType::GGUF_Q4_K) +
+-            run_profile(17408,QType::GGUF_Q6_K);
++            run_profile(17408,QType::GGUF_Q6_K) +
++            run_profile(4096,QType::NVFP4) + run_profile(17408,QType::NVFP4);
+         std::cout << (failures == 0 ? "OK" : "FAIL") << " linear_dynamic_grouped_conv_add\n";
+         return failures == 0 ? 0 : 1;
+     } catch (const std::exception& error) {
+diff --git a/tools/convert/nvfp4.py b/tools/convert/nvfp4.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0549f71fb6e1d8b97b62db111b7cb656637c216b
+--- /dev/null
++++ b/tools/convert/nvfp4.py
+@@ -0,0 +1,52 @@
++"""Bounded weight-only NVFP4 round-to-nearest conversion for optional draft matrices."""
++import struct
++import torch
++
++
++def quantize_rows(values, divisor):
++    """Return packed E2M1 codes and natural E4M3 scale words; ties round to even."""
++    values = values.to(torch.float32) * divisor
++    if not torch.isfinite(values).all():
++        raise ValueError('NVFP4 input must be finite')
++    n, k = values.shape
++    groups = values.reshape(n, k // 16, 16)
++    scales = (groups.abs().amax(-1) / 6).to(torch.float8_e4m3fn)
++    scales32 = scales.float()
++    normalized = groups / torch.where(scales32 == 0, 1., scales32).unsqueeze(-1)
++    magnitude = normalized.abs()
++    midpoints = torch.tensor([.25, .75, 1.25, 1.75, 2.5, 3.5, 5.], device=values.device)
++    codes = torch.bucketize(magnitude.contiguous(), midpoints)
++    codes += ((codes < 7) & (codes.remainder(2) == 1) &
++              (magnitude == midpoints[codes.clamp(max=6)])).long()
++    codes = (codes | (normalized.signbit().long() << 3)).to(torch.uint8).reshape(n, k)
++    packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
++    return packed.cpu(), scales.view(torch.uint8).cpu()
++
++
++def nvfp4_maxabs(request):
++    if request.target.format != 'nvfp4' or len(request.target.shape) != 2:
++        raise ValueError('nvfp4_maxabs requires an NVFP4 matrix')
++    n, k = request.target.shape
++    if n % 128 or k % 64:
++        raise ValueError('NVFP4 matrix requires N % 128 == 0 and K % 64 == 0')
++    if any(policy != 'A16Only' for policy in request.policies.values()):
++        raise ValueError('nvfp4_maxabs is weight-only; use A16Only')
++    chunk = max(128, request.rows_per_chunk // 128 * 128)
++    maximum = 0.
++    for begin in range(0, n, chunk):
++        values = request.values(begin*k, min(n, begin+chunk)*k).float()
++        if not torch.isfinite(values).all():
++            raise ValueError('NVFP4 input must be finite')
++        maximum = max(maximum, values.abs().max().item())
++    divisor = struct.unpack('<f', struct.pack('<f', 2688. / maximum if maximum else 1.))[0]
++    if not (0 < divisor < float('inf')):
++        raise ValueError('NVFP4 weight divisor is not representable in FP32')
++    word = struct.pack('<f', divisor)
++
++    def produce(output):
++        for begin in range(0, n, chunk):
++            end = min(n, begin+chunk)
++            values = request.values(begin*k, end*k).reshape(end-begin, k)
++            codes, scales = quantize_rows(values, divisor)
++            output.write_codes(begin, codes, scales, word)
++    return request.job(produce=produce)
+diff --git a/tools/convert/recipes/dflash2_import_nvfp4.py b/tools/convert/recipes/dflash2_import_nvfp4.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a1cf1cdb16a0d8e18f3e39e2c4909b4aad6ac9f
+--- /dev/null
++++ b/tools/convert/recipes/dflash2_import_nvfp4.py
+@@ -0,0 +1,42 @@
++"""Import the DFlash2 module's NVFP4 weights verbatim from a ModelOpt source.
++
++Unlike ``dflash2_nvfp4.py`` (which re-quantises a BF16/FP8 companion), this override
++keeps the source's NVFP4 codes and block scales, and converts its multiplicative
++global scale to the equivalent native divisor. Use it when the
++companion checkpoint is already ModelOpt NVFP4, e.g.
++``maurienne-ai/Qwen3.8-27B-DFlash2-NVFP4-RTNcal``.
++
++The supported large projections use NVFP4: ``attention/output`` and ``mlp/down``
++import the source's codes and block scales verbatim, while ``feature_projection`` and the selector hidden
++projection (BF16 in the checkpoint) are quantised to NVFP4. QKV keeps Q8 because the
++fused attention input projection only admits that format, and the convolution kernel
++projections stay BF16 because their prepare path has no NVFP4 kernel.
++"""
++from tools.convert.methods import import_encoded
++from tools.convert.nvfp4 import nvfp4_maxabs
++
++# The engine's native QKV input projection requires Q8_G32_FP16.
++_KEPT_Q8 = ('/attention/query', '/attention/key', '/attention/value')
++
++# BF16 in the ModelOpt checkpoint; quantise the supported projections to NVFP4.
++_REQUANTISE = (
++    'dflash2/feature_projection',
++    'dflash2/candidate_selector/hidden_projection',
++)
++
++
++def configure(model, recipe, sources):
++    if 'dflash2' not in model.components:
++        raise ValueError('DFlash2 NVFP4 import requires the DFlash2 component')
++    for name, parameter in model.parameters.items():
++        if not name.startswith('dflash2/') or not parameter.projection:
++            continue
++        if 'conv' in name or '/attention/context_' in name:
++            continue
++        if any(name.endswith(suffix) for suffix in _KEPT_Q8):
++            continue
++        if name in _REQUANTISE:
++            recipe.assign(name, format='nvfp4', method=nvfp4_maxabs,
++                          activation_policy='A16Only')
++            continue
++        recipe.assign(name, format='nvfp4', method=import_encoded)
+diff --git a/tools/convert/recipes/dflash2_nvfp4.py b/tools/convert/recipes/dflash2_nvfp4.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f998d725d0a70dd66c700ada8ca26265698ee10
+--- /dev/null
++++ b/tools/convert/recipes/dflash2_nvfp4.py
+@@ -0,0 +1,22 @@
++"""Quantize supported DFlash2 projections to weight-only NVFP4.
++
++QKV keeps its native Q8 fused route; convolution preparation remains BF16.
++"""
++from tools.convert.nvfp4 import nvfp4_maxabs
++
++def configure(model, recipe, sources):
++    if 'dflash2' not in model.components:
++        raise ValueError('DFlash2 NVFP4 override requires the DFlash2 component')
++    for name, parameter in model.parameters.items():
++        if not name.startswith('dflash2/') or not parameter.projection:
++            continue
++        if 'conv' in name or '/attention/context_' in name:
++            continue
++        if name.endswith(('/attention/query', '/attention/key', '/attention/value')):
++            continue
++        recipe.assign(name, format='nvfp4', method=nvfp4_maxabs, activation_policy='A16Only')
++    # Custom methods do not participate in Recipe's automatic packing. SwiGLU needs
++    # gate/up in one complete NVFP4 parent, quantized with one shared divisor.
++    for name in model.parameters:
++        if name.startswith('dflash2/') and name.endswith('/mlp/gate'):
++            recipe.group((name, name.removesuffix('gate') + 'up'))

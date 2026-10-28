@@ -20,6 +20,7 @@ jobs:
     outputs:
       run_ci: ${{ steps.classify.outputs.run_ci }}
       run_cuda: ${{ steps.classify.outputs.run_cuda }}
+      run_native: ${{ steps.classify.outputs.run_native }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,9 +38,57 @@ jobs:
           python3 tests/test_public_evidence.py
           python3 tests/test_multi_needle.py
           python3 -m unittest discover -s scripts -p test_native_stats.py
-  host-linux:
+  console:
     needs: changes
     if: needs.changes.outputs.run_ci == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Use a canonical Windows test directory
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testTemp = Join-Path $env:RUNNER_TEMP 'kvmem-console-tests'
+          New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          "TEMP=$testTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$testTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: python -m pip install -r scripts/requirements-console.txt
+      - name: Test launcher and console without compiling an engine
+        shell: bash
+        run: |
+          python -m unittest discover -s tests -p "test_launcher_plan.py"
+          python -m unittest discover -s tests -p "test_launcher_export.py"
+          python -m unittest discover -s tests -p "test_launcher_process.py"
+          python -m unittest discover -s tests -p "test_launcher_services.py"
+          python -m unittest discover -s tests -p "test_launcher_package.py"
+          python tests/test_local_console.py
+          python tests/test_console_logs.py
+          python tests/test_console_chat.py
+          python tests/test_model_health.py
+          python tests/test_one_click.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Browser and launcher syntax checks
+        shell: bash
+        run: |
+          node --check ui/monitor/launcher.js
+          npm ci --prefix ui
+          npx --prefix ui playwright install --with-deps chromium
+          npm test --prefix ui
+  host-linux:
+    needs: changes
+    if: needs.changes.outputs.run_native == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -53,12 +102,32 @@ jobs:
       - name: Test local console and monitor packaging
         run: |
           python3 tests/test_local_console.py
+          python3 tests/test_console_logs.py
+          python3 tests/test_model_health.py
+          python3 tests/test_prepare_backends.py
+          python3 tests/test_console_chat.py
           python3 tests/test_one_click.py
           python3 tests/test_webui_builder.py
       - name: Prepare pinned llama.cpp integration
         run: |
           python3 scripts/prepare-backends.py --backend llamacpp
           python3 scripts/prepare-backends.py --backend llamacpp --check
+      - name: Validate PolyStrata integration patch and adapters
+        run: |
+          python3 scripts/prepare-backends.py --backend polystrata
+          python3 scripts/prepare-backends.py --backend polystrata --check
+          python3 -m pip install Jinja2==3.1.6 regex==2026.9.10
+          python3 -m unittest discover -s tools/polystrata -p test_wrapper.py
+          python3 -m unittest discover -s tools/polystrata -p test_backend_launch.py
+          python3 -m unittest discover -s tools/polystrata -p test_build_contract.py
+          python3 -m unittest discover -s tools/polystrata -p test_image_query.py
+          (cd backends/polystrata && python3 -m unittest serve.test_kvmem serve.test_server.VisionShutdown)
+          python3 -m unittest discover -s tools/polystrata -p test_assets.py
+          python3 -m unittest discover -s tools/polystrata -p test_monitor.py
+          python3 -m unittest discover -s tools/polystrata -p test_ui_contract.py
+          python3 -m unittest discover -s tools/polystrata -p test_console_routes.py
+          node ui/test-polystrata-contract.cjs
+          node ui/test-polystrata-stream.cjs
       - name: Configure host and model-free server tests
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -70,14 +139,23 @@ jobs:
       - run: bash scripts/test_server_portable.sh build/portable
   host-windows:
     needs: changes
-    if: needs.changes.outputs.run_ci == 'true'
+    if: needs.changes.outputs.run_native == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Use a canonical Windows test directory
+        shell: pwsh
+        run: |
+          $testTemp = Join-Path $env:RUNNER_TEMP 'kvmem-host-tests'
+          New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          "TEMP=$testTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$testTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - run: python scripts/test_build_rocm.py
       - name: Test portable validation and evidence export
         run: |
@@ -86,6 +164,10 @@ jobs:
       - name: Test local console and monitor packaging
         run: |
           python tests/test_local_console.py
+          python tests/test_console_logs.py
+          python tests/test_model_health.py
+          python tests/test_prepare_backends.py
+          python tests/test_console_chat.py
           python tests/test_windows_worker_args.py
           python tests/test_one_click.py
           python tests/test_webui_builder.py
@@ -181,6 +263,176 @@ jobs:
       - name: Compiler cache statistics
         if: ${{ always() }}
         run: ccache --show-stats
+  polystrata-cuda-build-linux:
+    needs: changes
+    if: needs.changes.outputs.run_cuda == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # PolyStrata recommends CUDA >= 13 for Blackwell; do not inherit the
+    # llama.cpp job's CUDA 12.8 toolchain.
+    container: nvidia/cuda:13.2.0-devel-ubuntu24.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache-polystrata
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 1G
+      CCACHE_COMPILERCHECK: content
+      CUDA_VISIBLE_DEVICES: ''
+    steps:
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build python3 time ccache zstd
+      - uses: actions/checkout@v4
+      - name: Trust the checked-out workspace in the CUDA container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Prepare and verify pinned PolyStrata integration
+        run: |
+          python3 scripts/prepare-backends.py --backend polystrata
+          python3 scripts/prepare-backends.py --backend polystrata --check
+      - name: Identify the compiler toolchain
+        id: toolchain
+        run: |
+          c++ --version > "$RUNNER_TEMP/polystrata-compiler-versions.txt"
+          nvcc --version >> "$RUNNER_TEMP/polystrata-compiler-versions.txt"
+          ccache --version >> "$RUNNER_TEMP/polystrata-compiler-versions.txt"
+          sha256sum "$(command -v c++)" "$(command -v nvcc)" "$(command -v ccache)" >> "$RUNNER_TEMP/polystrata-compiler-versions.txt"
+          printf 'id=%s\n' "$(sha256sum "$RUNNER_TEMP/polystrata-compiler-versions.txt" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Restore compiler cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: polystrata-cuda13.2.0-120a-v1-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/workflows/server-compat.yml', 'kvmem/CMakeLists.txt', 'backends/versions.json', 'backends/patches/polystrata*.patch') }}
+          restore-keys: |
+            polystrata-cuda13.2.0-120a-v1-${{ steps.toolchain.outputs.id }}-
+      - name: Prepare the CUDA driver stub for linking
+        run: |
+          mkdir -p "$RUNNER_TEMP/polystrata-driver-stubs"
+          ln -s /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/polystrata-driver-stubs/libcuda.so.1"
+      - name: Configure PolyStrata against this checkout's KVMem core
+        # GGML is fetched at the commit pinned in PolyStrata's CMakeLists.txt.
+        # A fixed architecture avoids probing for a GPU on the hosted runner.
+        run: |
+          set -o pipefail
+          cmake -S backends/polystrata -B build-polystrata -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON \
+            -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON \
+            -DSTRATA_KVMEM_SOURCE_DIR="$GITHUB_WORKSPACE/kvmem" \
+            -DCMAKE_CUDA_ARCHITECTURES=120a-real \
+            -DGGML_CCACHE=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,$RUNNER_TEMP/polystrata-driver-stubs" \
+            2>&1 | tee polystrata-configure.log
+      - name: Build and link worker and native regression targets
+        run: |
+          set -o pipefail
+          nproc
+          free -h
+          ccache --zero-stats
+          /usr/bin/time -v cmake --build build-polystrata --parallel 8 --target \
+            strata-poly poly_gdn_mma_state_test poly_kvmem_kernel_test poly_kvmem_mtp_test \
+            poly_kvmem_history_test poly_kvmem_sessions_test poly_elastic_test \
+            2>&1 | tee polystrata-build.log
+      - name: Run model-free host policy tests
+        # Do not run kernel/MTP tests on a runner without an NVIDIA GPU/model.
+        run: >-
+          ctest --test-dir build-polystrata --output-on-failure --no-tests=error
+          -R '^poly_kvmem_(history|sessions)_test$'
+      - name: Compiler cache statistics
+        if: ${{ always() }}
+        run: ccache --show-stats
+      - name: Preserve native build and test diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: polystrata-native-ci-logs
+          retention-days: 7
+          path: |
+            polystrata-configure.log
+            polystrata-build.log
+            build-polystrata/CMakeCache.txt
+            build-polystrata/CMakeFiles/CMakeConfigureLog.yaml
+            build-polystrata/Testing/Temporary/LastTest.log
+  polystrata-hip-build-linux:
+    needs: changes
+    if: needs.changes.outputs.run_native == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [gfx1100, gfx1201]
+    # Official ROCm 7.2.4 amd64 image. No GPU is exposed; this proves linkage,
+    # not AMD inference correctness. Architectures are selected explicitly.
+    container: rocm/dev-ubuntu-24.04:7.2.4@sha256:bdc8e61026cbb844ede93d44d2c50055f51ebb2041906b60182bf3bee3139054
+    defaults:
+      run:
+        shell: bash
+    env:
+      HIP_VISIBLE_DEVICES: ''
+      ROCR_VISIBLE_DEVICES: ''
+      CCACHE_DIR: ${{ github.workspace }}/.ccache-polystrata-hip
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 1G
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - name: Install build tools and pinned ROCm BLAS development packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates cmake ninja-build python3 ccache zstd \
+            hipblas-dev=3.2.0.70204-93~24.04 rocblas-dev=5.2.0.70204-93~24.04 hipblaslt-dev=1.2.2.70204-93~24.04
+      - uses: actions/checkout@v4
+      - name: Prepare and verify pinned PolyStrata integration
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 scripts/prepare-backends.py --backend polystrata
+          python3 scripts/prepare-backends.py --backend polystrata --check
+          /opt/rocm/llvm/bin/clang++ --version | tee polystrata-hip-toolchain.log
+          dpkg-query -W 'hip*' 'roc*' >> polystrata-hip-toolchain.log
+      - uses: actions/cache@v4
+        with:
+          path: .ccache-polystrata-hip
+          key: polystrata-hip7.2.4-bdc8e610-${{ matrix.arch }}-v1-${{ hashFiles('.github/workflows/server-compat.yml', 'kvmem/CMakeLists.txt', 'backends/versions.json', 'backends/patches/polystrata*.patch') }}
+          restore-keys: |
+            polystrata-hip7.2.4-bdc8e610-${{ matrix.arch }}-v1-
+      - name: Configure without probing AMD hardware
+        run: |
+          set -o pipefail
+          cmake -S backends/polystrata -B build-polystrata-hip -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_ENABLE_HIP=ON \
+            -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON \
+            -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++ \
+            -DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++ \
+            -DCMAKE_PREFIX_PATH=/opt/rocm -DCMAKE_HIP_ARCHITECTURES=${{ matrix.arch }} \
+            -DSTRATA_KVMEM_SOURCE_DIR="$GITHUB_WORKSPACE/kvmem" \
+            -DGGML_CCACHE=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_HIP_COMPILER_LAUNCHER=ccache \
+            2>&1 | tee polystrata-hip-configure.log
+      - name: Inspect, compile and link all KVMem consumers
+        run: |
+          set -o pipefail
+          targets=(strata-poly poly_kvmem_kernel_test poly_kvmem_mtp_test poly_elastic_test poly_kvmem_history_test poly_kvmem_sessions_test)
+          ninja -C build-polystrata-hip -n -d explain "${targets[@]}" 2>&1 | tee polystrata-hip-plan.log
+          free -h
+          df -h .
+          cmake --build build-polystrata-hip --parallel 8 --target "${targets[@]}" 2>&1 | tee polystrata-hip-build.log
+          # Do not execute HIP binaries without an AMD GPU.
+      - name: Preserve HIP build diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: polystrata-hip-${{ matrix.arch }}-logs
+          retention-days: 7
+          path: |
+            polystrata-hip-*.log
+            build-polystrata-hip/CMakeCache.txt
+            build-polystrata-hip/CMakeFiles/CMakeConfigureLog.yaml
   ninfer-pinned-sources:
     needs: changes
     if: needs.changes.outputs.run_ci == 'true'
@@ -205,7 +457,7 @@ jobs:
   # Keep required status names; only verified documentation changes may skip builds.
   host-and-server-units-linux:
     if: ${{ always() }}
-    needs: [changes, host-linux, host-windows, cuda-build-linux, ninfer-pinned-sources]
+    needs: [changes, console, host-linux, host-windows, cuda-build-linux, polystrata-cuda-build-linux, polystrata-hip-build-linux, ninfer-pinned-sources]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -214,9 +466,13 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUN_CI: ${{ needs.changes.outputs.run_ci }}
           RUN_CUDA: ${{ needs.changes.outputs.run_cuda }}
+          RUN_NATIVE: ${{ needs.changes.outputs.run_native }}
+          CONSOLE_RESULT: ${{ needs.console.result }}
           LINUX_RESULT: ${{ needs.host-linux.result }}
           WINDOWS_RESULT: ${{ needs.host-windows.result }}
           CUDA_RESULT: ${{ needs.cuda-build-linux.result }}
+          POLYSTRATA_CUDA_RESULT: ${{ needs.polystrata-cuda-build-linux.result }}
+          POLYSTRATA_HIP_RESULT: ${{ needs.polystrata-hip-build-linux.result }}
           NINFER_RESULT: ${{ needs.ninfer-pinned-sources.result }}
         run: |
           test "$CHANGES_RESULT" = success
@@ -225,13 +481,24 @@ jobs:
             exit 0
           fi
           test "$RUN_CI" = true
-          test "$LINUX_RESULT" = success
-          test "$WINDOWS_RESULT" = success
+          test "$CONSOLE_RESULT" = success
+          if [ "$RUN_NATIVE" = true ]; then
+            test "$LINUX_RESULT" = success
+            test "$WINDOWS_RESULT" = success
+            test "$POLYSTRATA_HIP_RESULT" = success
+          else
+            test "$RUN_NATIVE" = false
+            test "$LINUX_RESULT" = skipped
+            test "$WINDOWS_RESULT" = skipped
+            test "$POLYSTRATA_HIP_RESULT" = skipped
+          fi
           if [ "$RUN_CUDA" = true ]; then
             test "$CUDA_RESULT" = success
+            test "$POLYSTRATA_CUDA_RESULT" = success
           else
             test "$RUN_CUDA" = false
             test "$CUDA_RESULT" = skipped
+            test "$POLYSTRATA_CUDA_RESULT" = skipped
           fi
           test "$NINFER_RESULT" = success
   ui-linux:
@@ -256,6 +523,16 @@ jobs:
           node-version: '24'
       - run: python3 tests/test_webui_builder.py
         if: needs.changes.outputs.run_ci == 'true'
+      - name: Install console browser tests
+        if: needs.changes.outputs.run_ci == 'true' && matrix.mode == 'lightweight'
+        working-directory: ui
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Test console and monitor in Chromium
+        if: needs.changes.outputs.run_ci == 'true' && matrix.mode == 'lightweight'
+        working-directory: ui
+        run: npm test
       - name: Build UI
         if: needs.changes.outputs.run_ci == 'true'
         env:
@@ -266,6 +543,16 @@ jobs:
           else
             python3 scripts/build-webui.py
           fi
+      - name: Test unified chat against all backend settings
+        if: needs.changes.outputs.run_ci == 'true' && matrix.mode == 'lightweight'
+        working-directory: ui
+        run: |
+          node test-chat-props.cjs
+          node test-chat-history.cjs
+          node test-chat-attachments.cjs
+          node test-chat-actions.cjs
+          node test-chat-background.cjs
+          node test-chat-metrics.cjs
       - name: Documentation-only result
         if: needs.changes.outputs.run_ci == 'false'
         run: echo 'Documentation only; UI tests and builds skipped.'

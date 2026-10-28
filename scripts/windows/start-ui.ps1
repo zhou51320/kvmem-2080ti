@@ -11,30 +11,48 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 try {
-    foreach ($relative in 'scripts/local-console.py', 'scripts/windows/start-backend.ps1',
-                          'scripts/windows/describe-launch-json.ps1', 'scripts/windows/native-process.ps1',
+    foreach ($relative in 'scripts/local-console.py', 'scripts/console_chat.py', 'scripts/model_health.py', 'scripts/console_hardware.py',
+                          'scripts/launcher/__init__.py', 'scripts/launcher/config.py', 'scripts/launcher/plan.py',
+                          'scripts/launcher/export.py', 'scripts/launcher/systemd.py', 'scripts/launcher/worker.py', 'scripts/launcher-capabilities.json',
+                          'scripts/model_health_ninfer/__init__.py', 'scripts/model_health_ninfer/reader.py',
+                          'scripts/model_health_ninfer/schema.py', 'scripts/model_health_ninfer/layouts.py',
+                          'scripts/model_health_ninfer/formats.py', 'scripts/model_health_ninfer/framing.py',
+                          'scripts/model_health_ninfer/file_io.py', 'scripts/windows/start-backend.ps1',
+                          'scripts/windows/describe-launch-json.ps1', 'scripts/windows/native-process.ps1', 'scripts/windows/query-scoring.ps1', 'scripts/windows/token-settings.ps1',
                           'scripts/windows/select-model.ps1',
-                          'ui/monitor/index.html', 'ui/monitor/launcher.js', 'ui/monitor/monitor.js') {
+                          'ui/monitor/index.html', 'ui/monitor/launcher.js', 'ui/monitor/monitor.js',
+                          'ui/monitor/console-shell.js', 'ui/monitor/console-shell.css') {
         if (!(Test-Path -LiteralPath (Join-Path $root $relative) -PathType Leaf)) {
             throw "Incomplete KVMem package: missing $relative. Extract the complete ZIP first."
         }
+    }
+    $chatRoot = @('ui/dist', 'workers/share/kvmem/ui', 'build/share/kvmem/ui') |
+        ForEach-Object { Join-Path $root $_ } |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_ 'index.html') -PathType Leaf } |
+        Select-Object -First 1
+    if (!$chatRoot -or !(Test-Path -LiteralPath (Join-Path $chatRoot 'ui-build.json') -PathType Leaf)) {
+        throw 'Unified chat files are missing. Extract the complete KVMem package first.'
+    }
+    $chatManifest = Get-Content -LiteralPath (Join-Path $chatRoot 'ui-build.json') -Raw | ConvertFrom-Json
+    if (!$chatManifest.PSObject.Properties['console_chat_protocol'] -or $chatManifest.console_chat_protocol -ne 1) {
+        throw 'The chat bundle does not match this console. Extract the complete KVMem package first.'
     }
     # Avoid Windows Store aliases and automatic installs by either Python launcher.
     $env:PYLAUNCHER_ALLOW_INSTALL = $null
     $env:PYLAUNCHER_ALWAYS_INSTALL = $null
     $env:PYTHON_MANAGER_AUTOMATIC_INSTALL = 'false'
-    $probe = 'import sys,ctypes,json,http.server,urllib.request,webbrowser; assert sys.version_info >= (3,9); assert sys.maxsize > 2**32; print(sys.executable)'
+    $probe = 'import sys,ctypes,json,http.server,urllib.request,webbrowser,psutil; assert sys.version_info >= (3,10); assert sys.maxsize > 2**32; print(sys.executable)'
     $embedded = Join-Path $root 'runtime/python/python.exe'
     $python = $null
     if (Test-Path -LiteralPath $embedded -PathType Leaf) {
-        $output = & $embedded -I -S -c $probe 2>&1
+        $output = & $embedded -I -c $probe 2>&1
         if ($LASTEXITCODE -ne 0) { throw 'The bundled Python runtime is incomplete. Extract a fresh copy of the KVMem ZIP.' }
         $python = $embedded
     } else {
         foreach ($name in 'python.exe', 'py.exe') {
             $candidate = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
             if (!$candidate -or $candidate.Source -like '*\Microsoft\WindowsApps\*') { continue }
-            $arguments = @('-I', '-S', '-c', $probe)
+            $arguments = @('-I', '-c', $probe)
             if ($name -eq 'py.exe') { $arguments = @('-3') + $arguments }
             try {
                 $output = @(& $candidate.Source @arguments 2>$null)
@@ -44,7 +62,7 @@ try {
             } catch { continue }
         }
         if (!$python) {
-            throw 'Python was not found. Use a KVMem package with runtime/python included, or install 64-bit Python 3.9+ from https://www.python.org/downloads/windows/ .'
+            throw 'Python with psutil was not found. Use a complete KVMem package, or install 64-bit Python 3.10+ and run: python -m pip install -r scripts/requirements-console.txt'
         }
     }
     if ($Check) {
@@ -53,7 +71,14 @@ try {
         exit 0
     }
     if (!$StateDir) { $StateDir = Join-Path $root 'build/local-console' }
-    $arguments = @('-X', 'utf8', '-I', '-S', (Join-Path $root 'scripts/local-console.py'), '--port', "$Port", '--state-dir', $StateDir, '--prompt-port', '--language', $Language)
+    $arguments = @('-X', 'utf8', '-I', (Join-Path $root 'scripts/local-console.py'), '--port', "$Port", '--state-dir', $StateDir, '--prompt-port', '--language', $Language)
+    $bundledWorkers = @(
+        'ninfer-kvmem-server.exe', 'ninfer-serve.exe', 'llama-kvmem-server.exe',
+        'bin/ninfer-kvmem-server.exe', 'bin/ninfer-serve.exe', 'bin/llama-kvmem-server.exe',
+        'workers/ninfer/ninfer-kvmem-server.exe', 'workers/ninfer/ninfer-serve.exe',
+        'workers/llamacpp/llama-kvmem-server.exe', 'workers/polystrata/strata-poly.exe'
+    ) | ForEach-Object { Join-Path $root $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    if ($bundledWorkers) { $arguments += '--prefer-bundled-worker' }
     if (!$NoBrowser) { $arguments += '--open-browser' }
     Write-Output 'KVMem - local launch console'
     & $python @arguments

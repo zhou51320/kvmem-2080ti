@@ -23,6 +23,33 @@ int main() {
         parse_memory(defaults, "--kvmem"); defaults.resolve();
         check(defaults.enabled && defaults.budget == 32768 && defaults.gen_reserve == 1024 &&
               defaults.payload_host_bytes == (16384ULL << 20) && defaults.sessions == 4);
+        check(defaults.query_scorer == kvmem::QueryScorer::PageSoftmax && defaults.score_agg == 0 &&
+              !defaults.lrfu && defaults.graph_alpha == 0.2);
+        for (bool reverse : {false,true}) {
+            kvmem::CliOptions cosine;
+            parse_memory(cosine,"--kvmem");
+            if (reverse) parse_memory(cosine,"--no-kvmem-lrfu");
+            parse_memory(cosine,"--kvmem-query-scorer","meanq-cosine");
+            if (!reverse) parse_memory(cosine,"--no-kvmem-lrfu");
+            cosine.resolve();
+            check(cosine.score_agg == 1 && !cosine.lrfu && cosine.graph_alpha == 0);
+            parse_memory(cosine,"--kvmem-lrfu"); cosine.resolve(); check(cosine.lrfu);
+            parse_memory(cosine,"--kvmem-score-agg","mean"); cosine.resolve(); check(cosine.score_agg == 0);
+            parse_memory(cosine,"--kvmem-graph-alpha","0.2");
+            cosine.resolve(); check(cosine.graph_alpha == 0.2 && cosine.lrfu);
+        }
+        kvmem::CliOptions page;
+        parse_memory(page,"--kvmem"); parse_memory(page,"--kvmem-score-agg","max");
+        page.resolve(); check(page.score_agg == 1 && !page.lrfu && page.graph_alpha == 0.2);
+        parse_memory(page,"--kvmem-graph-alpha","0"); page.resolve(); check(page.graph_alpha == 0);
+        parse_memory(page,"--kvmem-lrfu"); page.resolve(); check(page.lrfu);
+        for (const char* value : {"nan","inf","-0.1","1.1","","0.2x"," 0.2"})
+            rejects([&] {kvmem::CliOptions c; parse_memory(c,"--kvmem-graph-alpha",value);});
+        for (const char* value : {"master","c","","softmax"})
+            rejects([&] {kvmem::CliOptions c; parse_memory(c,"--kvmem-query-scorer",value);});
+        rejects([&] {kvmem::CliOptions c; parse_memory(c,"--kvmem-score-agg","median");});
+        rejects([&] {kvmem::CliOptions c; parse_memory(c,"--kvmem-query-scorer","meanq-cosine"); c.resolve();});
+        rejects([&] {kvmem::CliOptions c; parse_memory(c,"--kvmem"); parse_memory(c,"--kvmem-lrfu-lambda","0.3"); c.resolve();});
         for (const char * flag : {"--kvmem-budget", "--kvmem-gen-reserve", "--kvmem-host-mib", "--kvmem-sessions"})
             for (const char * value : {"0", "-1", "1.5", "1x", " 1", "9999999999999999999999999"})
                 rejects([&] { kvmem::CliOptions c; parse_memory(c, flag, value); });

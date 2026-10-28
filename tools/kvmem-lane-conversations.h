@@ -2,6 +2,7 @@
 
 // Included after the server's conversation payload and checkpoint helpers.
 class kvmem_lane_conversations {
+    friend struct kvmem_lane_conversations_test_access;
     using bundle_ptr = std::unique_ptr<llama_kvmem_store_bundle, decltype(&llama_kvmem_store_bundle_free)>;
     struct snapshot {
         kvmem_store_match match;
@@ -54,7 +55,6 @@ public:
             held.lane = (int)lane;
             kvmem_execution_scope execution(lanes[lane]->execution.get());
             held.bytes = llama_kvmem_store_active_bytes();
-            if (lane == 0) has_recurrent_ = llama_kvmem_has_recurrent();
             if (lane == 0) {
                 disk_ = kvmem_execution_spill_file(lanes[lane]->execution.get());
                 if (disk_) {
@@ -65,6 +65,12 @@ public:
             if (disk_) held.native_bytes = llama_kvmem_store_payload_bytes(llama_kvmem_store_current(), false);
             resident_[lane] = id;
         }
+        for(auto* lane:lanes_) lane->mm_checkpoint_reclaim = [this](const auto& account,size_t bytes) {
+            reclaim_checkpoint_host(account,bytes);
+        };
+    }
+    ~kvmem_lane_conversations() {
+        for(auto* lane:lanes_) lane->mm_checkpoint_reclaim = {};
     }
     std::shared_ptr<reference> pin(const std::string & key) {
         auto result = std::shared_ptr<reference>(new reference(*this, key));
@@ -238,8 +244,8 @@ public:
             if (victim == entries_.end())
                 throw std::runtime_error("native KV capacity is reserved by other requests or retained lane owners");
             if (victim->first == op.outgoing) {
-                // finish() still names the outgoing owner. Reclaim its content
-                // while retaining that empty catalog node until handover ends.
+                // Reclaim the previous owner's content here; session quota
+                // enforcement can retire the empty catalog node afterwards.
                 auto& held = victim->second;
                 llama_kvmem_store_bundle_reset(held.parked.get());
                 llama_driver_drop_conversation(held.payload);
@@ -283,8 +289,10 @@ public:
                 auto target = entries_.find(op.id);
                 if (target != entries_.end()) target->second.committed = snapshot{};
                 if (op.attached && op.outgoing != op.id) entries_.at(op.outgoing).committed = snapshot{};
+                entries_.at(op.outgoing).switching = false;
             }
-            entries_.at(op.outgoing).switching = false;
+            // Successful attach released outgoing. Another lane may already
+            // have evicted it or reserved it for a different handover.
             enforce_sessions(op.lane);
             enforce_bytes();
         } catch (const std::exception & e) {
@@ -296,7 +304,7 @@ public:
             auto target = entries_.find(op.id);
             if (target != entries_.end()) target->second.busy = false;
             auto out = entries_.find(op.outgoing);
-            if (out != entries_.end()) { out->second.switching = false; out->second.committed = snapshot{}; }
+            if (!op.ready && out != entries_.end()) { out->second.switching = false; out->second.committed = snapshot{}; }
         }
         st.active_prompt.reset();
     }
@@ -331,7 +339,7 @@ private:
     uint64_t payload_budget_ = 0, snapshot_generation_ = 0;
     int max_, next_id_ = 0;
     bool inactive_limit_ = false;
-    bool warned_bytes_ = false, has_recurrent_ = false;
+    bool warned_bytes_ = false;
     uint64_t bytes_max_, clock_ = 0, switches_ = 0, evictions_ = 0, extends_ = 0, forks_ = 0;
     uint64_t retained_bytes_locked(int exclude = -1) const {
         uint64_t bytes = 0;
@@ -368,7 +376,6 @@ private:
                 { std::lock_guard<std::mutex> lock(mu_); generation = ++snapshot_generation_; }
                 try { conv.payload = std::make_unique<kvmem_session_payload>(id, generation, buffers); }
                 catch (...) { llama_kvmem_store_bundle_thaw(held.parked.get()); throw; }
-                conv.disk_gen = !conv.gdn_ckpt.empty(); conv.disk_query = !conv.gdn_ckpt_query.empty();
                 conv.cold = true;
             }
             if (!held.files) held.files = std::make_unique<kvmem_session_files>(disk_path_, disk_);
@@ -402,8 +409,6 @@ private:
             match.bytes = item.second.bytes;
             match.client_id = item.second.client_id;
             match.lcp = item.second.committed.prompt ? (int)prompt.common_prefix(*item.second.committed.prompt) : 0;
-            if (!has_recurrent_ && !lanes_[0]->vision && !lanes_[0]->query_policy_user)
-                match.ckpt_rows.push_back(match.lcp);
             matches.push_back(std::move(match));
         }
         kvmem_store_limits limits;
@@ -422,28 +427,29 @@ private:
         result.prompt = source.cached_prompt;
         result.match.rows = (int)source.cached_tokens.size();
         result.match.last_n_gen = source.last_n_gen;
-        // The legacy text prefill uses GDN checkpoints, not mm_live_row.
+        result.match.allow_bound_edit = source.mm_archive.policy().enabled;
+        // The committed native store bounds the live reusable prefix.
         result.match.live_row = (int)stored;
         for (const auto & checkpoint : source.mm_checkpoints) result.match.ckpt_rows.push_back(checkpoint.row);
-        if (source.gdn_ckpt_pos >= 0 && !source.gdn_ckpt.empty()) result.match.ckpt_rows.push_back(source.gdn_ckpt_pos + 1);
-        if (source.gdn_ckpt_query_pos >= 0 && !source.gdn_ckpt_query.empty()) result.match.ckpt_rows.push_back(source.gdn_ckpt_query_pos + 1);
+        for (const auto & entry : source.mm_archive)
+            if (entry.info.identity) result.match.ckpt_rows.push_back(entry.record.row);
         return result;
     }
     template<class Source> static uint64_t payload_bytes(const Source & source) {
         uint64_t bytes = source.cached_tokens.capacity()*sizeof(llama_token);
-        bytes += source.gdn_ckpt.capacity() + source.gdn_carry.capacity() + source.gdn_query_carry.capacity();
-        bytes += source.gdn_ckpt_query.capacity() + source.last_user_text.capacity();
         bytes += source.mm_checkpoints.capacity()*sizeof(MultimodalCheckpoint);
         std::set<const MultimodalCheckpointData *> unique;
         for (const auto & checkpoint : source.mm_checkpoints) {
-            if (checkpoint.data && unique.insert(checkpoint.data.get()).second) bytes += checkpoint.data->bytes();
+            if (checkpoint.data && unique.insert(checkpoint.data.get()).second) bytes += checkpoint.data->resident_bytes();
         }
-        if (source.mm_live_checkpoint && unique.insert(source.mm_live_checkpoint.get()).second) bytes += source.mm_live_checkpoint->bytes();
+        for (const auto & entry : source.mm_archive) if (entry.info.identity && entry.record.data &&
+                unique.insert(entry.record.data.get()).second) bytes += entry.record.data->resident_bytes();
+        if (source.mm_live_checkpoint && unique.insert(source.mm_live_checkpoint.get()).second) bytes += source.mm_live_checkpoint->resident_bytes();
         if (source.cached_prompt) bytes += source.cached_prompt->index_bytes();
         if (source.mm_query) {
             bytes += sizeof(MultimodalQuery) + source.mm_query->user.capacity();
             bytes += source.mm_query->state.count.capacity()*sizeof(uint32_t);
-            for (const auto & sum : source.mm_query->state.sum) bytes += sizeof(sum) + sum.capacity()*sizeof(float);
+            for (const auto & sum : source.mm_query->state.rows) bytes += sizeof(sum) + sum.capacity()*sizeof(float);
             if (source.mm_query->prefix) bytes += source.mm_query->prefix->index_bytes();
         }
         return bytes;
@@ -520,5 +526,28 @@ private:
         const bool over = bytes_max_ && bytes_locked() > bytes_max_;
         if (over && !warned_bytes_) LOG_WRN("srv    KVMEM retained lane/queued stores exceed soft host byte cap\n");
         warned_bytes_ = over;
+    }
+    void reclaim_checkpoint_host(const std::shared_ptr<MultimodalCheckpointAccounting>& account,size_t bytes) {
+        std::lock_guard<std::mutex> lock(mu_);
+        const auto fits=[&] { const auto used=account->live_bytes.load();
+            return used<=account->limit && bytes<=account->limit-used; };
+        const auto owns=[&](const auto& checkpoint) {
+            return checkpoint && checkpoint->accounting==account && checkpoint->resident_bytes()!=0;
+        };
+        while(!fits()) {
+            auto victim=entries_.end();
+            for(auto it=entries_.begin();it!=entries_.end();++it) {
+                const auto& held=it->second;
+                if(held.lane>=0 || held.busy || held.switching || protected_entry(held)) continue;
+                bool charged=owns(held.payload.mm_live_checkpoint);
+                for(const auto& cp:held.payload.mm_checkpoints) charged|=owns(cp.data);
+                for(const auto& entry:held.payload.mm_archive) if(entry.info.identity) charged|=owns(entry.record.data);
+                if(charged && (victim==entries_.end() || held.used<victim->second.used)) victim=it;
+            }
+            if(victim==entries_.end()) break;
+            kvmem_diag("KVMEM_CHECKPOINT_HOST evict_idle_owner=%d\n",victim->first);
+            entries_.erase(victim);
+            ++evictions_;
+        }
     }
 };

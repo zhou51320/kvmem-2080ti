@@ -1,4 +1,5 @@
-/* Model-free by default; optional real-model lifecycle test on a disposable port. */
+/* Model-free by default; optional real-model lifecycle test on a disposable port.
+ * Configuration tests request #config explicitly; /monitor/ selects the monitor. */
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -13,7 +14,7 @@ if(process.env.TEST_NINFER_WORKER)registrations.ninfer=process.env.TEST_NINFER_W
 fs.writeFileSync(path.join(state,'worker-paths.json'),JSON.stringify(registrations));
 const port=Number(process.env.CONSOLE_TEST_PORT||18431);
 const base=`http://127.0.0.1:${port}`;
-const child=spawn(process.env.PYTHON||'python',['-B',path.join(root,'scripts/local-console.py'),'--port',String(port),'--state-dir',state,...(process.env.BACKEND_ROOT?['--backend-root',process.env.BACKEND_ROOT]:[])],{windowsHide:true});
+const child=spawn(process.env.PYTHON||'python',['-B',path.join(root,'scripts/local-console.py'),'--port',String(port),'--state-dir',state,'--profiles-root',path.join(state,'profiles'),...(process.env.BACKEND_ROOT?['--backend-root',process.env.BACKEND_ROOT]:[])],{windowsHide:true});
 let stderr='';child.stderr.on('data',x=>stderr+=x);
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function until(fn,ms=20000){const end=Date.now()+ms;while(Date.now()<end){try{const value=await fn();if(value)return value;}catch{}await delay(200);}throw Error('Timed out: '+stderr);}
@@ -22,9 +23,25 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
 (async()=>{
  const info=await until(async()=>{const r=await api('info');return r.code===200&&r.body;});token=info.token;
  browser=await chromium.launch({headless:true,...(process.env.CHROMIUM?{executablePath:process.env.CHROMIUM}:{})});
+ if(info.platform==='linux'){
+  await require('./test-launcher-linux.cjs')({browser,base,info,state});
+  return;
+ }
+ // Either initialization order must preserve the stopped-service config page.
+ for(const late of ['shell','info']){
+  const context=await browser.newContext(),page=await context.newPage(),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  await page.route(late==='shell'?'**/monitor/console-shell.js':'**/api/launcher/info',async route=>{await delay(200);await route.continue();});
+  await page.goto(base+'/monitor/');await page.locator('[data-param=Backend]').waitFor();
+  assert.equal(new URL(page.url()).hash,'#config','initial selection survives delayed '+late);
+  await page.goto(base+'/monitor/#about');await page.locator('[data-view=about]').waitFor();
+  assert.equal(new URL(page.url()).hash,'#about','explicit navigation wins with delayed '+late);
+  assert.deepEqual(errors,[]);await context.close();
+ }
+ console.log('PASS: launcher/shell initialization order and explicit navigation');
  // English launch overrides an old Chinese choice, then lets the picker persist normally.
  const languageContext=await browser.newContext(),languagePage=await languageContext.newPage();
- await languagePage.goto(base+'/monitor/');await languagePage.locator('[data-param=Backend]').waitFor();
+ await languagePage.goto(base+'/monitor/#config');await languagePage.locator('[data-param=Backend]').waitFor();
  await languagePage.locator('[data-language-select]').selectOption('zh-CN');
  await languagePage.goto(base+'/monitor/?lang=en&keep=1#config');
  await languagePage.locator('[data-param=Backend]').waitFor();
@@ -42,9 +59,9 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  await languageContext.close();
  console.log('PASS: English launch, saved-language override, picker/reload retention and URL preservation');
  const page=await browser.newPage({viewport:{width:1920,height:1080}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto(base+'/monitor/');await page.locator('[data-param=Backend]').waitFor();
- assert.deepEqual(info.backends,['llamacpp','ninfer']);
- assert.deepEqual(await page.locator('[data-param=Backend] option').evaluateAll(items=>items.map(x=>x.value)),['llamacpp','ninfer']);
+ await page.goto(base+'/monitor/#config');await page.locator('[data-param=Backend]').waitFor();
+ assert.deepEqual(info.backends,['llamacpp','ninfer','polystrata']);
+ assert.deepEqual(await page.locator('[data-param=Backend] option').evaluateAll(items=>items.map(x=>x.value)),['llamacpp','ninfer','polystrata']);
  assert.equal(await page.locator('[data-view=config]').isVisible(),true);
  if(info.gpus.length){
   const choices=page.locator('[data-gpu-choice]');
@@ -131,56 +148,46 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  await page.getByRole('tab',{name:'服务与并发'}).click();
  await page.locator('[data-param=Port]').fill('18321');
  const originalDraft=(await api('info')).body.draft;
- await page.locator('[data-preset=ninfer-v018]').click();
- assert.equal(await page.locator('[data-param=Context]').inputValue(),'204800');
+ await page.locator('[data-preset=ninfer-quality]').click();
+ assert.equal(await page.locator('[data-param=Context]').inputValue(),'262144');
  assert.equal(await page.locator('[data-param=Model]').inputValue(),'C:/models/my-existing-model.ninfer');
  assert.equal(await page.locator('[data-param=Port]').inputValue(),'18321');
- assert.equal(await page.locator('[data-preset=ninfer-v018]').getAttribute('aria-pressed'),'true');
+ assert.equal(await page.locator('[data-preset=ninfer-quality]').getAttribute('aria-pressed'),'true');
  assert.deepEqual((await api('info')).body.draft,originalDraft,'preset must not save');
  assert.equal((await api('status')).body.state,'stopped','preset must not launch');
  await page.getByRole('tab',{name:'缓存与历史'}).click();
- for(const key of ['NoLrfu','LrfuLambda','LrfuTopFraction','ScoreAggregation']){
-  assert.equal(await page.locator('[data-lrfu-settings] [data-param='+key+']').isVisible(),true,'LRFU setting visible: '+key);
-  assert.equal(await page.locator('[data-param='+key+']').count(),1,'no duplicate setting: '+key);
- }
- const expected={Context:204800,Budget:36864,Reserve:16384,HostMiB:12288,Prefill:256,MaxTokens:16384,SinkTokens:12288,RecentTokens:1024,KvType:'int8',Concurrency:1,RetainedSessions:1,DraftTokens:4,SpeculativeMode:'mtp',DraftPolicy:'adaptive',NgramDrafts:31,NgramMinMatch:12,VisionResidency:'cpu',VisionTokens:1024,ThinkingBudget:8192,LrfuLambda:0.5,LrfuTopFraction:0.9,ScoreAggregation:'max',DeviceProfile:'off'};
+ assert.ok((await page.locator('[data-graph-recall]').textContent()).includes('历史检索'));
+ assert.equal(await page.locator('[data-param=NoLrfu]').count(),0,'legacy switch is migrated');
+ assert.equal(await page.locator('[data-param=QueryScorer]').inputValue(),'page-softmax');
+ assert.equal(await page.locator('[data-param=GraphAlpha]').inputValue(),'0.2');
+ assert.equal(await page.locator('[data-param=Lrfu]').isChecked(),false);
+ const expected={Context:262144,Budget:49152,Reserve:4096,HostMiB:12288,Prefill:256,MaxTokens:0,SinkTokens:12288,RecentTokens:1024,KvType:'int8',Concurrency:1,RetainedSessions:1,DraftTokens:3,SpeculativeMode:'mtp',DraftPolicy:'adaptive',NgramDrafts:0,NgramMinMatch:12,VisionResidency:'cpu',VisionTokens:1024,ThinkingBudget:16384,DeviceProfile:'auto',ReasoningEffort:'xhigh'};
  for(const [key,value] of Object.entries(expected))assert.equal(await page.locator('[data-param='+key+']').inputValue(),String(value),key);
- for(const key of ['Vision','NoLrfu'])assert.equal(await page.locator('[data-param='+key+']').isChecked(),true,key);
- for(const key of ['FastPrefill'])assert.equal(await page.locator('[data-param='+key+']').isChecked(),false,key);
+ for(const key of ['Vision','FastPrefill'])assert.equal(await page.locator('[data-param='+key+']').isChecked(),true,key);
+ assert.equal(await page.locator('[data-param=PreserveThinking]').inputValue(),'true');
+ assert.equal(await page.locator('[data-output-mode]').inputValue(),'unlimited');
+ assert.equal(await page.locator('[data-param=MaxTokens]').isVisible(),false);
+ await page.locator('[data-output-mode]').selectOption('limited');await page.locator('[data-param=MaxTokens]').fill('');
+ assert.equal(await page.locator('[data-param=MaxTokens]').isVisible(),true,'an incomplete limit is not silently treated as unlimited');
+ await page.locator('[data-param=MaxTokens]').fill('1234');await page.locator('[data-output-mode]').selectOption('unlimited');
  await page.waitForFunction(()=>document.querySelector('[data-draft-state]').textContent.includes('已自动保存'));
  const releaseDraft=await page.evaluate(()=>JSON.parse(localStorage.getItem('kvmem-launch-draft-v2')).parameters);
  for(const [key,value] of Object.entries(expected))assert.equal(releaseDraft[key],value,'persisted '+key);
  await page.locator('[data-preset-undo]').click();
  assert.equal(await page.locator('[data-param=Model]').inputValue(),'C:/models/my-existing-model.ninfer');
- assert.deepEqual(mutations,[],'select/undo must not mutate the server');
- assert.equal(await page.locator('[data-preset]').count(),1,'only the 0.18.0 release recipe');
- await page.locator('[data-preset=ninfer-v018]').click();
- assert.equal(await page.getByRole('switch',{name:'启用 LRFU',exact:true}).isChecked(),true);
- const toggleRow=page.locator('.l-toggle').filter({has:page.locator('[data-param=NoLrfu]')});
- assert.equal(await toggleRow.locator('[data-toggle-on]').isVisible(),true);
- await page.locator('[data-param=NoLrfu]').focus();await page.keyboard.press('Space');
- assert.equal(await toggleRow.locator('[data-toggle-off]').isVisible(),true);
- await page.keyboard.press('Space');
- const toggleGeometry=await toggleRow.evaluate(row=>{const title=row.querySelector('.l-toggle-copy').getBoundingClientRect(),control=row.querySelector('.l-toggle-control').getBoundingClientRect();return {titleRight:title.right,controlLeft:control.left,titleY:title.y,controlBottom:control.bottom};});
- assert.ok(toggleGeometry.titleRight<=toggleGeometry.controlLeft,'switch is to the right of its label');
- assert.ok(toggleGeometry.titleY<toggleGeometry.controlBottom,'label and switch share a row');
- const fieldOffsets=await page.locator('[data-lrfu-settings] .l-row').evaluateAll(rows=>rows.map(row=>{const control=row.querySelector('.l-toggle-control')||row.querySelector('input,select'),label=row.getBoundingClientRect(),box=control.getBoundingClientRect();return box.left-label.left;}));
- assert.ok(fieldOffsets.every(offset=>Math.abs(offset-fieldOffsets[0])<1),'switches and text controls share label-column width');
- assert.equal(await page.getByLabel('启用 LRFU',{exact:true}).isChecked(),true);
+ assert.ok(mutations.every(url=>new URL(url).pathname==='/api/launcher/inspect-model'),
+  'select/undo may inspect the draft but must not mutate the server');
+ assert.equal(await page.locator('[data-preset]').count(),2,'only the two NInfer templates');
+ await page.locator('[data-preset=ninfer-quality]').click();
  await page.getByRole('tab',{name:'服务与并发'}).click();
  assert.equal(await page.locator('[data-param=ListenHost]').isEnabled(),true);
  await page.locator('[data-param=ListenHost]').selectOption('0.0.0.0');
  await page.getByRole('tab',{name:'缓存与历史'}).click();
- await page.getByLabel('启用 LRFU',{exact:true}).uncheck();
- await page.waitForFunction(()=>JSON.parse(localStorage.getItem('kvmem-launch-draft-v2')).parameters.NoLrfu===true);
  await page.reload();await page.getByRole('tab',{name:'缓存与历史'}).click();
- assert.equal(await page.getByLabel('启用 LRFU',{exact:true}).isChecked(),false,'disabled LRFU survives reload');
  assert.equal(await page.locator('[data-param=ListenHost]').inputValue(),'0.0.0.0','listen address survives reload');
  await page.locator('[data-language-select]').selectOption('en');
- assert.equal(await page.getByLabel('Enable LRFU',{exact:true}).isChecked(),false,'language switch preserves meaning');
+ assert.ok((await page.locator('[data-graph-recall]').textContent()).includes('History retrieval'));
  await page.locator('[data-language-select]').selectOption('zh-CN');
- await page.getByLabel('启用 LRFU',{exact:true}).check();
- await page.waitForFunction(()=>JSON.parse(localStorage.getItem('kvmem-launch-draft-v2')).parameters.NoLrfu===false);
  await page.locator('[data-theme-select]').selectOption('blue');
  await page.getByRole('tab',{name:'硬件与加速'}).click();
  assert.equal(await page.locator('[data-param=StageLayers]').isEnabled(),await page.locator('[data-gpu-choice]:checked').count()>1);
@@ -196,14 +203,14 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  assert.equal(await page.getByRole('tab',{name:'Cache & history'}).count(),1);
  await page.locator('[data-language-select]').selectOption('zh-CN');
  // Incomplete edits must survive reload without becoming a launch request.
- await page.locator('.l-native > summary').click();
+ await page.locator('.l-native > summary').click();await page.locator('[data-engine-arguments] > summary').click();
  await page.locator('[data-native]').fill('["--threads",');
  await page.locator('[data-param=Context]').fill('');
  await page.waitForFunction(()=>document.querySelector('[data-draft-state]').textContent.includes('已自动保存'));
  await page.reload();await page.locator('[data-param=Context]').waitFor();
  assert.equal(await page.locator('[data-param=Context]').inputValue(),'');
  assert.equal(await page.locator('[data-native]').inputValue(),'["--threads",');
- await page.locator('.l-native > summary').click();await page.locator('[data-native]').fill('[]');
+ await page.locator('.l-native > summary').click();await page.locator('[data-engine-arguments] > summary').click();await page.locator('[data-native]').fill('[]');
  await page.locator('[data-param=Context]').fill('8192');
  // Personal templates: full settings, apply/undo, rename, update and delete.
  await page.locator('[data-action=template]').click();
@@ -244,34 +251,37 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  if(info.gpus.length){
   await page.locator('[data-param=Model]').fill('C:/models/test.gguf');
   for(const check of await page.locator('[data-gpu-choice]').all())await check.setChecked(await check.getAttribute('data-gpu-choice')===info.gpus[0].uuid);
-  const lrfuRequests=[];
-  await page.route('**/api/launcher/preview',route=>{lrfuRequests.push(route.request().postDataJSON().parameters.NoLrfu);return route.fulfill({json:{argv:['C:/worker.exe','C:/models/test.gguf'],environment:{CUDA_VISIBLE_DEVICES:info.gpus[0].uuid},preflight:{port:18200,port_available:false}}});});
+  const recallRequests=[];
+  await page.route('**/api/launcher/preview',route=>{recallRequests.push(route.request().postDataJSON().parameters);return route.fulfill({json:{argv:['C:/worker.exe','C:/models/test.gguf'],environment:{CUDA_VISIBLE_DEVICES:info.gpus[0].uuid},preflight:{port:18200,port_available:false}}});});
   await page.locator('[data-action=preview]').click();
   await page.waitForFunction(()=>document.querySelector('[data-check-summary]').textContent.includes('需要调整'));
   assert.ok((await page.locator('[data-dialog=check]').textContent()).includes('已占用'));
   assert.equal(await page.locator('[data-dialog=check] .l-check-command').getAttribute('open'),null);
   await page.locator('[data-dialog=check] [data-dialog-close]').click();
-  assert.equal(lrfuRequests[0],undefined,'enabled UI omits native disable switch');
-  await page.getByRole('tab',{name:'缓存与历史'}).click();
-  await page.getByLabel('启用 LRFU',{exact:true}).uncheck();
-  await page.locator('[data-action=preview]').click();
-  await page.waitForFunction(()=>document.querySelector('[data-check-summary]').textContent.includes('需要调整'));
-  assert.equal(lrfuRequests[1],true,'unchecked UI sends native disable switch');
-  await page.locator('[data-dialog=check] [data-dialog-close]').click();
-  await page.getByLabel('启用 LRFU',{exact:true}).check();
+  for(const key of ['NoLrfu','LrfuLambda','LrfuTopFraction'])assert.equal(Object.hasOwn(recallRequests[0],key),false,'inactive history omitted: '+key);
+  assert.equal(recallRequests[0].QueryScorer,'page-softmax');assert.equal(recallRequests[0].Lrfu,false);assert.equal(recallRequests[0].ScoreAggregation,'mean');
   await page.unroute('**/api/launcher/preview');
  }
  assert.equal((await api('status')).body.state,'stopped','editing/templates/checks never start a service');
  // Model-free lifecycle feedback: pending request, loading, ready and failure.
+ const lifecycleGpu={uuid:'GPU-browser-lifecycle-fixture',name:'Browser lifecycle fixture'};
+ const lifecycleInfo=async route=>route.fulfill({json:{...info,gpus:[lifecycleGpu]}});
+ await page.route('**/api/launcher/info',lifecycleInfo);
+ // This section simulates a worker with a fictional model path. Real-file
+ // inspection and launch blocking are covered by test-model-health.cjs.
+ const lifecycleInspection=route=>route.fulfill({json:{schema_version:1,status:'ready',can_start:true,model:{},features:{},checks:[]}});
+ await page.route('**/api/launcher/inspect-model',lifecycleInspection);
+ await page.reload();await page.locator('[data-param=Backend]').waitFor();
+ await page.locator('[data-param=Backend]').selectOption('llamacpp');
  const navBefore=await page.locator('.s-nav').boundingBox();
- const chat=page.locator('[data-chat-link]');
+ const chat=page.locator('[data-page=chat]');
  assert.equal(await chat.isVisible(),true);
- assert.equal(await chat.getAttribute('aria-disabled'),'true');
+ assert.equal(await chat.isEnabled(),true,'history remains available while inference is stopped');
  assert.equal(await page.locator('.s-header-tools [data-chat-link]').count(),1);
  let lifecycle={state:'stopped',url:null};
  await page.route('**/api/launcher/status',route=>route.fulfill({json:lifecycle}));
  await page.locator('[data-param=Model]').fill('C:/models/test.gguf');
- if(info.gpus.length)for(const check of await page.locator('[data-gpu-choice]').all())await check.setChecked(await check.getAttribute('data-gpu-choice')===info.gpus[0].uuid);
+ await page.locator(`[data-gpu-choice="${lifecycleGpu.uuid}"]`).check();
  let releaseStart;
  await page.route('**/api/launcher/start',async route=>{await new Promise(resolve=>releaseStart=resolve);lifecycle={state:'starting',url:'http://127.0.0.1:18200',pid:123};await route.fulfill({json:lifecycle});});
  await page.locator('[data-action=start]').click();
@@ -280,17 +290,17 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  assert.equal(await page.locator('[data-launch-track]').getAttribute('aria-valuenow'),null);
  releaseStart();
  await page.waitForFunction(()=>document.querySelector('[data-launch-progress]').dataset.state==='starting');
- assert.equal(await chat.getAttribute('href'),null);
+ assert.equal(await chat.isEnabled(),true);
  assert.equal(await page.locator('[data-launch-track]').getAttribute('aria-valuenow'),null);
  lifecycle={...lifecycle,state:'ready'};
  await page.waitForFunction(()=>document.querySelector('[data-launch-progress]').dataset.state==='ready');
- assert.equal(await chat.getAttribute('href'),'http://127.0.0.1:18200/');
+ assert.equal(await page.locator('[data-chat-link]').getAttribute('href'),'/chat/');
  assert.equal(await page.locator('[data-launch-track]').getAttribute('aria-valuenow'),'100');
  assert.deepEqual(await page.locator('.s-nav').boundingBox(),navBefore,'navigation stays fixed when chat becomes available');
  lifecycle={state:'exited',exit_code:1,url:null};
  await page.waitForFunction(()=>document.querySelector('[data-launch-progress]').dataset.state==='exited');
  assert.equal(await page.locator('[data-launch-track]').isVisible(),false);
- assert.equal(await chat.getAttribute('aria-disabled'),'true');
+ assert.equal(await chat.isEnabled(),true);
  await page.unroute('**/api/launcher/start');
  await page.route('**/api/launcher/start',route=>route.fulfill({status:400,json:{error:'端口已占用'}}));
  await page.locator('[data-action=start]').click();
@@ -299,34 +309,53 @@ async function api(action,data){const response=await fetch(base+'/api/launcher/'
  assert.ok((await page.locator('[data-launch-help]').textContent()).includes('端口已占用'));
  await page.locator('[data-dialog=error] [data-dialog-close]').click();
  await page.unroute('**/api/launcher/start');await page.unroute('**/api/launcher/status');
+ await page.unroute('**/api/launcher/info',lifecycleInfo);
+ await page.unroute('**/api/launcher/inspect-model',lifecycleInspection);
  await page.reload();await page.locator('[data-param=Context]').waitFor();
  await page.locator('[data-template-tab=builtin]').click();
- assert.deepEqual(await page.locator('.s-nav [data-page]').evaluateAll(items=>items.map(el=>el.dataset.page)),['config','monitor','about']);
+ assert.deepEqual(await page.locator('.s-nav [data-page]').evaluateAll(items=>items.map(el=>el.dataset.page)),['config','chat','monitor','logs','about']);
  const beforeDensity={model:await page.locator('[data-param=Model]').inputValue(),context:await page.locator('[data-param=Context]').inputValue()};
+ // Do not compare different asynchronous inspection cards as a density change.
+ await page.waitForFunction(()=>document.querySelector('[data-model-health]')?.dataset.state!=='checking');
  await page.setViewportSize({width:1366,height:768});
  const comfortableHeight=(await page.locator('.l-essential').boundingBox()).height;
  await page.locator('[data-density-select]').selectOption('compact');
  assert.ok((await page.locator('.l-essential').boundingBox()).height<comfortableHeight,'compact settings reduce vertical space');
  for(const width of [1920,1366,768,390]){await page.setViewportSize({width,height:768});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'compact overflow '+width);}
+ assert.ok((await page.locator('.s-header').boundingBox()).height<=80,'mobile header leaves room for content');
+ await page.locator('.s-appearance > summary').click();
  await page.locator('[data-language-select]').selectOption('en');
  assert.equal(await page.locator('[data-density-select] option:checked').textContent(),'Layout: Compact');
+ assert.equal(await page.locator('[data-page=config] .s-nav-short').textContent(),'Config');
+ assert.ok(await page.locator('.s-nav').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'English navigation fits before reload');
  await page.reload();await page.locator('[data-param=Context]').waitFor();
  assert.equal(await page.locator('#app').getAttribute('data-density'),'compact');
  assert.equal(await page.locator('[data-param=Model]').inputValue(),beforeDensity.model);
  assert.equal(await page.locator('[data-param=Context]').inputValue(),beforeDensity.context);
+ await page.locator('.s-appearance > summary').click();
  await page.locator('[data-language-select]').selectOption('zh-CN');
+ assert.equal(await page.locator('[data-page=config] .s-nav-short').textContent(),'配置');
+ assert.ok(await page.locator('.s-nav').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'Chinese navigation fits after a live language switch');
  await page.locator('[data-density-select]').selectOption('comfortable');
+ await page.locator('.s-appearance > summary').press('Escape');
+ assert.equal(await page.locator('[data-language-select]').isVisible(),false,'Escape closes mobile appearance controls');
  for(const width of [1920,1440,1366,768,390]){await page.setViewportSize({width,height:width===1366?768:1080});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'horizontal overflow '+width);if(width===1366){const box=await page.locator('[data-action=template]').boundingBox();assert.ok(box.y+box.height<=768,'template action below laptop viewport: '+JSON.stringify(box));}}
  await page.setViewportSize({width:1920,height:1080});
  if(process.env.SCREENSHOT_DIR){fs.mkdirSync(process.env.SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'launch-desktop.png'),fullPage:true});}
  await require('./test-launcher-settings.cjs')({browser,base,info});
+ await require('./test-running-config.cjs')({browser,base,info});
+ await require('./test-engine-settings.cjs')({browser,base,info});
+ await require('./test-elastic-experts.cjs')({browser,base,info});
+ await require('./test-query-scoring.cjs')({browser,base,info});
  if(process.env.TEST_MODEL&&process.env.TEST_WORKER&&process.env.TEST_GPU){
-  const config={schema_version:1,parameters:{Backend:'llamacpp',Model:process.env.TEST_MODEL,Worker:'',Gpu:process.env.TEST_GPU,Context:4096,Budget:2048,Reserve:512,HostMiB:256,Prefill:128,MaxTokens:128,Port:port+1,ListenHost:'127.0.0.1',SinkTokens:512,RecentTokens:64,WorkerArgs:['--n-gpu-layers','99']}};
+  const config={schema_version:1,parameters:{Backend:'llamacpp',Model:process.env.TEST_MODEL,Worker:'',Gpu:process.env.TEST_GPU,Context:4096,Budget:2048,Reserve:512,HostMiB:256,Prefill:128,MaxTokens:128,Port:port+1,ListenHost:'127.0.0.1',SinkTokens:512,RecentTokens:64,QueryScorer:'meanq-cosine',ScoreAggregation:'mean',GraphAlpha:.2,Lrfu:false,QueryMaxTokens:128,QueryReplayMaxTokens:512,WorkerArgs:['--n-gpu-layers','99']}};
   const preview=await api('preview',config);assert.equal(preview.code,200,JSON.stringify(preview.body));assert.ok(preview.body.argv.includes('--kvmem'));
   await page.waitForFunction(()=>document.querySelector('[data-draft-state]').textContent.includes('已自动保存'));
   await page.evaluate(()=>localStorage.removeItem('kvmem-launch-draft-v2'));assert.equal((await api('save',config)).code,200);await page.reload();await page.locator('[data-param=Model]').waitFor();
   await page.getByRole('button',{name:'启动服务',exact:true}).click();
   await until(async()=>{const s=(await api('status')).body;if(s.state==='exited')throw Error((await api('log')).body.text);return s.state==='ready';},90000);
+  await until(async()=>{const s=(await api('status')).body;return s.scoring_confirmed;},15000);
+  const observed=(await api('status')).body.effective_scoring;assert.equal(observed.scorer,'meanq-cosine');assert.equal(observed.lrfu,false);assert.equal(observed.graph_alpha,.2);assert.equal(observed.query_max_tokens,128);assert.equal(observed.query_replay_max_tokens,512);
   await until(async()=>page.locator('[data-action=stop]').isEnabled());
   assert.equal((await api('start',config)).code,400,'duplicate start');
   const snapshot=await fetch(base+'/api/monitor/snapshot');assert.equal(snapshot.status,200);assert.equal((await snapshot.json()).backend,'llamacpp');

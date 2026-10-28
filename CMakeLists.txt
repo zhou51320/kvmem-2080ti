@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(kvmem_llamacpp LANGUAGES CXX)
+option(KVMEM_CUDA_TESTS "Build the independent CUDA recall qualification" OFF)
+if (KVMEM_CUDA_TESTS)
+    enable_language(CUDA)
+endif()
 
 # Guard against a poisoned build directory. If the very first configure cannot
 # identify the compiler (clang++ not yet on PATH, for example), CMake never
@@ -38,6 +42,12 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 enable_testing()
 add_subdirectory(kvmem)
+if (KVMEM_CUDA_TESTS)
+    kvmem_enable_cuda_recall()
+    add_executable(graph_recall_cuda_test kvmem/tests/graph_recall_cuda_test.cpp)
+    target_link_libraries(graph_recall_cuda_test PRIVATE kvmem)
+    add_test(NAME graph_recall_cuda_test COMMAND graph_recall_cuda_test)
+endif()
 
 find_package(Threads REQUIRED)
 add_executable(kvmem-lane-pool-test tests/lane-pool-test.cpp)
@@ -113,6 +123,9 @@ if (KVMEM_BUILD_LLAMA)
         # let ggml select the local GPU architecture. This keeps the CUDA path
         # portable without changing its backend semantics.
         option(GGML_CUDA "ggml: use CUDA" ON)
+        if (GGML_CUDA)
+            enable_language(CUDA)
+        endif()
     else()
         # ROCm: the CUDA backend must stay off and no CUDA arch may be forced.
         set(GGML_CUDA OFF CACHE BOOL "ggml: use CUDA" FORCE)
@@ -217,6 +230,10 @@ if (KVMEM_BUILD_LLAMA)
     set(LLAMA_KVMEM ON CACHE BOOL "" FORCE)
     set(LLAMA_KVMEM_ROOT "${CMAKE_SOURCE_DIR}" CACHE PATH "" FORCE)
     add_subdirectory(backends/llamacpp)
+    if (GGML_CUDA AND NOT KVMEM_ROCM)
+        enable_language(CUDA)
+        kvmem_enable_cuda_recall()
+    endif()
 
     if (KVMEM_GPU_BACKEND STREQUAL "HIP")
         if (WIN32 AND EXISTS "${ROCM_PATH}/lib/llvm/amdgcn/bitcode/ocml.bc")
@@ -238,6 +255,7 @@ if (KVMEM_BUILD_LLAMA)
         endif()
         target_include_directories(kvmem-stagein-hip PRIVATE
             src/adapter
+            kvmem/include
             backends/llamacpp/include
             backends/llamacpp/ggml/include)
         target_compile_definitions(kvmem-stagein-hip PRIVATE
@@ -323,6 +341,14 @@ if (KVMEM_BUILD_LLAMA)
         target_include_directories(llama-kvmem-server PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     endif()
     target_compile_features(llama-kvmem-server PRIVATE cxx_std_17)
+    add_executable(kvmem-lane-conversations-test tests/lane-conversations-test.cpp
+        tools/llama-kvmem-driver.cpp tools/kvmem-spec.cpp tools/kvmem-vision.cpp
+        backends/llamacpp/tools/server/server-common.cpp
+        backends/llamacpp/tools/server/server-chat.cpp)
+    target_include_directories(kvmem-lane-conversations-test PRIVATE tools src/adapter
+        backends/llamacpp/src backends/llamacpp/vendor backends/llamacpp/tools/server)
+    target_link_libraries(kvmem-lane-conversations-test PRIVATE llama llama-common mtmd kvmem cpp-httplib)
+    add_test(NAME kvmem-lane-conversations-test COMMAND kvmem-lane-conversations-test)
     # std::getenv is standard C++ and portable; MSVC marks it deprecated in
     # favour of the Windows-only _dupenv_s, and warns on the POSIX-ish helpers
     # the server uses for the diagnostics toggle (_putenv_s). Make the same
@@ -387,6 +413,13 @@ if (KVMEM_BUILD_LLAMA)
     set_tests_properties(kvmem-checkpoint-tail-test PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(kvmem-gdn-replay-test tests/gdn-replay-test.cpp)
+    add_executable(kvmem-bonsai-quant-test tests/bonsai-quant-test.cpp)
+    target_include_directories(kvmem-bonsai-quant-test PRIVATE backends/llamacpp/ggml/src)
+    target_link_libraries(kvmem-bonsai-quant-test PRIVATE ggml)
+    if (GGML_CUDA)
+        target_compile_definitions(kvmem-bonsai-quant-test PRIVATE KVMEM_TEST_CUDA)
+    endif()
+    add_test(NAME kvmem-bonsai-quant-cpu COMMAND kvmem-bonsai-quant-test)
     target_include_directories(kvmem-gdn-replay-test PRIVATE src/adapter)
     target_link_libraries(kvmem-gdn-replay-test PRIVATE ggml)
     if (GGML_CUDA)
@@ -417,6 +450,20 @@ elseif (KVMEM_BUILD_SERVER_TESTS)
 endif()
 
 if (KVMEM_BUILD_SERVER_TESTS)
+    add_executable(kvmem-http-pool-test tests/http-pool-test.cpp)
+    target_include_directories(kvmem-http-pool-test PRIVATE tools backends/llamacpp/vendor/cpp-httplib)
+    target_link_libraries(kvmem-http-pool-test PRIVATE cpp-httplib Threads::Threads)
+    add_test(NAME kvmem-http-pool-test COMMAND kvmem-http-pool-test)
+    set_tests_properties(kvmem-http-pool-test PROPERTIES TIMEOUT 30)
+
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(kvmem-http-host-memory-test tests/http-host-memory-test.cpp)
+        target_include_directories(kvmem-http-host-memory-test PRIVATE tools backends/llamacpp/vendor/cpp-httplib)
+        target_link_libraries(kvmem-http-host-memory-test PRIVATE kvmem cpp-httplib Threads::Threads)
+        add_test(NAME kvmem-http-host-memory-test COMMAND kvmem-http-host-memory-test)
+        set_tests_properties(kvmem-http-host-memory-test PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+    endif()
+
     add_executable(kvmem-reasoning-budget-test tests/reasoning-budget-test.cpp)
     target_include_directories(kvmem-reasoning-budget-test PRIVATE tools)
     target_link_libraries(kvmem-reasoning-budget-test PRIVATE llama-common)

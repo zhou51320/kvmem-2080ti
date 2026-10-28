@@ -1,5 +1,9 @@
 # DFlash2 KVMem context integration
 
+Q3_K_M, Q4_K_M and ModelOpt NVFP4 companion support is documented in
+[Q3, Q4 and NVFP4 DFlash2 companions](dflash2-quantized-heads.md), including the
+fixed download revisions, conversion overrides and focused validation entry point.
+
 > Device identifiers and private paths have been anonymized; reported measurements are unchanged.
 
 The common launcher and console now also expose llama.cpp DFlash2 through its pinned upstream native implementation. Configuration, capabilities and `/props` statistics are shared; inference execution remains backend-owned. See the [interface contract](speculative-interface.md) and [focused RTX 5060 Ti validation](speculative-validation-20261019.md). The NInfer performance results below retain their original backend and workload scope.

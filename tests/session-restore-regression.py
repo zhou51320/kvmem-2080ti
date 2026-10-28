@@ -23,6 +23,9 @@ def main():
     parser.add_argument('--block-tokens', type=int, choices=[32, 64, 128], default=64)
     parser.add_argument('--turns', type=int, default=4)
     parser.add_argument('--cancel-rounds', type=int, default=1)
+    parser.add_argument('--checkpoint-policy', choices=['legacy', 'spread'], default='legacy')
+    parser.add_argument('--checkpoint-min-gap', type=int, help='override nearby history spacing; zero disables thinning')
+    parser.add_argument('--checkpoint-disk-mib', type=int, default=0)
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     if args.model is None:
@@ -30,6 +33,10 @@ def main():
         args.model = Path(os.environ[name]) if os.environ.get(name) else None
     if not args.model or not args.model.is_file() or not args.exe.is_file() or not args.gpu:
         return 77
+    occupancy = subprocess.check_output(['nvidia-smi', '-i', args.gpu,
+        '--query-gpu=uuid,name,memory.used,utilization.gpu', '--format=csv,noheader,nounits'], text=True).strip()
+    if int(occupancy.split(',')[2]) > 512 or int(occupancy.split(',')[3]) > 5:
+        raise RuntimeError('requested GPU is occupied; regression not started')
     args.out.mkdir(parents=True, exist_ok=True)
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
@@ -43,11 +50,17 @@ def main():
         command += ['--spec-draft-n-max', '5' if args.dflash2_draft else '3', '--spec-kv-dtype', 'f16', '--kvmem-mtp-state', args.mtp_state]
     if args.dflash2_draft:
         command += ['--spec-draft-model', str(args.dflash2_draft)]
+    if args.checkpoint_disk_mib:
+        command += ['--kvmem-disk-mib', str(args.checkpoint_disk_mib), '--kvmem-disk-path', str(args.out / 'spill')]
     env = {k: v for k, v in os.environ.items() if not k.startswith(('KVMEM_', 'NINFER_', 'GGML_', 'LLAMA_ARG_'))}
     env.pop('CUDA_LAUNCH_BLOCKING', None)
     env.update(CUDA_VISIBLE_DEVICES=args.gpu, CUDA_DEVICE_ORDER='PCI_BUS_ID', GGML_DISABLE_VULKAN='1')
+    env.update(KVMEM_CHECKPOINT_POLICY=args.checkpoint_policy, KVMEM_CHECKPOINT_INTERVAL='512',
+               KVMEM_CHECKPOINT_COUNT='12', KVMEM_CHECKPOINT_HOT='2', KVMEM_CHECKPOINT_HOST_MIB='1536')
+    if args.checkpoint_min_gap is not None:env['KVMEM_CHECKPOINT_MIN_GAP']=str(args.checkpoint_min_gap)
     env['PATH'] = str(args.exe.parent) + os.pathsep + env['PATH']
-    (args.out / 'manifest.json').write_text(json.dumps({'command': command, 'gpu_uuid': args.gpu}, indent=2))
+    (args.out / 'manifest.json').write_text(json.dumps({'command': command, 'gpu_uuid': args.gpu,
+        'occupancy': occupancy, 'policy_env': {k:v for k,v in env.items() if k.startswith('KVMEM_')}}, indent=2))
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     base = f'http://127.0.0.1:{port}'
 
@@ -114,7 +127,13 @@ def main():
             if args.expect_mixed_capture:
                 assert 'harvest_sync reason=non_uniform_capture' in trace, 'mixed capture path was not exercised'
             restored = re.findall(r'checkpoint_tail_restore row=(\d+) block=(\d+)', trace)
-            assert restored and any(int(row) % args.block_tokens for row, _ in restored), 'cold partial block was not restored'
+            if args.checkpoint_policy == 'legacy':
+                assert restored and any(int(row) % args.block_tokens for row, _ in restored), 'cold partial block was not restored'
+            else:
+                # Spread may restore a different native frontier whose partial
+                # block is already resident, so no tail reload is required.
+                reuse = re.findall(r'prefix_hit_rows=(\d+)', trace)
+                assert any(int(row) > 128 and int(row) % args.block_tokens for row in reuse), 'unaligned history restore was not exercised'
             assert not re.search(r'position/coverage gap|checkpoint_restore_fallback|multimodal_error|CUDA error:', trace)
             if args.mtp or args.dflash2_draft:
                 assert sum(map(int, re.findall(r'spec_stats[^\r\n]* n_drafted=(\d+)', trace))) > 0

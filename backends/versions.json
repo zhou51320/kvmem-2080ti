@@ -5,19 +5,368 @@
     "upstream": "https://github.com/ggml-org/llama.cpp.git",
     "base_commit": "620d2225cc436ab0b001e3200e590e3b286ef9ab",
     "license_file": "backends/llamacpp/LICENSE",
-    "local_changes": "KVMem integration is maintained in the versioned patch; the submodule remains pinned to base_commit",
-    "patch": "backends/patches/llamacpp-kvmem.patch",
-    "patch_sha256": "5211ba2874eb8b45dd2931114349cd83add265d958cd1a7a0632dfc263bf7655",
-    "patched_tree": "88bbd0c6a06aa64404d3127c364267306d7f1329"
+    "local_changes": "Ordered KVMem and upstream MoE patches over the pinned llama.cpp baseline; verify every patch and the complete prepared tree.",
+    "patched_tree": "9a16b0f39a5d4852c6a3a7eb56f753b089f97b57",
+    "patches": [
+      {
+        "id": "kvmem",
+        "path": "backends/patches/llamacpp-kvmem.patch",
+        "sha256": "1b93bc8fcec2fe5147ffe82ae70b028622eed49be2a748c1bc6e75d4b314dcef",
+        "requires": [],
+        "after_tree": "f00933594b3eda083bbb943c7537e56f71df2d41"
+      },
+      {
+        "id": "pq2",
+        "path": "backends/patches/llamacpp-pq2.patch",
+        "sha256": "7fe5443fe79fd45710a11a7b1c45f7fd9f3221ee1c34f0af3228dd762388f71c",
+        "requires": [
+          "kvmem"
+        ],
+        "after_tree": "6dc34740905f0fb295f287d568f5cda867710597",
+        "source": "Prism llama.cpp 9a9394a895b96003ca842a6041cb28ac49a108f7: isolated PQ2 format/CPU/CUDA support"
+      },
+      {
+        "id": "ptq1",
+        "path": "backends/patches/llamacpp-ptq1.patch",
+        "sha256": "3b80a63b830201b068934e94ae78f9903fa1b424485831b7987c6f97c16e3b77",
+        "requires": [
+          "pq2"
+        ],
+        "after_tree": "d1d50faf2da2c36a88ac2e7535368c92b4cdcebd",
+        "source": "Prism llama.cpp 9a9394a895b96003ca842a6041cb28ac49a108f7: isolated PTQ1 format/CPU/CUDA support"
+      },
+      {
+        "id": "ptq1-performance",
+        "path": "backends/patches/llamacpp-ptq1-performance.patch",
+        "sha256": "9867f0f9114953eb752212a0c3193ddc86b9b06a95ef9e38171f685a258c6b67",
+        "requires": [
+          "ptq1"
+        ],
+        "after_tree": "d56a4c6f6a040e98b010130ea72872a915d74106",
+        "source": "Prism PR218 PTQ1 planar matvec with the PDL consumer sync fix; scoped to dense CUDA 2D calls, current upstream fusion API retained"
+      },
+      {
+        "path": "backends/patches/llamacpp-checkpoint-policy.patch",
+        "sha256": "9e8aa403afcecb66150f4e58bf1ad3de9d2d8a4d16481a295f59ea6297d5273b",
+        "after_tree": "923086f011e015fef9515124ef64a189e940c0b1",
+        "id": "checkpoint-policy",
+        "requires": [
+          "ptq1-performance"
+        ]
+      },
+      {
+        "id": "moe-grouped-topk",
+        "path": "backends/patches/llamacpp-moe/0001-cuda-add-grouped-experts-top-k-fusion-29181.patch",
+        "sha256": "7b542815bb3582c164a6e3e33affbf7f573d76e4d2c533b3000953f1cb075106",
+        "requires": [],
+        "after_tree": "45ca82246da1da65f95a3124026a67ef5052420a",
+        "source": "ggml-org/llama.cpp f2f667b"
+      },
+      {
+        "id": "moe-cache-slru",
+        "path": "backends/patches/llamacpp-moe/0002-moe-cache-replace-MoE-LRU-cache-with-a-50-50-SLRU-ca.patch",
+        "sha256": "d8664e59ca83e44f0eb368ee54df5f59c73498be36e158c277a7435856110442",
+        "requires": [
+          "moe-grouped-topk"
+        ],
+        "after_tree": "f0728b1e2e740cc74509df332642233bccc3ce28",
+        "source": "ggml-org/llama.cpp 33d6135"
+      },
+      {
+        "id": "moe-topk-384",
+        "path": "backends/patches/llamacpp-moe/0003-cuda-add-top-k-MoE-fusion-for-384-experts-31288.patch",
+        "sha256": "48ade4b27a18c5daeb75ad202c33f9eb1e96ec5c6ab999722cae23356cd50d99",
+        "requires": [
+          "moe-grouped-topk"
+        ],
+        "after_tree": "9a16b0f39a5d4852c6a3a7eb56f753b089f97b57",
+        "source": "ggml-org/llama.cpp a7af149"
+      }
+    ]
   },
   "ninfer": {
     "path": "backends/ninfer",
     "upstream": "https://github.com/iamwavecut/ninfer-all.git",
-    "base_commit": "08fd7019925f43b4b42539400afd461b70f7144a",
+    "base_commit": "63428ac249da8a6c5d891b508d7e483d8c7def6c",
     "license_file": "backends/ninfer/LICENSE",
-    "local_changes": "KVMem integration is maintained in the versioned patch; the submodule remains pinned to base_commit",
-    "patch": "backends/patches/ninfer-kvmem.patch",
-    "patch_sha256": "5219fe91032dc740968b91f4d2a324cd176b7749532d009d844edefde5277506",
-    "patched_tree": "ce0c62f02b23095754262b4c86876693755479e6"
+    "local_changes": "Ordered local patches over the pinned upstream; verify every patch and the complete prepared tree.",
+    "patched_tree": "31eae2050c4d316207dde0a3762dc55ff05bab3d",
+    "patches": [
+      {
+        "id": "kvmem",
+        "path": "backends/patches/ninfer-kvmem.patch",
+        "sha256": "ea9c97cd974b10fa9bb3e4e3cdb2324665d766af644b9604461d1ab509d03603",
+        "requires": [],
+        "after_tree": "95d61c887cd1c5c8d5d8946f77d9ca3dce9bbc2d"
+      },
+      {
+        "id": "ptq1",
+        "path": "backends/patches/ninfer-ptq1.patch",
+        "sha256": "7db19a6270789d562f932344c5eaa7939ed978fb525362973917d1f5965abe11",
+        "requires": [
+          "kvmem"
+        ],
+        "after_tree": "66242f2e906ab07e35381fe48719e62a16ee1742",
+        "source": "1314521gjy/ninfer-fusion-kvmem@b6e6c20deb93fe5ed84e5715642dad21c0455ef0; local qualified port a81ebf9031c167a29f418093e8a7253a4811cd01"
+      },
+      {
+        "id": "ptq1-performance",
+        "path": "backends/patches/ninfer-ptq1-performance.patch",
+        "sha256": "f682ac51ae8f889c6ac438869cdeb5170f14b733062c205690a03dcdbe227355",
+        "requires": [
+          "ptq1"
+        ],
+        "after_tree": "4a3ca3f1d25441e109dae3610199cfd4b4d267e3",
+        "source": "Local PTQ1 routing and calibration over the compact native port, without changing SM120 policy"
+      },
+      {
+        "id": "t5-performance",
+        "path": "backends/patches/ninfer-t5-performance.patch",
+        "sha256": "d5bb7e3507b41eb56e499ceafddc5d2a908472f6b95eb3fe65a44e818d847d36",
+        "requires": [
+          "ptq1-performance",
+          "kvmem"
+        ],
+        "after_tree": "c7230b7c5730800ec24b6306639d4b3196d33310",
+        "source": "JGamboa/ninfer-4090-windows@e905787f067de89ef6ef28c52d65a2ce91d425ca; RowSplit and existing BF16 producer adaptation"
+      },
+      {
+        "id": "query-memory",
+        "path": "backends/patches/ninfer-query-memory.patch",
+        "sha256": "3221cf8a6ca4c39680b7ad96e9f5ad934c24aca53bb00bc6a78487a919298010",
+        "requires": [
+          "t5-performance"
+        ],
+        "after_tree": "1a357c3dd31d711345cb8ee3ad3f9b231d199ff9",
+        "source": "Bounded BF16 Query capture, accepted Mean-Q sums, native Query lifecycle regressions and actual cancellation accounting"
+      },
+      {
+        "id": "nvfp4-a16",
+        "path": "backends/patches/ninfer-nvfp4-a16.patch",
+        "sha256": "c50ec35c0d88a0599c99b643a3fde718ef4ee949223b560766e8cd2c76f9ad08",
+        "requires": [
+          "query-memory"
+        ],
+        "after_tree": "b9399f111933a4a051587e9c63e177f6c5eb0275",
+        "source": "13thblade/ninfer-all-nvfp4@c02c7692bd10a9b4a7effef67b60f58673985aa6; author TP merge resolutions over upstream 63428ac2"
+      },
+      {
+        "id": "nvfp4-int8",
+        "path": "backends/patches/ninfer-nvfp4-int8.patch",
+        "sha256": "ba07459284ae1f478f03452a4cd6a2190f6fc501dbf6d646762914acac615ae0",
+        "requires": [
+          "nvfp4-a16"
+        ],
+        "after_tree": "3ce9d1ee2a61bdf355f9035416c733fb2b9a12f9",
+        "source": "13thblade/ninfer-all-nvfp4@c02c7692bd10a9b4a7effef67b60f58673985aa6; author TP merge resolutions over upstream 63428ac2"
+      },
+      {
+        "id": "nvfp4-kvmem",
+        "path": "backends/patches/ninfer-nvfp4-kvmem.patch",
+        "sha256": "785fab73247b964e3d143ad564d20b67f7bc16b60c04bd715402118411ea8d27",
+        "requires": [
+          "nvfp4-int8"
+        ],
+        "after_tree": "c6e60b8a64be682d55c8207b820e7596b9d705b2",
+        "source": "Local scoped/default routing, native snapshot mode binding and Blackwell KV codec preservation"
+      },
+      {
+        "path": "backends/patches/ninfer-checkpoint-policy.patch",
+        "sha256": "2540625374e3d9f7954f2ee1dbc691b294152bf22141c701a8554570d98de045",
+        "after_tree": "5759fa796bbaf1d162ce19062c03e5a6c54c8099",
+        "id": "checkpoint-policy",
+        "requires": [
+          "nvfp4-kvmem"
+        ]
+      },
+      {
+        "id": "monitor-events",
+        "path": "backends/patches/ninfer-monitor-events.patch",
+        "sha256": "4113d37477b6713a8b7e89a21cb59e8b78f30f40dc930bef8343992ca27f0ada",
+        "requires": [
+          "checkpoint-policy"
+        ],
+        "after_tree": "a0baa83bdec06f238425793a89cee918857c5662",
+        "source": "Native response IDs, execution/request TTFT, request interval rates, native means, finish reasons and actual MTP/copy counters"
+      },
+      {
+        "id": "nvfp4-blackwell-scale",
+        "path": "backends/patches/ninfer-nvfp4-blackwell-scale.patch",
+        "sha256": "f1705dad6c04399589c08c5392c5c7725a4448a2eb02482a2a1a490418cb0f71",
+        "requires": [
+          "monitor-events"
+        ],
+        "after_tree": "99f2455c66c75d52338ad4fea4e8b7d552a84642",
+        "source": "Local Blackwell UE4M3 weight-scale normalization and exhaustive independent FP64 codec oracle"
+      },
+      {
+        "id": "dflash2-gguf-blocks",
+        "path": "backends/patches/ninfer-dflash2-gguf-blocks.patch",
+        "sha256": "a094e026692e486a0e5b1ca6bdf3b7e21e1ca0d7e34f78f30321e81cb18d4754",
+        "requires": [
+          "nvfp4-blackwell-scale"
+        ],
+        "after_tree": "8ab69bd581a919a1869f234fb59cbcbb288dc7ed",
+        "source": "Adapted from melis2023/ninfer-kvmem-actkv@664cb6daa8cba30dfe39b0d10113a72b20587853; current artifact, dispatch and independent validation integration"
+      },
+      {
+        "id": "dflash2-nvfp4",
+        "path": "backends/patches/ninfer-dflash2-nvfp4.patch",
+        "sha256": "39cf5cc32de2fdaa036a09946446429b5f5211bfbf4e4534089bb458c5bf4825",
+        "requires": [
+          "dflash2-gguf-blocks"
+        ],
+        "after_tree": "7ce39f25a49562d54244e171f51cbb31999dae74",
+        "source": "Adapted from melis2023/ninfer-kvmem-actkv@664cb6daa8cba30dfe39b0d10113a72b20587853; current artifact, dispatch and independent validation integration"
+      },
+      {
+        "id": "cuda-graph-probe",
+        "path": "backends/patches/ninfer-cuda-graph-probe.patch",
+        "sha256": "95ab2f6bb033403d0db42218bbdf7fc92a4aee22c1a9fb20101eea60d6251e2e",
+        "requires": [
+          "dflash2-nvfp4"
+        ],
+        "after_tree": "887a4e218b6c911853345aef2001e7249745deb6",
+        "source": "Adapted from melis2023/ninfer-kvmem-actkv@664cb6daa8cba30dfe39b0d10113a72b20587853, b4d8096 and 591537b; uniform dense MTP/DFlash2/ordinary calibration, allocation-only fallback"
+      },
+      {
+        "id": "token-alignment",
+        "path": "backends/patches/ninfer-token-alignment.patch",
+        "sha256": "b355f46ba831fa164dc5be062b73ef9899e26923c765f1abbb58457daaf93b8b",
+        "requires": [
+          "cuda-graph-probe"
+        ],
+        "after_tree": "56084fa82e3dccd082226a3ee264bed28c147225",
+        "source": "Normalize startup token budgets before capacity checks; report effective values"
+      },
+      {
+        "id": "output-budget",
+        "path": "backends/patches/ninfer-output-budget.patch",
+        "sha256": "c95d39597324c4175bff2d499679da9cd357b5cef5a3cc2e21da4b4543d12c3a",
+        "requires": [
+          "token-alignment"
+        ],
+        "after_tree": "31eae2050c4d316207dde0a3762dc55ff05bab3d",
+        "source": "Bound KVMem automatic output by logical context and attainable RAM/SSD history; preserve explicit cap admission"
+      }
+    ]
+  },
+  "polystrata": {
+    "path": "backends/polystrata",
+    "upstream": "https://github.com/VecSzn/PolyStrata.git",
+    "base_commit": "bfd8911efbb8c27214d5aabc511907c6149171e7",
+    "license_file": "backends/polystrata/LICENSE",
+    "local_changes": "Opt-in Windows/CUDA qwen35moe F16/Q8 KVMem; bounded Query/replay, PageSoftmax/graph scoring and resident-only Pressure; shared process RAM/SSD and retained histories; per-sequence single-GPU native batches; one to three embedded MTP drafts during solo execution; CPU/GPU vision; pinned upstream base; startup-fixed 32/64-token blocks (default 32); shutdown releases the frontend's shared log handles so Windows removes their temporary directory; ROCm/HIP builds compile the portable KVMem core and its query scorer through hip_compat; poly.5's Kolibri1 engine is linked into the KVMem regression test targets; an assistant-final image prompt keeps its (0,0) no-Query sentinel out of the image expansion; CUDA driver test links explicitly; HIP query scorer is shared by all KVMem consumers",
+    "patched_tree": "e2a8c1de21c0060b3dcfa71e59f5df6983123b64",
+    "source_tag": "v0.1.45-poly.5",
+    "patches": [
+      {
+        "id": "kvmem",
+        "path": "backends/patches/polystrata-kvmem.patch",
+        "sha256": "d2b1f4801b5d972c8bf298fe079eecbef3bc08f79daab718633cfd250dd3ae71",
+        "requires": [],
+        "after_tree": "4b502212e936522f1cb6917fb34e8ea00df1b876"
+      },
+      {
+        "id": "attention-feedback-performance",
+        "path": "backends/patches/polystrata-attention-feedback-performance.patch",
+        "sha256": "82674ebaf7862d1e77008799afe2c1756c4ea0922a3eefa91d0c13c73f310f9c",
+        "requires": [
+          "kvmem"
+        ],
+        "after_tree": "fe6fbb1214c2760284e407ead3180691625ceb55"
+      },
+      {
+        "id": "elastic-workspace",
+        "path": "backends/patches/polystrata-elastic-workspace.patch",
+        "sha256": "75617931e5eacd83dc2a73ba416427e1ac6f62f9c45a9002fc15c99041eda713",
+        "requires": [
+          "attention-feedback-performance"
+        ],
+        "after_tree": "68d0a7fd8913ab68a2051761be019e85a060281a"
+      },
+      {
+        "id": "elastic-kv-reclaim",
+        "path": "backends/patches/polystrata-elastic-kv-reclaim.patch",
+        "sha256": "5c92dfd0fff687cfa9b17cb68e7b749fa811cfa9029aaf4397b19f741150d69f",
+        "requires": [
+          "elastic-workspace"
+        ],
+        "after_tree": "c572871ff7a927ae24e7e8fafa7f759ba0260a18"
+      },
+      {
+        "id": "elastic-headroom",
+        "path": "backends/patches/polystrata-elastic-headroom.patch",
+        "sha256": "af77035551336dc16aeefb37f73ee0a15eec459fa6dac45001924cd654280cd8",
+        "requires": [
+          "elastic-kv-reclaim"
+        ],
+        "after_tree": "cb8bb6b6180af946861647b1c741fdfeb6f3e426"
+      },
+      {
+        "id": "elastic-mtp",
+        "path": "backends/patches/polystrata-elastic-mtp.patch",
+        "sha256": "638bb375b158288677a87ea77fc5dbab3ae1e03cc08dd17ba041c31b82f8c768",
+        "requires": [
+          "elastic-headroom"
+        ],
+        "after_tree": "fd6ff1c7c8c9f1f7052be8b86c2a795a9bfd54bc"
+      },
+      {
+        "id": "block-tokens",
+        "path": "backends/patches/polystrata-block-tokens.patch",
+        "sha256": "e8abaa77c267682d340d29b3a1a2f9b59e5622f8f17e5b46cc9f1cb22c571f63",
+        "requires": [
+          "elastic-mtp"
+        ],
+        "after_tree": "f20cef6c6da7fe77c5225c4cb836421a28f7bcde"
+      },
+      {
+        "id": "hip-kvmem",
+        "path": "backends/patches/polystrata-hip-kvmem.patch",
+        "sha256": "fecfb84bd63a6a6c5a9f7804b0320bb210a74f73ecf4b7ab781663e7b256c01b",
+        "requires": [
+          "block-tokens"
+        ],
+        "after_tree": "319f4881324105bb0712ed548f5574b1edcb76d6"
+      },
+      {
+        "id": "serve-log-close",
+        "path": "backends/patches/polystrata-serve-log-close.patch",
+        "sha256": "ecc08fbe0c8c185c24f970f1c3bd833ed39d29f13ed396b50ec67556a3a9ca9d",
+        "requires": [
+          "block-tokens"
+        ],
+        "after_tree": "0b703ecc9e45d8356beeca1aae431399935baa00"
+      },
+      {
+        "id": "token-alignment",
+        "path": "backends/patches/polystrata-token-alignment.patch",
+        "sha256": "54161d107290377dc50d8ff19bad816ab6622174107be88fb7b3a661bcd342c0",
+        "requires": [
+          "serve-log-close"
+        ],
+        "after_tree": "e912079f8bc213691be8daba119fc56d1a55d833",
+        "source": "Normalize startup token budgets before capacity checks; report effective values"
+      },
+      {
+        "id": "kolibri-test-link",
+        "path": "backends/patches/polystrata-kolibri-test-link.patch",
+        "sha256": "d76562d34d5c17459c2784ff9e57b4939f09b22bff0e0abdcc1bbaeafe620a74",
+        "requires": [
+          "token-alignment"
+        ],
+        "after_tree": "e656a0c80a62327627ea5eab50c0da151f7612c4"
+      },
+      {
+        "id": "kvmem-image-query-span",
+        "path": "backends/patches/polystrata-kvmem-image-query-span.patch",
+        "sha256": "82f1ab310a4aa9bcf7149d5a2ab0ca22ac5445586ac76f7cb8d87d9ca7ed61f2",
+        "requires": [
+          "kolibri-test-link"
+        ],
+        "after_tree": "e2a8c1de21c0060b3dcfa71e59f5df6983123b64"
+      }
+    ]
   }
 }

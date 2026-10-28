@@ -8,6 +8,10 @@
 #include "kvmem/kv_content.hpp"
 #include "kvmem/raw_kv_store.hpp"
 #include "kvmem/rope.hpp"
+#include "kvmem/graph_recall.hpp"
+#ifdef KVMEM_PAGE_SOFTMAX_CUDA
+#include "kvmem/page_softmax_cuda.hpp"
+#endif
 
 #include <condition_variable>
 #include <array>
@@ -98,6 +102,14 @@ public:
     void reset_query_acc();
     void register_capture(struct ggml_tensor * t, int il, char which);
     void capture_on_new_graph();
+    void capture_attention(ggml_context*,ggml_cgraph*,ggml_tensor*,ggml_tensor*,ggml_tensor*,float,float,float,int);
+    void attention_begin(const llama_token*,uint32_t);
+    void attention_finish(bool);
+    void graph_messages(const std::vector<kvmem::GraphMessageSpan>& spans) {
+        graph_.set_messages(spans);request_graph_messages_=graph_.messages;
+    }
+    void prepare_attention_batches(const std::vector<llama_ubatch>&);
+    void observe_attention(uint32_t batch,uint32_t accepted,ggml_backend_sched*);
     bool capture_can_reuse(uint32_t n_tokens, uint32_t n_pos, const llama_pos * pos) const;
     uint64_t capture_stamp() const;
     void harvest_pending(struct ggml_backend_sched * sched);
@@ -114,8 +126,8 @@ public:
     bool query_overlaps(uint32_t n, const llama_pos * rows) const;
     llama_kvmem_attention_view attention_view(bool canonical = true) const;
     bool can_append(uint32_t end, uint32_t generation_rows, bool all_history, std::string & reason) const;
-    llama_kvmem_selection preview_retrieval();
-    bool selection_fits(const llama_kvmem_selection & selection, uint32_t end, uint32_t generation_rows) const;
+    llama_kvmem_selection preview_retrieval(const llama_kvmem_tail_mean_state* prefix = nullptr);
+    bool selection_fits(const llama_kvmem_selection & selection, uint32_t end, uint32_t native_workspace) const;
     bool commit_unchanged(const llama_kvmem_attention_view & view, const llama_kvmem_selection & selection);
     void apply_selection(const llama_kvmem_selection & selection);
     bool commit_resident(bool canonical = true);
@@ -133,9 +145,9 @@ public:
     void set_replay(bool replay);
     bool replay() const { return replay_; }
     bool want_prefill_capture() const {
-        return prefill_capture_ && !retrieval_pinned_ && !replay_ && !speculative_evaluation_;
+        return prefill_capture_ && !retrieval_pinned_ && !speculative_evaluation_;
     }
-    // Recapture Q for retrieval even while replaying a cached query span.
+    // Capture the first-pass Query; replay keeps that seed frozen.
     bool want_q_capture() const {
         return method_ == 1 && !retrieval_pinned_ && !query_frozen_ && !speculative_evaluation_ &&
             (explicit_spans_ ? !turn_spans_.query.empty() : query_begin_ >= 0);
@@ -146,11 +158,10 @@ public:
     void end_prefill_capture() { prefill_capture_ = false; }
     // Next request continues this sequence: flush decode mean, unpin
     // retrieval, harvest mean-K for the suffix. Does not wipe prefix KV.
-    void begin_cached_turn(bool reset_query = true);
-    // Same-query skip: keep the retrieved GPU window. Prefill still harvests
-    // the new tail; recency pressure must not evict selected history.
+    void begin_cached_turn();
+    // Retain the proved view while append fits. Capacity Pressure remains enabled.
     void keep_selected_window() { keep_selected_ = true; }
-    // After skip/reselect prefill: pin so decode mean-K uses gen_reserve.
+    // After prefill: collect decode Mean-K; reserve exhaustion uses Pressure.
     void pin_working_set() {
         retrieval_pinned_ = true;
         keep_selected_ = true;
@@ -314,7 +325,8 @@ private:
                                 void * host, uint64_t bytes);
     void copy_gpu_block_from_host(uint32_t block_id, int32_t gpu_slot,
                                   const void * host, uint64_t bytes);
-    void score_retrieval();
+    void score_retrieval(const llama_kvmem_tail_mean_state* prefix = nullptr);
+    std::vector<uint32_t> retrieval_prefix_mandatory(uint32_t frontier) const;
     bool read_gpu_block(uint32_t block_id, uint32_t il, bool is_k, std::vector<float> & out) const;
     static void kv_stats(const char * tag, const float * a, const float * b, size_t n);
     static void tensor_to_f32_token_major(const struct ggml_tensor * t, std::vector<float> & out, int64_t * read_us = nullptr);
@@ -416,6 +428,8 @@ private:
     // another conversation is configured identically.
     kvmem::KvMemRuntimeConfig rt_cfg_{};
     int score_agg_ = 0;
+    bool query_meanq_cosine_ = false;
+    double graph_alpha_ = 0.2;
     kvmem::RawKvStoreConfig raw_cfg_{};
     std::unique_ptr<kvmem::KvMemRuntime> runtime_;
     std::unique_ptr<kvmem::RawKvStore> raw_;
@@ -509,8 +523,35 @@ private:
     std::unique_ptr<HarvestWorker> harvest_w_;
     HarvestPerf perf_;
     RetrPerf retr_;
-    std::vector<std::vector<float>> q_sum_;
+    std::vector<std::vector<float>> q_rows_;
     std::vector<uint32_t> q_count_;
+    struct AttentionSampler;
+    struct AttentionCapture {
+        ggml_tensor* query=nullptr;
+        ggml_tensor* key=nullptr;
+        ggml_tensor* mask=nullptr;
+        float scale=1,max_bias=0,softcap=0;
+        int layer=0;
+    };
+    struct AttentionBatch {
+        uint64_t begin=0,end=0,epoch=0;
+        bool replay=false;
+        std::vector<uint64_t> slots;
+        std::vector<int32_t> tokens;
+    };
+    std::vector<AttentionCapture> attention_captures_;
+    std::vector<AttentionBatch> attention_batches_;
+    uint32_t attention_pending_batch_=UINT32_MAX;
+    std::shared_ptr<AttentionSampler> attention_sampler_;
+    kvmem::GraphSnapshot graph_;
+    std::shared_ptr<const std::vector<kvmem::GraphMessageSpan>> request_graph_messages_;
+    kvmem::AttentionFeedback feedback_;
+    kvmem::OutputSampleState attention_scope_;
+    uint64_t attention_output_begin_=UINT64_MAX;
+    int32_t attention_think_open_=-1,attention_think_close_=-1;
+#ifdef KVMEM_PAGE_SOFTMAX_CUDA
+    std::unique_ptr<kvmem::PageSoftmaxCuda> query_scorer_;
+#endif
 };
 
 // GPU attn-cache cell count for a KVMem slot pool (budget + gen_reserve,

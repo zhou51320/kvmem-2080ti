@@ -15,9 +15,10 @@ static bool use_gdn_replay(const llama_model & model, const llama_cparams & cp) 
     const int mode = llama_kvmem_get_params()->mtp_state;
     if (mode == 0) return false;
     const auto & h = model.hparams;
-    bool supported = model.arch == LLM_ARCH_QWEN35 && h.n_layer() == 64 && cp.n_seq_max == 1 &&
-        cp.n_rs_seq > 0 && cp.n_rs_seq <= 5 && cp.n_ubatch >= cp.n_rs_seq + 1 && cp.offload_kqv && h.ssm_d_inner == 6144 &&
-        h.ssm_d_state == 128 && h.ssm_n_group == 16 && h.ssm_dt_rank == 48 && h.ssm_d_conv == 4;
+    bool supported = model.arch == LLM_ARCH_QWEN35 && cp.n_seq_max == 1 &&
+        cp.n_rs_seq > 0 && cp.n_rs_seq <= 5 && cp.n_ubatch >= cp.n_rs_seq + 1 && cp.offload_kqv &&
+        h.ssm_d_state == 128 && h.ssm_d_conv == 4 && h.ssm_n_group > 0 && h.ssm_dt_rank > 0 &&
+        h.ssm_dt_rank % h.ssm_n_group == 0 && h.ssm_d_inner == h.ssm_dt_rank * h.ssm_d_state;
     ggml_backend_dev_t device = nullptr;
     const bool allow_multi_device = std::strcmp(GGML_CUDA_NAME, "CUDA") == 0;
     for (uint32_t il = 0; supported && il < h.n_layer(); ++il) {
@@ -33,7 +34,7 @@ static bool use_gdn_replay(const llama_model & model, const llama_cparams & cp) 
             (allow_multi_device || !device || device == dev);
         device = dev;
     }
-    if (!supported && mode == 2) throw std::runtime_error("GDN replay requires single-sequence GPU Qwen 27B with MTP 1-5 and CUDA recurrent layers, or ROCm recurrent layers on one GPU");
+    if (!supported && mode == 2) throw std::runtime_error("GDN replay requires single-sequence GPU dense Qwen3.5 (128-wide GDN heads, conv width 4) with MTP 1-5 and CUDA recurrent layers, or ROCm recurrent layers on one GPU");
     // Keep automatic selection on snapshots until the replay regression suite passes.
     return supported && mode == 2;
 }

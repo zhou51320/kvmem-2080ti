@@ -4,11 +4,15 @@
 
 0.18.0 源码采用 `iamwavecut/ninfer-all` 的固定提交 `8319e8f51247`，llama.cpp 基线保持原值。当前迁移验收进度见 [迁移记录](ninfer-all-migration-validation.md)；下文各有日期的实验是旧基线证据，不能视为新基线已经完成同等覆盖。KVMem 暂不支持新增的 `qwen4_exp`、模型 suspend、prompt graft 和 router，开启这些组合时明确报错。
 
-Windows 入口 `scripts/windows/start-backend.ps1` 在启动时选择 `llamacpp` 或 `ninfer`。两个 worker 分进程运行，各自拥有推理引擎和 GPU 内存；公共 KVMem 策略库直接链接在 worker 内。
+Windows 入口 `scripts/windows/start-backend.ps1` 在当前源码可选择 `llamacpp`、`ninfer` 或下文限定范围的 `polystrata`。两个 worker 分进程运行，各自拥有推理引擎和 GPU 内存；公共 KVMem 策略库直接链接在 worker 内。
 
 当前源码统一了 MTP/DFlash2 的启动配置、能力描述及 `/props` 统计，控制台按后端、并发和显卡数量启用选项。llama.cpp 的 DFlash2 使用上游原生草稿实现和独立 GGUF，NInfer 使用模型内置组件；详见 [公共推测解码接口](speculative-interface.md) 和 [本轮功能验证](speculative-validation-20261019.md)。已有发布包需更新 worker 后才能使用新增方式。
 
 切换后端时的参数、默认值和执行行为区别见 [两后端实现差异](multi-backend-differences.md)，包括 ninfer 固定 64-token block、recent 默认且至少保留一页（参数至少 64 tokens）、R 与输出上限，以及 Host 和磁盘预算的不同含义。
+
+Qwen3.5 dense 的 0.8B/2B/4B/9B/27B 规格与原生 MTP 适配范围、4B 两后端验收及模型复用方法见 [家族适配记录](qwen35-dense-family.md)。
+
+Bonsai 2 27B 的 PQ2/PTQ1 作为两个现有后端的独立补丁接入，继续使用普通 llama.cpp／ninfer worker，不新增 Prism 引擎。当前实现、5050 8GB 的 PTQ1＋MTP 预算验证、限制和未来上游接管办法见 [Bonsai 接入记录](bonsai-integration.md)。此说明针对源码，不改变历史发布包。
 
 ## 启动
 
@@ -17,6 +21,13 @@ ninfer 预编译包可直接运行默认脚本。将包含文本、视觉和 MTP
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninfer.ps1
 ```
+
+Qwen3.5/3.6/3.8 的 CPU 视觉权重在首次实际图片编码时加载。最后一个编码器释放引用后，
+默认空闲300秒自动卸载，即使没有后续请求也会回收；文本请求不触发加载，后续图片可重新加载。
+统一启动器 `-CpuVisionIdleSeconds` 可调整秒数，0表示加载后保留到模型卸载；原生参数为
+`--cpu-vision-idle-seconds`。首次图片请求承担读取和反量化开销，视觉计算精度不变。
+`/props.cpu_vision` 提供驻留字节数和加载/卸载次数。此策略针对 ninfer 的 Qwen CPU 视觉路径，
+需要本轮新编译的 worker；范围与测量见 [按需加载和回收验收](ninfer-cpu-vision-lifecycle-validation-20261020.md)。
 
 默认端口18200，context200k、budget36k、gen reserve及输出上限16k、思考预算8192、双INT8、自适应MTP上限4、ngram31、CPU视觉（图片上限1024 tokens），Host预算12GiB。脚本调用统一启动器，可编辑模型路径与预算，通过 `-Gpu` 选择设备。小预算CPU/resident视觉的实际1024-token图片及八路图文功能已通过，范围见 [视觉并发验收](vision-concurrency-validation-20261006.md)；正式版在 RTX 5060 Ti 16GB 上完成了该默认配方的加载和短 Responses 请求检查；该检查不代表所有模型或完整长上下文质量已验收。各历史记录保留其原有测试范围。
 
@@ -30,9 +41,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninf
 
 `-Worker` 可指定本地构建的 `ninfer-serve.exe` 或 `llama-kvmem-server.exe`；省略时使用包内 `workers/<backend>/` 的程序。`-DryRun` 输出启动参数，`-Describe` 查询静态能力。默认监听 `127.0.0.1:18200`，前台运行，Ctrl+C 结束本次启动的 worker。安装 NVIDIA 驱动及 Microsoft Visual C++ 2015–2022 x64 Runtime；包内保留各引擎的 DLL，模型另行提供。
 
-当前源码的 Windows 统一入口、`start-ninfer.ps1` 及 llama.cpp 的 IQ3/IQ4 入口默认开启 LRFU，`lambda=0.5`、`top-frac=0.9`，GQA 聚合使用 `max`。sink 默认 12288 tokens（12K）、recent 默认 1024 tokens（1K，16页），两项计入 B；统一入口默认 B=32768，ninfer/IQ3/IQ4 快捷配方的 B/R 保持原值。可用 `-SinkTokens`、`-RecentTokens` 覆盖；自定义小预算时也要相应缩小这两个保留窗口。`top-frac` 控制本轮得分可累加到历史的命中范围，不是 KV 预算比例；同分块也可命中。可用 `-LrfuLambda`、`-LrfuTopFraction` 和 `-ScoreAggregation mean|max` 覆盖；`-NoLrfu -ScoreAggregation mean` 恢复无历史加权的 mean 检索。`start-ninfer.ps1 -DryRun` 可查看完整参数。直接运行 worker 时仍默认关闭 LRFU、使用 mean，sink/recent 的公共输入默认值为 0/64，再按本后端块粒度规范化；需要包含 LRFU 实现的新 worker，已发布的旧 ZIP 不适用这些参数。
+当前源码的两个后端默认使用 [图召回 C](graph-recall.md)：Query 按 token/head 做 Mean-K page softmax 后执行一次图传播；prefill/decode pressure 按累计 accepted attention 对驻留工作集重选，不做图传播或冷页召回。原生命令行与 Windows 启动脚本支持 meanq-cosine/page-softmax、GQA mean/max 和图传播比例；LRFU 仅支持 meanq-cosine。资源配方仍保留 0.18 的 B/R/H、sink=12288、recent=1024 等参数，`-DryRun` 可查看。已发布旧 ZIP 继续采用其原有算法；新脚本需要与新 worker 配套。
 
-当前源码的 KVMem CLI v1 由两个 worker 共用解析和默认定义。两个 EXE 都支持 `--kvmem` / `--no-kvmem`，不传 KVMem 配置默认关闭；旧命令传正的 `--kvmem-budget` 仍会启用。启用后的默认 B/R/H 为 32768/1024/16384 MiB，sessions=4；B/R/H 显式 0 会报错，需配置能容纳 B+R 的原生上下文。`--kvmem-sessions` 和脚本 `-RetainedSessions` 在两个后端都只限制非活动历史，活动请求不计入；旧 llama `--kvmem-conversations` 是总数兼容模式，不是同值别名。SSD 额度 0 表示关闭且必须省略目录，关闭 LRFU 使用 `--no-kvmem-lrfu`。新脚本必须与本轮新编译的 worker 配套；已有发布包不会被自动更新。完整定义及 llama 当前 R 输出能力限制见 [参数规范](native-cli-configuration-spec.md)。
+当前源码的 KVMem CLI v1 由两个 worker 共用解析和默认定义。两个 EXE 都支持 `--kvmem` / `--no-kvmem`，不传 KVMem 配置默认关闭；旧命令传正的 `--kvmem-budget` 仍会启用。启用后的默认 B/R/H 为 32768/1024/16384 MiB，sessions=4；B/R/H 显式 0 会报错，需配置能容纳 B+R 的原生上下文。`--kvmem-sessions` 和脚本 `-RetainedSessions` 在两个后端都只限制非活动历史，活动请求不计入；旧 llama `--kvmem-conversations` 是总数兼容模式，不是同值别名。SSD 额度 0 表示关闭且必须省略目录。C 接受 `--no-kvmem-lrfu` 兼容写法，拒绝启用 LRFU。新脚本必须与本轮新编译的 worker 配套；已有发布包不会被自动更新。完整定义见 [参数规范](native-cli-configuration-spec.md)。
 
 ninfer 源码的多卡采用上游 layer pipeline。`-Gpu 'GPU-a,GPU-b'` 保留 UUID 顺序，第一张卡承担 embedding、head、MTP 和 resident Vision；CPU Vision 保留原生 Host 编码路径。可加 `-StageLayers 40,24` 指定连续层数，省略时按各卡空闲内存规划；层数总和由模型装载器验证。统一启动器禁止重复或空设备、超过八卡，以及经 `WorkerArgs` 重复传入设备参数。物理卡必须具有相同 compute capability，显存容量可不同。B/R 仍是每请求的完整逻辑窗口，H 是共享预算；各卡只持有自己的层，不按卡数拆分 B/R 或重复建立 Host 历史。
 
@@ -162,3 +173,27 @@ H 必须容纳所有并发 lane 的基本工作区，H+D 还需为换页预留�
 图片＋MTP＋ngram 当前放行九种原生 KV，支持 resident/CPU 及1–8路；多路宽度16–63自动降至15。新增 `fp8`、`rk4v4`、`rk4v4-e8`、`rk2v4-e8` 只补格式身份和准入，复用原生量化与换页实现。范围与实测见 [新增KV准入补测](other-kv-admission-validation-20261006.md)；此前五种格式见 [图片ngram补测](vision-ngram-all-kv-validation-20261006.md)，首次K8V4换行差异及对照见 [初次图片ngram补测](vision-ngram-validation-20261005.md)。
 
 快速 prefill 的新增 RK 格式与图片准入仅移除额外门禁，复用原生内核，验收范围见 [快速prefill准入补测](fast-prefill-admission-validation-20261006.md)。该开关影响符合原生路由条件的 prompt Attention，不负责并行 prefill，其他 KV 仍用各自原有路径。
+
+
+## PolyStrata qwen35moe 接入（2026-10-22 源码）
+
+此入口固定 PolyStrata `v0.1.45-poly.4` / `145493e66580`，本轮仅支持 CUDA 单卡的 `qwen35moe` GGUF、F16 或 Q8_0 KV。使用同一个 GGUF 导出的 tokenizer/template；图像输入还需要匹配的 mmproj 和 `strata-vision`。Python 运行环境需具备固定上游 requirements 中的 frontend 依赖。
+
+统一启动器和直接 Python 入口均可省略 Tokenizer：第一次启动从所选 GGUF 本地导出完整 tokenizer 与 chat template，缓存在用户本地 KVMem 目录中，不下载模型或修改模型目录。缓存按模型绝对路径、大小、修改时间、头部摘要及导出器版本隔离，并校验导出文件；显式 Tokenizer 仍要求完整的同模型导出。DryRun 只展示计划，不创建缓存。控制台的 Python、frontend、图像 worker 等可选路径留空时使用运行包内默认位置。
+
+```powershell
+./scripts/windows/start-backend.ps1 -Backend polystrata `
+  -Model 'D:/models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_XL.gguf' `
+  -Tokenizer 'D:/models/tokenizer' -Worker 'D:/workers/strata-poly.exe' `
+  -Python 'D:/python/python.exe' -Gpu 'GPU-your-device-uuid' `
+  -Budget 8192 -Reserve 1024 -Prefill 128 -HostMiB 4096 `
+  -SinkTokens 64 -RecentTokens 64 -KvType f16 -Concurrency 2 -MtpDrafts 2
+```
+
+并发使用一个原生 worker 的多个序列，专家矩阵计算共享；每个序列独立拥有 KV、循环状态和检索统计。RAM/SSD KV 与图统计预算按进程共享。原生 batch 还保留一个主序列用于 prompt admission，显存规划需计入这一个额外序列。C2/C4/C8 仍受显存和 Host 容量约束。batch 内使用普通解码，独占执行可恢复 1–3 个内置 MTP 草稿。此入口不开放跨 GPU 层切分、batch 内 MTP、其他架构、DFlash2 或 n-gram。
+
+检索使用当前公共的有界 Query/replay、PageSoftmax/图传播和驻留 Pressure。工具续接不触发冷历史召回；原生统计图对没有可证明消息边界的跨度使用公共的 unknown fallback。PolyStrata 的 `RetainedSessions` 包含主序列预留位置，默认取 `max(4, Concurrency+1)`；显式减小会触发正常的 LRU 淘汰。SSD 内容仅在当前进程内有效。
+
+`-Vision -VisionWorker ... -Mmproj ... -VisionResidency cpu` 启用 CPU 图像编码；`resident` 使用所选单卡。`scripts/windows/package-polystrata.ps1` 可单独打包文本/图像 worker、原生依赖、frontend 和控制台；可选 `PythonRuntime` 必须是可搬迁且包含 frontend 依赖的 Python 目录，并在复制后验证。未提供它的包需要已有 Python，不声称离线即用。构建/打包能力不等同于某个模型和资源组合的运行验收，查看包内 `provenance/validation.json`。
+
+三后端统一包使用 `scripts/windows/package-backends.ps1`，保留原有 LlamaWorker/NinferWorker 参数，另传 PolystrataWorker、PolystrataPythonRuntime，可加 PolystrataVisionWorker、PolystrataGgmlSource、PolystrataValidationReport。该组合使用已安装 frontend 依赖的便携 Python，不与仅含标准库的 PythonArchive 同时使用。LlamaSource 可显式指定已有 llama.cpp 构建的源码许可来源；省略时沿用仓库子模块。统一包中的 PolyStrata 验收记录位于 `provenance/polystrata-validation.json`；其他 worker 的依赖加载检查不代表重新进行了全套模型推理验收。

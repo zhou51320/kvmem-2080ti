@@ -4,6 +4,8 @@
 #include "llama-kvmem-hooks.h"
 #include "llama-kvmem-execution.h"
 #include "kvmem/retrieval_options.hpp"
+#include "kvmem/launch_contract.hpp"
+#include "kvmem/token_options.hpp"
 #include "kvmem-spec.h"
 #include "kvmem-chat-sampling.h"
 #include "kvmem-chat-template.h"
@@ -16,6 +18,7 @@
 #include "kvmem/monitor.hpp"
 #include "kvmem/monitor_hardware.hpp"
 #include "kvmem-lane-pool.h"
+#include "kvmem-http-pool.h"
 #include "kvmem-execution-scope.h"
 #include <atomic>
 #include "kvmem-server-devices.h"
@@ -87,6 +90,7 @@ static void print_usage(const char * argv0) {
             "  --no-kvmem-trace           disable diagnostics, overriding the environment\n"
             "  --host HOST                bind address (default 127.0.0.1)\n"
             "  --port N                   port (default 8080)\n"
+            "  --threads-http N           fixed HTTP workers (auto: 2 per inference lane)\n"
             "  --ui-dir PATH              serve static chat UI from PATH\n"
             "  --no-ui                    disable bundled chat UI\n"
             "  -c, --ctx-size N           context size (default 2048)\n"
@@ -129,20 +133,24 @@ static void print_usage(const char * argv0) {
             "                            request fields override these process defaults\n"
             "  --kvmem / --no-kvmem       enable/disable KVMem (default off; positive B enables)\n"
             "  --kvmem-budget N           positive selected-history budget B (default 32768)\n"
-            "  --kvmem-block-tokens N     block size (default 128)\n"
+            "  --kvmem-block-tokens N     block size (default 32)\n"
             "  --kvmem-sink-tokens N      always-kept prefix; default 0 = one block; rounds down, minimum one block\n"
-            "  --kvmem-gen-reserve N      positive append workspace R (default 1024; current output cap <= R)\n"
+            "  --kvmem-gen-reserve N      positive append workspace R (default 1024; not an output limit)\n"
             "  --kvmem-recent-tokens N    always-kept newest suffix in B (default 64; rounds down to blocks)\n"
             "  --kvmem-method NAME        recency | retrieval (default retrieval)\n"
-            "  --kvmem-lrfu / --no-kvmem-lrfu enable/disable retrieval history ranking (default off)\n"
-            "  --kvmem-lrfu-lambda X      history decay [0,1] (default 0.5)\n"
-            "  --kvmem-lrfu-top-frac X    hit fraction (0,1] (default 0.9)\n"
-            "  --kvmem-score-agg MODE     mean | max across GQA heads (default mean)\n"
             "  --kvmem-query-last N       fallback query-last if last-user span missing (default 64)\n"
+            "  --kvmem-query-scorer NAME    page-softmax (default) | meanq-cosine\n"
+            "  --kvmem-score-agg MODE       mean | max (default: page-softmax mean, cosine max)\n"
+            "  --kvmem-lrfu / --no-kvmem-lrfu  Query history (default on only for cosine)\n"
+            "  --kvmem-lrfu-lambda X        history decay in [0,1] (default 0.5)\n"
+            "  --kvmem-lrfu-top-frac X      history hit fraction in (0,1] (default 0.9)\n"
+            "  --kvmem-graph-alpha X        Query propagation in [0,1] (default: page-softmax 0.2; cosine 0)\n"
+            "  --kvmem-capabilities         Print model-free console capability JSON and exit\n"
             "  --kvmem-query-max-tokens N cap last-user retrieval query to this many tokens\n"
+            "  --kvmem-query-replay-max-tokens N bound the complete Query replay suffix (default 2048)\n"
             "                            from the end of the span (default 512; qw3-style)\n"
             "  --kvmem-query-replay MODE  legacy or auto (default auto)\n"
-            "  --kvmem-query-policy MODE  legacy or user (default user)\n"
+            "  --kvmem-query-policy MODE  user only (compatibility option; default user)\n"
             "  --kvmem-mtp-state MODE     snapshots, auto or replay (default replay with MTP)\n"
             "  --kvmem-gpu-ratio R        cap slot pool at this fraction of GPU VRAM (default 0.50)\n"
             "  --kvmem-cpu-gb GB          CPU spill arena in GiB (0 = off)\n"
@@ -815,6 +823,10 @@ static bool parse_chat_request(const json & body, ChatRequest & out, std::string
 }
 
 int main(int argc, char ** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--kvmem-capabilities") {
+        puts(kvmem::launch_capabilities("llamacpp").c_str());
+        return 0;
+    }
     // Flush asynchronous common logs on every exit, including startup errors.
     struct log_flush_guard { ~log_flush_guard() { common_log_flush(common_log_main()); } } flush_logs;
     std::string ui_dir;
@@ -840,7 +852,7 @@ int main(int argc, char ** argv) {
     kvmem_server_options options;
     int requested_conversations = 1;
     st.kparams.mtp_state = 2; // ReplaySSM by default when MTP is enabled.
-    st.kparams.block_tokens = 128;
+    st.kparams.block_tokens = 32;
     st.kparams.recent_tokens = 0;
     st.kparams.method = 1;
     st.kparams.query_begin = -1;
@@ -964,8 +976,11 @@ int main(int argc, char ** argv) {
             st.query_replay_auto = mode == "auto";
         } else if (eq(arg, "--kvmem-query-policy")) {
             const std::string mode = need(arg);
-            if (mode != "legacy" && mode != "user") { fprintf(stderr, "invalid query policy\n"); return 1; }
-            st.query_policy_user = mode == "user";
+            if (mode == "legacy") {
+                fprintf(stderr, "--kvmem-query-policy legacy has been removed; remove this option or use user\n");
+                return 1;
+            }
+            if (mode != "user") { fprintf(stderr, "invalid query policy: only user is supported\n"); return 1; }
         } else if (eq(arg, "--kvmem-mtp-state")) {
             const std::string mode = need(arg);
             if (mode != "snapshots" && mode != "auto" && mode != "replay") {
@@ -973,6 +988,9 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             st.kparams.mtp_state = mode == "replay" ? 2 : mode == "auto" ? 1 : 0;
+        } else if (eq(arg, "--kvmem-query-replay-max-tokens")) {
+            st.query_replay_max_tokens = kvmem_cli_int(arg, need(arg));
+            if (st.query_replay_max_tokens <= 0) throw std::invalid_argument("--kvmem-query-replay-max-tokens must be positive");
         } else if (eq(arg, "--kvmem-query-max-tokens")) {
             st.query_max_tokens = kvmem_cli_int(arg, need(arg));
             if (st.query_max_tokens <= 0) {
@@ -1081,6 +1099,8 @@ int main(int argc, char ** argv) {
         }
     }
     options.resolve();
+    if (options.enabled) kvmem::normalize_memory_tokens(options.budget, options.gen_reserve,
+        options.sink_tokens, options.recent_tokens, st.kparams.block_tokens, true, false);
     st.kparams.enabled = options.enabled;
     st.kparams.budget = options.budget;
     st.kparams.gen_reserve = options.gen_reserve;
@@ -1089,6 +1109,13 @@ int main(int argc, char ** argv) {
     st.kparams.lrfu_lambda = options.lrfu_lambda;
     st.kparams.lrfu_top_fraction = options.lrfu_top_fraction;
     st.kparams.score_agg = options.score_agg;
+    st.kparams.query_meanq_cosine = options.query_scorer == kvmem::QueryScorer::MeanQCosine;
+    st.kparams.graph_alpha = options.graph_alpha;
+    if (options.enabled) fprintf(stderr,"KVMEM_SCORING scorer=%s agg=%s lrfu=%d lambda=%.17g top_frac=%.17g graph_alpha=%.17g\n",
+        kvmem::query_scorer_name(options.query_scorer), options.score_agg ? "max" : "mean",
+        int(options.lrfu),options.lrfu_lambda,options.lrfu_top_fraction,options.graph_alpha);
+    if (options.enabled) fprintf(stderr,"KVMEM_LIMITS query_max_tokens=%d query_replay_max_tokens=%d\n",
+        st.query_max_tokens,st.query_replay_max_tokens);
     if (options.sessions_set && options.legacy_conversations)
         throw std::invalid_argument("--kvmem-sessions counts inactive histories; do not combine it with legacy --kvmem-conversations");
     if (options.legacy_conversations)
@@ -1322,9 +1349,11 @@ int main(int argc, char ** argv) {
         cparams.n_rs_seq = (uint32_t) std::max(0, st.spec_n_max);
     }
     std::shared_ptr<kvmem::HostKvStorage> shared_payload_storage;
+    auto shared_graph_budget=std::make_shared<kvmem::GraphStatisticsBudget>(256u<<20);
     std::shared_ptr<llama_model> shared_draft_model;
     auto initialize_lane = [&](ServerState & st) {
         kvmem_execution_scope scope(st.execution.get());
+        st.execution->graph_budget=shared_graph_budget;
         llama_kvmem_set_params(&st.kparams);
         if (options.payload_disk_bytes) {
             st.execution->payload_domains = options.parallel;
@@ -1384,8 +1413,8 @@ int main(int argc, char ** argv) {
         next->sampling_overrides = st.sampling_overrides;
         next->query_last_fallback = st.query_last_fallback;
         next->query_max_tokens = st.query_max_tokens;
+        next->query_replay_max_tokens = st.query_replay_max_tokens;
         next->query_replay_auto = st.query_replay_auto;
-        next->query_policy_user = st.query_policy_user;
         next->model_name = st.model_name;
         next->cache_type_k = st.cache_type_k;
         next->cache_type_v = st.cache_type_v;
@@ -1481,16 +1510,8 @@ int main(int argc, char ** argv) {
     httplib::Server svr;
     svr.set_read_timeout(options.timeout, 0);
     svr.set_write_timeout(options.timeout, 0);
-    const int http_workers = options.threads_http_set ?
-        (options.threads_http > 0 ? options.threads_http :
-            std::max(2 * options.parallel, std::max(5, static_cast<int>(std::thread::hardware_concurrency()) - 1))) :
-        std::max(2 * options.parallel, static_cast<int>(CPPHTTPLIB_THREAD_POOL_COUNT));
-    if (options.threads_http_set || options.parallel > 1) {
-        svr.new_task_queue = [http_workers] {
-            return new httplib::ThreadPool(http_workers, static_cast<size_t>(http_workers) + 1024);
-        };
-        kvmem_diag("KVMEM_HTTP threads=%d timeout=%d\n", http_workers, options.timeout);
-    }
+    const int http_workers = kvmem_configure_http_pool(svr, options.parallel, options.threads_http);
+    kvmem_diag("KVMEM_HTTP threads=%d max_threads=%d timeout=%d\n", http_workers, http_workers, options.timeout);
     svr.set_idle_interval(0, 100000);
     svr.set_default_headers({
         {"Access-Control-Allow-Origin", "*"},
@@ -1514,8 +1535,7 @@ int main(int argc, char ** argv) {
     std::unordered_set<std::string> ui_paths;
     if (!kvmem_mount_ui(svr, ui_dir, no_ui, argv[0], &ui_paths)) return 1;
     kvmem_install_auth(svr, options.api_keys, std::move(ui_paths));
-    const int generation_limit = st.kparams.enabled && st.kparams.gen_reserve > 0 ?
-        std::min(n_ctx, (int) st.kparams.gen_reserve) : n_ctx;
+    const int generation_limit = n_ctx;
     startup["context_actual"] = llama_n_ctx(st.ctx);
     startup["batch_actual"] = llama_n_batch(st.ctx);
     startup["ubatch_actual"] = llama_n_ubatch(st.ctx);
@@ -1523,8 +1543,9 @@ int main(int argc, char ** argv) {
     startup["threads_batch_actual"] = llama_n_threads_batch(st.ctx);
     startup["flash_attn_requested"] = llama_flash_attn_type_name(cparams.flash_attn_type);
     startup["generation_limit"] = generation_limit;
-    startup["default_max_tokens"] = std::min(st.n_predict_default > 0 ? st.n_predict_default : generation_limit, generation_limit);
+    startup["default_max_tokens"] = st.n_predict_default > 0 ? std::min(st.n_predict_default, generation_limit) : -1;
     startup["http"]["threads"] = http_workers;
+    startup["http"]["max_threads"] = http_workers;
     if (!config_sources.contains("--threads-batch") && options.threads > 0)
         startup["sources"]["--threads-batch"] = "inherited:--threads";
     if (!config_sources.contains("--ubatch-size")) startup["sources"]["--ubatch-size"] = "inherited:--batch-size";
@@ -1533,7 +1554,7 @@ int main(int argc, char ** argv) {
     const auto thinking_params = kvmem_ui_sampling(true, st.sampling_overrides);
     const auto plain_params = kvmem_ui_sampling(false, st.sampling_overrides);
     auto default_params = st.enable_thinking_default ? thinking_params : plain_params;
-    default_params["n_predict"] = std::min(st.n_predict_default > 0 ? st.n_predict_default : generation_limit, generation_limit);
+    default_params["n_predict"] = startup["default_max_tokens"];
     default_params["max_tokens"] = default_params["n_predict"];
     // 1:1 upstream /props extras (server-context.cpp get_res_props).
     // 中文：除 kvmem 扩展字段外，补齐上游 /props 的标准字段（bos/eos token、模板能力等）
@@ -1877,11 +1898,12 @@ int main(int argc, char ** argv) {
             res.set_content("{\"error\":\"empty prompt\"}", "application/json");
             return;
         }
-        if ((int) toks.size() + cr.max_tokens > (int) llama_n_ctx(st.ctx)) {
+        if (!kvmem_resolve_output_limit(generation_limit, toks.size(), cr.max_tokens, err)) {
             res.status = 400;
-            res.set_content("{\"error\":\"prompt + max_tokens exceeds n_ctx\"}", "application/json");
+            res.set_content(json{{"error", err}}.dump(), "application/json");
             return;
         }
+        monitor.update(monitor_id, {{"limit", cr.max_tokens}});
         try {
             llama_driver_validate_capacity(st, *parsed_prompt, (int) toks.size());
         } catch (const std::exception & e) {
@@ -1912,7 +1934,7 @@ int main(int argc, char ** argv) {
                 use_spec = false;
             }
         }
-        if ((st.vision || st.query_policy_user) && st.spec.ok && !use_spec) {
+        if (st.spec.ok && !use_spec) {
             res.status = 400;
             res.set_content("{\"error\":\"MTP sampler could not initialize for this request\"}", "application/json");
             return;
@@ -1981,6 +2003,12 @@ int main(int argc, char ** argv) {
             res.set_content(json{{"error", e.what()}}.dump(), "application/json"); return;
         }
         st.active_prompt = parsed_prompt;
+        const auto graph_messages=llama_driver_graph_messages(st,inputs,formatted,*parsed_prompt);
+        kvmem_diag("KVMEM_TRACE graph_messages spans=%zu structured=%zu\n",graph_messages.size(),inputs.messages.size());
+        llama_kvmem_set_graph_messages(graph_messages);
+        st.mm_root_boundary = !inputs.messages.empty() && inputs.messages.front().role == "system" && !graph_messages.empty()
+            ? graph_messages.front().end : 0;
+        st.mm_tail_boundary = graph_messages.size() >= 2 ? graph_messages[graph_messages.size()-2].begin : 0;
         st.history_input_end = uint32_t(toks.size());
         if (st.kparams.lrfu && !formatted.generation_prompt.empty() &&
             prompt.size() >= formatted.generation_prompt.size() &&
@@ -1991,20 +2019,21 @@ int main(int argc, char ** argv) {
                 std::equal(header.rbegin(), header.rend(), toks.rbegin()))
                 st.history_input_end -= uint32_t(header.size());
         }
-        st.turn_generation_rows = (uint32_t) std::min<uint64_t>(UINT32_MAX,
-                (uint64_t) std::max(0, cr.max_tokens) + (st.spec.ok ? std::max(0, st.spec_n_max) + 1u : 0u));
         int qbegin = cr.query_begin;
         int qend = cr.query_end;
         st.turn_query_exact = false;
         st.turn_last_user = cr.last_user;
+        st.turn_tool_continuation = false;
+        for (auto it = cr.msgs.rbegin(); it != cr.msgs.rend(); ++it) {
+            if (it->role == "user") break;
+            if (it->role == "tool") st.turn_tool_continuation = true;
+        }
         if (qbegin < 0 || qend < 0) {
             llama_driver_query_span(st, prompt, cr.last_user, toks, qbegin, qend);
         }
-        if (st.query_policy_user) {
-            st.turn_query_exact = cr.query_begin >= 0 && cr.query_end > cr.query_begin && cr.query_end <= (int) toks.size();
-            if (cr.query_begin < 0 && cr.query_end < 0) {
-                st.turn_query_exact = llama_driver_native_query_span(st, prompt, inputs, *parsed_prompt, qbegin, qend);
-            }
+        st.turn_query_exact = cr.query_begin >= 0 && cr.query_end > cr.query_begin && cr.query_end <= (int) toks.size();
+        if (cr.query_begin < 0 && cr.query_end < 0) {
+            st.turn_query_exact = llama_driver_native_query_span(st, prompt, inputs, *parsed_prompt, qbegin, qend);
         }
         if (parsed_prompt->has_media() && cr.query_begin < 0 && !st.turn_query_exact) {
             // The final text question follows native visual chunks and their boundaries.
@@ -2051,6 +2080,7 @@ int main(int argc, char ** argv) {
 
         const std::string request_id = kvmem_chat_request_id();
         const std::string cid = "chatcmpl-" + request_id;
+        monitor.update(monitor_id, {{"native_request_id", is_responses ? "resp_" + request_id : cid}});
         llama_context * ctx = st.ctx;
         const llama_vocab * vocab = st.vocab;
 
@@ -2091,6 +2121,7 @@ int main(int argc, char ** argv) {
             const int prompt_n = n_prompt - cache_n;
             st.progress.prefilled(cache_n);
             monitor.update(monitor_id, {{"status", "generating"}, {"cached_tokens", cache_n},
+                {"prefill_ms", prefill_ms}, {"prompt_new_tokens", prompt_n},
                 {"prefill_tps", prefill_ms > 0 ? json(1000.0 * prompt_n / prefill_ms) : json(nullptr)}});
             st.log.start_generation();
             return [timings, request_metrics, &st, &monitor, monitor_id, t_turn0, t_pf1, prefill_ms, n_prompt, prompt_n, cache_n](int n_gen, bool verbose = true, int64_t sampled_us = 0) {
@@ -2103,7 +2134,17 @@ int main(int argc, char ** argv) {
                 const double prompt_per_second = prefill_ms > 0.0 ? 1000.0 * (double) prompt_n / prefill_ms : 0.0;
                 const double predicted_per_second = gen_ms > 0.0 ? 1000.0 * (double) n_gen / gen_ms : 0.0;
                 *timings = request_metrics->stats.timings();
-                monitor.update(monitor_id, {{"generated_tokens", n_gen}, {"decode_tps", (*timings)["predicted_per_second"]}});
+                const auto & metrics = request_metrics->stats;
+                const bool live = metrics.live_sample_us > 0;
+                monitor.update(monitor_id, {{"generated_tokens", n_gen},
+                    {"decode_tps", (*timings)["predicted_per_second"]},
+                    {"decode_tps_mean", (*timings)["predicted_per_second"]},
+                    {"decode_tps_live", live ? json(metrics.live_tps) : json(nullptr)},
+                    {"decode_tps_window_ms", live ? json(metrics.live_window_us / 1000.0) : json(nullptr)},
+                    {"decode_tps_sampled_at_ms", live ? json(kvmem::monitor::now_ms() - (ggml_time_us() - metrics.live_sample_us) / 1000) : json(nullptr)},
+                    {"decode_ms", (*timings)["predicted_ms"]},
+                    {"ttft_ms", metrics.first_token ? json((metrics.native.t_prompt_last - metrics.native.t_start) / 1000.0) : json(nullptr)},
+                    {"ttft_scope", "execution"}});
                 if (!verbose) {
                     return;
                 }
@@ -2121,13 +2162,18 @@ int main(int argc, char ** argv) {
             };
         };
 
-        auto set_spec_metrics = [request_metrics, timings](const kvmem_spec_gen_stats & gst) {
+        auto set_spec_metrics = [&, request_metrics, timings, monitor_id](const kvmem_spec_gen_stats & gst) {
             auto & stats = request_metrics->stats;
             stats.native.n_draft_tokens = gst.draft_tokens;
             stats.native.n_draft_accepted = gst.accepted_tokens;
             stats.native.n_draft_verif_steps = gst.verification_steps;
             stats.accepted_per_position = gst.accepted_per_position;
             stats.speculative = gst.metrics();
+            monitor.update(monitor_id, {{"drafts_offered", gst.draft_tokens},
+                {"drafts_accepted", gst.accepted_tokens}, {"speculative", stats.speculative}});
+            if (gst.algorithm == kvmem::SpeculativeAlgorithm::Mtp)
+                monitor.update(monitor_id, {{"mtp_drafts_offered", gst.draft_tokens},
+                    {"mtp_drafts_accepted", gst.accepted_tokens}});
             *timings = stats.timings();
         };
         int n_cache_hit = 0;
@@ -2144,6 +2190,7 @@ int main(int argc, char ** argv) {
             } else if (hit_limit) {
                 finish = "length";
             }
+            monitor.update(monitor_id, {{"finish_reason", finish}});
             if (is_responses) {
                 kvmem_diag("KVMEM_TRACE chat_out n_tool_calls=%zu finish=%s content_chars=%zu reasoning_chars=%zu\n",
                         msg.tool_calls.size(), finish.c_str(),
@@ -2216,7 +2263,7 @@ int main(int argc, char ** argv) {
             auto monitor_error = std::make_shared<std::atomic<bool>>(false);
             res.set_chunked_content_provider("text/event-stream",
                 [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, formatted, stops,
-                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, request_metrics, set_spec_metrics, timings_per_token, include_usage, is_responses, monitor_error](size_t, httplib::DataSink & sink) mutable {
+                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, request_metrics, set_spec_metrics, timings_per_token, include_usage, is_responses, monitor_error, &monitor, monitor_id](size_t, httplib::DataSink & sink) mutable {
                     kvmem_execution_scope execution(st.execution.get());
                     StreamIo io;
                     io.on_prefill = [&st, request_metrics](int rows, int remaining) {
@@ -2297,6 +2344,7 @@ int main(int argc, char ** argv) {
                     kvmem_diag("KVMEM_CHAT_PREFILL ms=%.2f n_prompt=%d\n",
                             prefill_ms, (int) toks.size());
                     llama_kvmem_end_prefill_capture();
+                    llama_kvmem_attention_begin(toks.data(),uint32_t(toks.size()));
                     st.mm_live_checkpoint.reset();
                     auto emit_gen_wall = make_emit_gen_wall(t_turn0, t_pf1, prefill_ms, n_cache_hit);
 
@@ -2413,6 +2461,7 @@ int main(int argc, char ** argv) {
                             }
                             emit_gen_wall((int) gen.size());
                             llama_driver_commit(st, toks, gen);
+                            monitor.update(monitor_id, {{"finish_reason", !responses->prev.tool_calls.empty() ? "tool_calls" : (int)gen.size() >= max_tokens ? "length" : "stop"}});
                             for (const std::string & ev : kvmem_responses_stream_done(
                                          responses->state, responses->prev, request_id, st.model_name,
                                          (int) toks.size(), (int) gen.size(), n_cache_hit)) {
@@ -2432,6 +2481,7 @@ int main(int argc, char ** argv) {
                             send(stream_choice_chunk(cid, st.model_name, created, flush_deltas[i], nullptr, ts).dump());
                         }
                         const char * finish = sco.finish_reason(hit_limit);
+                        monitor.update(monitor_id, {{"finish_reason", finish}});
                         kvmem_diag("KVMEM_TRACE chat_stream n_tc_delta=%d finish=%s "
                                 "content_chars=%zu reasoning_chars=%zu\n",
                                 sco.n_tc_delta, finish,
@@ -2471,6 +2521,7 @@ int main(int argc, char ** argv) {
                         }
                         emit_gen_wall((int) gen.size());
                         llama_driver_commit(st, toks, gen);
+                        monitor.update(monitor_id, {{"finish_reason", !responses->prev.tool_calls.empty() ? "tool_calls" : (int)gen.size() >= max_tokens ? "length" : "stop"}});
                         for (const std::string & ev : kvmem_responses_stream_done(
                                      responses->state, responses->prev, request_id, st.model_name,
                                      (int) toks.size(), (int) gen.size(), n_cache_hit)) {
@@ -2490,6 +2541,7 @@ int main(int argc, char ** argv) {
                         send(stream_choice_chunk(cid, st.model_name, created, flush_deltas[i], nullptr, ts).dump());
                     }
                     const char * finish = sco.finish_reason(hit_limit);
+                    monitor.update(monitor_id, {{"finish_reason", finish}});
                     kvmem_diag("KVMEM_TRACE chat_stream n_tc_delta=%d finish=%s "
                             "content_chars=%zu reasoning_chars=%zu\n",
                             sco.n_tc_delta, finish,
@@ -2538,7 +2590,7 @@ int main(int argc, char ** argv) {
                         (int) toks.size());
                 return;
             }
-            res.status = (st.vision || st.query_policy_user) ? st.mm_error_status : 500;
+            res.status = st.mm_error_status;
             res.set_content(json{{"error", st.mm_error.empty() ? "prefill/retrieval failed" : st.mm_error}}.dump(), "application/json");
             return;
         }
@@ -2548,6 +2600,7 @@ int main(int argc, char ** argv) {
         kvmem_diag("KVMEM_CHAT_PREFILL ms=%.2f n_prompt=%d\n",
                 prefill_ms, (int) toks.size());
         llama_kvmem_end_prefill_capture();
+                    llama_kvmem_attention_begin(toks.data(),uint32_t(toks.size()));
         st.mm_live_checkpoint.reset();
         auto emit_gen_wall = make_emit_gen_wall(t_turn0, t_pf1, prefill_ms, n_cache_hit);
 

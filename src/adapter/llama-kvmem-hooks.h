@@ -10,6 +10,8 @@
 #include <stdbool.h>
 
 struct ggml_tensor;
+struct ggml_context;
+struct ggml_cgraph;
 struct ggml_backend_sched;
 
 #ifdef __cplusplus
@@ -27,7 +29,9 @@ struct llama_kvmem_params {
     bool     lrfu = false;
     double   lrfu_lambda = 0.5;
     double   lrfu_top_fraction = 0.9;
-    int32_t  score_agg = 0; // 0 folded mean, 1 max within a GQA group
+    int32_t  score_agg = 0; // mean or max within a GQA group
+    bool     query_meanq_cosine = false;
+    double   graph_alpha = 0.2;
     int32_t  query_begin;   // original token pos, -1 = unset
     int32_t  query_end;     // exclusive, -1 = end of prompt
     int32_t  force_pos;     // include block containing this orig pos; -1 = none
@@ -71,6 +75,11 @@ LLAMA_API bool llama_kvmem_eval_callback(struct ggml_tensor * t, bool ask, void 
 
 // Graph-build / post-compute capture (LLAMA_KVMEM process_ubatch hook).
 LLAMA_API void llama_kvmem_register_capture(struct ggml_tensor * t, int il, char which);
+LLAMA_API void llama_kvmem_capture_attention(struct ggml_context*,struct ggml_cgraph*,
+    struct ggml_tensor* q,struct ggml_tensor* k,struct ggml_tensor* mask,float scale,
+    float max_bias,float softcap,int layer);
+LLAMA_API void llama_kvmem_attention_begin(const llama_token* prompt,uint32_t count);
+LLAMA_API void llama_kvmem_attention_finish(bool commit);
 // is_mtp: 1 when the llama_context building this graph is the MTP draft.
 // Trunk and MTP must not clear each other's capture pending.
 LLAMA_API void llama_kvmem_capture_on_new_graph(int is_mtp);
@@ -90,8 +99,7 @@ LLAMA_API uint64_t llama_kvmem_capture_stamp(void);
 // True while prefill/query-span harvest is still allowed (retrieval, not pinned).
 // MTP verify is n>1 after pin; callers must not harvest those ubatches into raw-K.
 LLAMA_API bool llama_kvmem_want_prefill_capture(void);
-// Q capture for retrieval scoring. True for query-span ubatches before pin,
-// including replay of a cached query (T5).
+// First-pass Q capture for retrieval scoring; Query replay freezes this seed.
 LLAMA_API bool llama_kvmem_want_q_capture(uint32_t n_tokens, uint32_t n_pos,
                                           const llama_pos * pos);
 LLAMA_API void llama_kvmem_reset_query(void);
@@ -102,9 +110,7 @@ LLAMA_API void llama_kvmem_end_prefill_capture(void);
 // Start a follow-up turn that keeps the GPU prefix. Call seq_rm(n_past,-1)
 // on trunk + MTP after this; then prefill only the suffix.
 LLAMA_API void llama_kvmem_begin_cached_turn(void);
-// Same last-user continuation: keep the already-captured Q for top-k.
-LLAMA_API void llama_kvmem_begin_cached_turn_keep_query(void);
-// Same-query skip: do not recency-reselect; keep the retrieved GPU window.
+// Keep a proved resident view while appending; capacity Pressure stays enabled.
 LLAMA_API void llama_kvmem_keep_selected(void);
 // Pin after skip prefill so decode mean-K uses gen_reserve slots.
 LLAMA_API void llama_kvmem_pin_working_set(void);
@@ -199,6 +205,7 @@ LLAMA_API void llama_kvmem_dump_kv_writeback(struct llama_context * ctx, int32_t
 #include <string>
 #include <memory>
 #include "kvmem/lrfu.hpp"
+#include "kvmem/graph_recall.hpp"
 namespace kvmem { class ContentPrefix; }
 
 namespace kvmem { class SnapshotWriter; class SnapshotReader; struct SnapshotBuffer; }
@@ -246,8 +253,10 @@ struct llama_kvmem_turn_spans {
     std::vector<llama_kvmem_row_range> mandatory;
     int32_t replay_begin = 0;
 };
+LLAMA_API void llama_kvmem_set_graph_messages(const std::vector<kvmem::GraphMessageSpan>&);
 struct llama_kvmem_query_state {
-    std::vector<std::vector<float>> sum;
+    // Post-normalization/pre-RoPE token-major Q, one vector per model layer.
+    std::vector<std::vector<float>> rows;
     std::vector<uint32_t> count;
     std::shared_ptr<const kvmem::ContentPrefix> prefix;
     std::vector<llama_kvmem_row_range> ranges;
@@ -257,6 +266,11 @@ struct llama_kvmem_tail_mean_state {
     std::shared_ptr<const kvmem::ContentPrefix> prefix;
     std::vector<float> values;
     uint32_t row = 0;
+    kvmem::GraphSnapshot graph;
+    kvmem::AttentionFeedbackSnapshot feedback;
+    kvmem::OutputSampleState scope;
+    uint64_t output_begin = UINT64_MAX;
+    int32_t think_open = -1, think_close = -1;
 };
 struct llama_kvmem_attention_view {
     uint64_t epoch = 0;
@@ -272,8 +286,8 @@ struct llama_kvmem_selection {
 LLAMA_API void llama_kvmem_set_turn_spans(const llama_kvmem_turn_spans & spans);
 LLAMA_API llama_kvmem_attention_view llama_kvmem_get_attention_view();
 LLAMA_API bool llama_kvmem_can_append(uint32_t end, uint32_t generation_rows, bool all_history, std::string & reason);
-LLAMA_API llama_kvmem_selection llama_kvmem_preview_retrieval();
-LLAMA_API bool llama_kvmem_selection_fits(const llama_kvmem_selection & selection, uint32_t end, uint32_t generation_rows);
+LLAMA_API llama_kvmem_selection llama_kvmem_preview_retrieval(const llama_kvmem_tail_mean_state* prefix = nullptr);
+LLAMA_API bool llama_kvmem_selection_fits(const llama_kvmem_selection & selection, uint32_t end, uint32_t native_workspace);
 LLAMA_API bool llama_kvmem_commit_unchanged(const llama_kvmem_attention_view & view, const llama_kvmem_selection & selection);
 LLAMA_API void llama_kvmem_apply_selection(const llama_kvmem_selection & selection);
 LLAMA_API bool llama_kvmem_commit_resident(bool canonical = true);

@@ -1,5 +1,7 @@
+#include "kvmem/query_policy.hpp"
 #include "llama-kvmem-diag.h"
 #include "llama-memory-kvmem.h"
+#include "kvmem/retrieval_options.hpp"
 #include "llama-memory-kvmem-hybrid.h"
 #include "llama-memory-kvmem-mtp.h"
 
@@ -85,8 +87,13 @@ struct llama_memory_kvmem::ConvStore {
     std::unique_ptr<kvmem::RawKvStore>   raw;
     std::unique_ptr<kvmem::KvContent> content;
     std::vector<RowPosition>             row_positions;
-    std::vector<std::vector<float>>      q_sum;
+    std::vector<std::vector<float>>      q_rows;
     std::vector<uint32_t>                q_count;
+    kvmem::GraphSnapshot graph;
+    kvmem::AttentionFeedback feedback;
+    kvmem::OutputSampleState scope;
+    uint64_t output_begin=UINT64_MAX;
+    int32_t think_open=-1,think_close=-1;
     // Follower mirror, swapped in lockstep: it is keyed by the trunk's block
     // ids and is meaningless beside another conversation's store.
     std::unique_ptr<kvmem::RawKvStore>   mtp_raw;
@@ -318,7 +325,8 @@ bool llama_memory_kvmem::gdn_replay_commit(llama_context * ctx, uint32_t n_keep)
     for (const auto & group : replay.groups) {
         const auto * layers = static_cast<const ggml_cuda_gdn_replay_layer *>(ggml_backend_buffer_get_base(group->descriptors.get()));
         if (cudaSetDevice(group->device) != cudaSuccess ||
-                !ggml_backend_cuda_gdn_fold(layers, group->layers, n_keep, recr_->replay_capacity, group->stream)) {
+                !ggml_backend_cuda_gdn_fold(layers, group->layers, n_keep, recr_->replay_capacity,
+                    model_.hparams.ssm_n_group, model_.hparams.ssm_dt_rank, group->stream)) {
             ok = false;
             break;
         }
@@ -532,6 +540,9 @@ static kvmem::KvMemRuntimeConfig make_runtime_cfg(
         uint32_t recent_tokens,
         uint64_t block_bytes) {
     kvmem::KvMemRuntimeConfig cfg;
+    const auto& params = kvmem_current_execution().params;
+    kvmem::validate_query_scoring(params.query_meanq_cosine ? kvmem::QueryScorer::MeanQCosine : kvmem::QueryScorer::PageSoftmax,
+        params.score_agg,params.graph_alpha);
     cfg.store.lrfu = kvmem_current_execution().params.lrfu;
     cfg.store.lrfu_lambda = kvmem_current_execution().params.lrfu_lambda;
     cfg.store.lrfu_top_fraction = kvmem_current_execution().params.lrfu_top_fraction;
@@ -708,7 +719,8 @@ static kvmem_pool_plan kvmem_compute_pool(
             if (cparams.n_rs_seq > 0) {
                 const uint64_t state = static_cast<uint64_t>(model.hparams.n_embd_r() + model.hparams.n_embd_s()) * sizeof(float);
                 // Match the five FP32 ReplaySSM record widths in llama_memory_recurrent.
-                const uint64_t records = static_cast<uint64_t>(2048 + 6144 + 48 + 48 + 10240) *
+                const uint64_t records = (3 * uint64_t(model.hparams.ssm_n_group) * model.hparams.ssm_d_state +
+                        2 * uint64_t(model.hparams.ssm_d_inner) + 2 * uint64_t(model.hparams.ssm_dt_rank)) *
                         sizeof(float) * (1 + cparams.n_rs_seq);
                 mtp_state_bytes[dev] += kvmem_current_execution().params.mtp_state == 2 ? state + records : state * (1 + cparams.n_rs_seq);
             }
@@ -904,7 +916,11 @@ llama_memory_kvmem::llama_memory_kvmem(
             block_tokens_, pool.budget, kvmem_current_execution().params.sink_tokens, kvmem_current_execution().params.recent_tokens,
             pool.block_bytes);
     rt_cfg_.store.estimated_gpu_block_capacity = pool.cap_blocks;
+    graph_.block_tokens=block_tokens_;
+    graph_.set_budget(std::make_shared<kvmem::GraphStatisticsBudget>(32u<<20,kvmem_current_execution().graph_budget));
     score_agg_ = kvmem_current_execution().params.score_agg;
+    query_meanq_cosine_ = kvmem_current_execution().params.query_meanq_cosine;
+    graph_alpha_ = kvmem_current_execution().params.graph_alpha;
     runtime_ = std::make_unique<kvmem::KvMemRuntime>(rt_cfg_, &backend_);
 
     if (ext_kv) {
@@ -1017,7 +1033,7 @@ llama_memory_kvmem::llama_memory_kvmem(
 
     raw_ = std::make_unique<kvmem::RawKvStore>(rcfg);
     content_ = std::make_unique<kvmem::KvContent>(block_tokens_);
-    q_sum_.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
+    q_rows_.assign(n_layer_, std::vector<float>());
     q_count_.assign(n_layer_, 0);
     kvmem_capture_bind(this);
 
@@ -1083,6 +1099,11 @@ void llama_memory_kvmem::reset_turn_policy() {
 }
 
 void llama_memory_kvmem::reset_policy() {
+    auto graph_budget=graph_.budget();
+    graph_={}; graph_.block_tokens=block_tokens_;
+    if(graph_budget) graph_.set_budget(std::move(graph_budget));
+    feedback_={}; attention_scope_={}; attention_output_begin_=UINT64_MAX;
+    attention_batches_.clear(); attention_pending_batch_=UINT32_MAX;
     if (content_) content_->reset();
     evaluation_queue_.clear();
     evaluation_cursor_ = 0;
@@ -1102,14 +1123,12 @@ void llama_memory_kvmem::reset_policy() {
     reset_slots();
 }
 
-void llama_memory_kvmem::begin_cached_turn(bool reset_query) {
+void llama_memory_kvmem::begin_cached_turn() {
     harvest_flush();
     query_frozen_ = false;
     decode_mean_flush();
     decode_mean_discard();
-    if (reset_query) {
-        reset_query_acc();
-    }
+    reset_query_acc();
     retrieval_pinned_ = false;
     keep_selected_ = false;
     prefill_capture_ = true;
@@ -1191,6 +1210,11 @@ void llama_memory_kvmem::set_replay(bool replay) {
         content_->change_execution();
         if (raw_) raw_->invalidate_packed_from(begin);
         if (mtp_) mtp_->invalidate_packed_from(begin);
+        // Q stays frozen, but Mean-K must describe the final execution. The
+        // driver restored the prefix mean/graph before entering replay.
+        query_frozen_ = true;
+        retrieval_pinned_ = false;
+        prefill_capture_ = true;
     }
     replay_ = replay;
 }
@@ -1248,6 +1272,7 @@ bool llama_memory_kvmem::conv_compatible(const llama_memory_kvmem & other) const
         rt_cfg_.store.lrfu_lambda == other.rt_cfg_.store.lrfu_lambda &&
         rt_cfg_.store.lrfu_top_fraction == other.rt_cfg_.store.lrfu_top_fraction &&
         score_agg_ == other.score_agg_ &&
+        query_meanq_cosine_ == other.query_meanq_cosine_ && graph_alpha_ == other.graph_alpha_ &&
         rt_cfg_.store.select_budget == other.rt_cfg_.store.select_budget &&
         rt_cfg_.cpu_bytes == other.rt_cfg_.cpu_bytes;
 }
@@ -1262,8 +1287,10 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::make_conv() {
     conv->runtime = std::make_unique<kvmem::KvMemRuntime>(rt_cfg_);
     conv->raw = std::make_unique<kvmem::RawKvStore>(raw_cfg_);
     conv->content = std::make_unique<kvmem::KvContent>(block_tokens_);
-    conv->q_sum.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
+    conv->q_rows.assign(n_layer_, std::vector<float>());
     conv->q_count.assign(n_layer_, 0);
+    conv->graph.block_tokens=block_tokens_;
+    conv->graph.set_budget(std::make_shared<kvmem::GraphStatisticsBudget>(32u<<20,kvmem_current_execution().graph_budget));
     if (mtp_) {
         conv->mtp_raw = mtp_->make_raw();
     }
@@ -1282,8 +1309,9 @@ uint64_t llama_memory_kvmem::conv_host_bytes(const ConvStore & conv) const {
     bytes += conv.content ? conv.content->allocated_bytes() : 0;
     bytes += conv.runtime->allocated_bytes() + conv.row_positions.capacity()*sizeof(RowPosition);
     bytes += conv.q_count.capacity()*sizeof(uint32_t) + conv.resident.capacity()*sizeof(uint32_t);
-    bytes += conv.q_sum.capacity()*sizeof(std::vector<float>);
-    for (const auto & q : conv.q_sum) bytes += q.capacity()*sizeof(float);
+    bytes += conv.graph.bytes()+conv.feedback.snapshot().bytes();
+    bytes += conv.q_rows.capacity()*sizeof(std::vector<float>);
+    for (const auto & q : conv.q_rows) bytes += q.capacity()*sizeof(float);
     return bytes;
 }
 
@@ -1296,8 +1324,9 @@ uint64_t llama_memory_kvmem::host_bytes() const {
     bytes += evaluation_queue_.capacity()*sizeof(evaluation_queue_[0]);
     bytes += runtime_->allocated_bytes() + row_positions_.capacity()*sizeof(RowPosition);
     bytes += q_count_.capacity()*sizeof(uint32_t);
-    bytes += q_sum_.capacity()*sizeof(std::vector<float>);
-    for (const auto & q : q_sum_) bytes += q.capacity()*sizeof(float);
+    bytes += graph_.bytes()+feedback_.snapshot().bytes();
+    bytes += q_rows_.capacity()*sizeof(std::vector<float>);
+    for (const auto & q : q_rows_) bytes += q.capacity()*sizeof(float);
     return bytes;
 }
 uint64_t llama_memory_kvmem::payload_bytes(bool disk_only) const {
@@ -1342,7 +1371,7 @@ uint64_t llama_memory_kvmem::host_capacity(uint32_t tokens) const {
 }
 
 std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv() {
-    // Quiesce every writer of raw_, q_sum_ and the GPU cells before either
+    // Quiesce every writer of raw_, q_rows_ and the GPU cells before either
     // moves. The order matters and each step closes a different queue:
     //
     // 1. The stage-in slab is a process global holding packed K/V aimed at
@@ -1355,7 +1384,7 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
     //    is deliberately not called: it latches once per process.
     // 3. harvest_flush() waits for the harvest worker queue and both
     //    CaptureD2hPipe slots under harvest_w_->mu. That mutex is also the
-    //    release/acquire edge for the worker's last write to raw_ and q_sum_
+    //    release/acquire edge for the worker's last write to raw_ and q_rows_
     //    through this, so the wait must happen even when the pipe looks idle:
     //    skipping it is a data race on vectors that are about to be moved.
     //    The pipe itself is kept, as in the destructor's ordering; d2h_free()
@@ -1366,7 +1395,7 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
     //    ends in a raw_ mutation (truncate_to / invalidate_packed_from /
     //    clear) that waits first. A detach mutates nothing, so it waits here.
     // The harvest worker is drained, never stopped: after the wait it parks in
-    // harvest_loop() holding no reference to raw_, q_sum_ or cur_pos_.
+    // harvest_loop() holding no reference to raw_, q_rows_ or cur_pos_.
     kvmem_stagein_flush_sync(nullptr, nullptr, nullptr, nullptr);
     decode_mean_reset();
     harvest_flush();
@@ -1376,7 +1405,7 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
     }
     // The one condition that would corrupt the store being moved: a slot still
     // in flight means the worker can still call harvest_from_host() and write
-    // raw_ and q_sum_ through this. harvest_flush() rules it out, both by
+    // raw_ and q_rows_ through this. harvest_flush() rules it out, both by
     // waiting on the worker and by committing synchronously without one, so
     // this waits rather than only warning: a warning that walks into the
     // hazard it names reads as covered and is not.
@@ -1503,10 +1532,13 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
         conv->mtp_raw = mtp_->swap_raw(nullptr);
     }
     conv->row_positions = std::move(row_positions_);
-    conv->q_sum = std::move(q_sum_);
+    conv->q_rows = std::move(q_rows_);
     conv->q_count = std::move(q_count_);
+    conv->graph=std::move(graph_); conv->feedback=std::move(feedback_);
+    conv->scope=attention_scope_; conv->output_begin=attention_output_begin_;
+    conv->think_open=attention_think_open_; conv->think_close=attention_think_close_;
     row_positions_.clear();
-    q_sum_.clear();
+    q_rows_.clear();
     q_count_.clear();
     reset_turn_policy();
     return conv;
@@ -1532,11 +1564,15 @@ bool llama_memory_kvmem::attach_conv(std::unique_ptr<ConvStore> conv) {
     evaluation_queue_.clear();
     evaluation_cursor_ = 0;
     row_positions_ = std::move(conv->row_positions);
-    q_sum_ = std::move(conv->q_sum);
+    q_rows_ = std::move(conv->q_rows);
     q_count_ = std::move(conv->q_count);
+    graph_=std::move(conv->graph); feedback_=std::move(conv->feedback);
+    attention_scope_=conv->scope; attention_output_begin_=conv->output_begin;
+    attention_think_open_=conv->think_open; attention_think_close_=conv->think_close;
+    attention_batches_.clear(); attention_pending_batch_=UINT32_MAX;
     runtime_->rebind_backend(&backend_);
-    if (q_sum_.size() != n_layer_ || q_count_.size() != n_layer_) {
-        q_sum_.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
+    if (q_rows_.size() != n_layer_ || q_count_.size() != n_layer_) {
+        q_rows_.assign(n_layer_, std::vector<float>());
         q_count_.assign(n_layer_, 0);
     }
     if (mtp_) {
@@ -2417,25 +2453,16 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
     }
 
     const uint32_t budget_blocks = store.prefill_budget_blocks();
-    bool need_offload = false;
-    // After retrieval the host store still holds every historical block, so
-    // block_count() > budget is true and a recency pressure reselect would
-    // drop the resurrected needle on the first generated token. Pin the
-    // working set and place decode tokens into gen_reserve slots.
-    if (!retrieval_pinned_ && !keep_selected_) {
-        try {
-            if (native_contract_supported()) {
-                need_offload = store.prefill_needs_offload(resident_tokens(), n_new_tokens, kv_size_);
-            } else {
-                need_offload = runtime_->maybe_offload_native_during_prefill(
-                        n_new_tokens, resident_tokens(), kv_size_, incoming);
-            }
-        } catch (const std::exception & e) {
-            LLAMA_LOG_ERROR("%s: KVMem reselect failed: %s\n", __func__, e.what());
-            if (content_->stamp().valid) { runtime_->truncate_to(t0); content_->truncate(t0); }
-            return false;
+    std::vector<uint32_t> candidates;
+    std::vector<uint64_t> starts;
+    uint32_t needed_slots=0;
+    for(const auto& block:store.blocks()) {
+        if(block.gpu_slot>=0 || std::binary_search(incoming.begin(),incoming.end(),block.block_id)) {
+            candidates.push_back(block.block_id); starts.push_back(block.orig_pos_start); ++needed_slots;
         }
     }
+    const bool need_offload=needed_slots>n_slots_ ||
+        resident_tokens()>store.gpu_high_watermark_tokens(kv_size_);
 
     if (trace_) {
         kvmem_diag("KVMEM_TRACE append n=%u total=%u resident=%u incoming_blocks=%zu "
@@ -2447,13 +2474,18 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
 
     if (need_offload) {
         try {
-            if (native_contract_supported()) {
-                run_native_transaction(store.pick_prefill_pressure_blocks(incoming), NativePurpose::Pressure);
-            } else {
-                const auto & prepared = runtime_->last_native_plan();
-                trace_plan("prefill_pressure", prepared);
-                apply_plan_to_kv(prepared);
+            const auto fixed=store.query_fixed_blocks(incoming);
+            // Fixed sink/recent/media pages are already resident, apart from the new append.
+            for(auto id:fixed) if(!std::binary_search(candidates.begin(),candidates.end(),id))
+                throw std::runtime_error("KVMem pressure would recall a cold mandatory page");
+            const auto selected=store.pick_scored_blocks(candidates,feedback_.pressure_scores(starts),fixed,budget_blocks);
+            if(native_contract_supported()) run_native_transaction(selected,NativePurpose::Pressure);
+            else {
+                const auto plan=runtime_->prepare_native_selection(selected);
+                trace_plan("attention_pressure",plan); apply_plan_to_kv(plan);
             }
+            kvmem_diag("KVMEM_PRESSURE phase=%s logical=%u candidates=%zu selected=%zu graph=0\n",
+                retrieval_pinned_?"decode":"prefill",t0,candidates.size(),selected.size());
             const auto & plan = runtime_->last_native_plan();
             if (perf_.enabled) {
                 perf_.n_pressure += 1;
@@ -2471,8 +2503,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
             }
             const int32_t slot = alloc_slot();
             if (slot < 0) {
-                // Pinned retrieval will not evict the working set. gen_reserve
-                // exhaustion is a known v1 limit (see docs/architecture.md).
+                // Pressure above must reserve every incoming page before publication.
                 LLAMA_LOG_ERROR("%s: no free GPU slot for block %u\n", __func__, id);
                 if (content_->stamp().valid) { runtime_->truncate_to(t0); content_->truncate(t0); }
                 return false;
@@ -2553,6 +2584,7 @@ bool llama_memory_kvmem::prepare_ubatches(
         if (!p.empty()) evaluation_queue_.push_back({(uint32_t) p.front(), (uint32_t) p.back() + 1});
         pos_queue_.push_back(std::move(p));
     }
+    prepare_attention_batches(ubatches);
     return true;
 }
 
@@ -2622,16 +2654,8 @@ bool llama_memory_kvmem::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1)
         // incarnation. Drain writers before discarding either half of the store.
         harvest_flush();
         harvest_gpu_v_commit();
-        raw_->clear();
         if (mtp_) mtp_->truncate_cached(0);
-        runtime_->truncate_to(0);
-        content_->reset();
-        row_positions_.clear();
-        evaluation_queue_.clear();
-        evaluation_cursor_ = 0;
-        host_mirror_stale_ = false;
-        reset_slots();
-        retrieval_pinned_ = false;
+        reset_policy();
     }
     return true;
 }
@@ -2696,6 +2720,7 @@ void llama_memory_kvmem::register_capture(ggml_tensor * t, int il, char which) {
 }
 
 void llama_memory_kvmem::capture_on_new_graph() {
+    attention_captures_.clear();
     pending_capture_.clear();
     graph_has_q_ = false;
     graph_has_k_ = false;
@@ -3296,6 +3321,14 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
 }
 
 void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
+    if(evaluation_cursor_<evaluation_queue_.size()) {
+        const auto span=evaluation_queue_[evaluation_cursor_];
+        if(speculative_evaluation_) {
+            if(attention_pending_batch_!=UINT32_MAX)
+                throw std::runtime_error("KVMem speculative attention spans multiple unfinished forwards");
+            attention_pending_batch_=uint32_t(evaluation_cursor_);
+        } else observe_attention(uint32_t(evaluation_cursor_),span.second-span.first,sched);
+    }
     harvest_pending_impl(sched);
     if (evaluation_cursor_ < evaluation_queue_.size()) {
         const auto span = evaluation_queue_[evaluation_cursor_++];
@@ -3425,13 +3458,13 @@ void llama_memory_kvmem::reset_query_acc() {
     // resize can throw between the two; reset_policy() calls this to make the
     // object usable again, and score_retrieval() and get_query() index
     // q_count_ over 0..n_layer_-1 with no size guard.
-    if (q_sum_.size() != n_layer_ || q_count_.size() != n_layer_) {
-        q_sum_.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
+    if (q_rows_.size() != n_layer_ || q_count_.size() != n_layer_) {
+        q_rows_.assign(n_layer_, std::vector<float>());
         q_count_.assign(n_layer_, 0);
         return;
     }
-    for (auto & s : q_sum_) {
-        std::fill(s.begin(), s.end(), 0.0f);
+    for (auto & s : q_rows_) {
+        s.clear();
     }
     std::fill(q_count_.begin(), q_count_.end(), 0);
 }
@@ -3514,10 +3547,10 @@ void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * h
         return;
     }
     // The worker calls this through `this`, and a store swap moves raw_ and
-    // q_sum_ out and back in. detach_conv() drains the pipe first, so the
+    // q_rows_ out and back in. detach_conv() drains the pipe first, so the
     // window is not reachable today; guard it anyway, because the alternative
     // is a null dereference and an out-of-range write on an empty vector.
-    if (!raw_ || q_sum_.size() != n_layer_ || q_count_.size() != n_layer_) {
+    if (!raw_ || q_rows_.size() != n_layer_ || q_count_.size() != n_layer_) {
         return;
     }
     const uint32_t n = static_cast<uint32_t>(cur_pos_.size());
@@ -3545,11 +3578,9 @@ void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * h
         }
         for (uint32_t i = 0; i < n; ++i) {
             if (!query_contains(cur_pos_[i])) continue;
-            float * dst = q_sum_[static_cast<uint32_t>(il)].data();
             const float * src = flat.data() + i * qdim;
-            for (uint32_t d0 = 0; d0 < qdim; ++d0) {
-                dst[d0] += src[d0];
-            }
+            auto& rows = q_rows_[static_cast<uint32_t>(il)];
+            rows.insert(rows.end(), src, src + qdim);
             q_count_[static_cast<uint32_t>(il)]++;
         }
     }
@@ -3596,11 +3627,9 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
         }
         for (uint32_t i = 0; i < n; ++i) {
             if (!query_contains(cur_pos_[i])) continue;
-            float * dst = q_sum_[static_cast<uint32_t>(il)].data();
             const float * src = flat.data() + i * qdim;
-            for (uint32_t d = 0; d < qdim; ++d) {
-                dst[d] += src[d];
-            }
+            auto& rows = q_rows_[static_cast<uint32_t>(il)];
+            rows.insert(rows.end(), src, src + qdim);
             q_count_[static_cast<uint32_t>(il)]++;
         }
     }
@@ -4058,6 +4087,10 @@ bool llama_memory_kvmem::commit_speculative(llama_context * ctx, uint32_t n_keep
         return false;
     }
     try {
+        if(attention_pending_batch_!=UINT32_MAX) {
+            observe_attention(attention_pending_batch_,n_keep,nullptr);
+            attention_pending_batch_=UINT32_MAX;
+        }
         decode_mean_commit(n_keep);
         return true;
     } catch (...) {
@@ -4317,14 +4350,55 @@ void llama_memory_kvmem::copy_gpu_block_from_host(uint32_t block_id, int32_t gpu
     }
 }
 
-void llama_memory_kvmem::score_retrieval() {
-    std::vector<float> query;
-    query.reserve(size_t(n_layer_) * n_head_ * n_embd_head_);
-    for (const auto & layer : q_sum_) query.insert(query.end(), layer.begin(), layer.end());
-    runtime_->store().set_retrieval_scores(kvmem::mean_key_retrieval_scores(*raw_,
-        runtime_->store().block_count(), {query.data(), q_count_.data(), n_layer_,
-            n_embd_head_, n_head_, n_head_kv_, kvmem_current_execution().params.score_agg == 1
-                ? kvmem::GqaScoreAggregation::Max : kvmem::GqaScoreAggregation::Mean}));
+void llama_memory_kvmem::score_retrieval(const llama_kvmem_tail_mean_state* prefix) {
+    graph_.set_messages(request_graph_messages_);
+    const auto rows=*std::max_element(q_count_.begin(),q_count_.end());
+    if(!rows) return;
+    std::vector<const float*> layers(n_layer_);
+    for(uint32_t il=0;il<n_layer_;++il) {
+        if(q_rows_[il].size()!=size_t(q_count_[il])*n_head_*n_embd_head_)
+            throw std::runtime_error("KVMem Query row coverage mismatch");
+        layers[il]=q_rows_[il].data();
+    }
+    const auto& policy=store();
+    const auto& config=policy.config();
+    const auto frontier = prefix ? prefix->row : policy.total_tokens();
+    auto fixed = prefix ? retrieval_prefix_mandatory(frontier) : policy.query_fixed_blocks(retrieval_mandatory());
+    auto frame=kvmem::query_score_frame(frontier,block_tokens_,policy.budget_blocks(),
+        config.sink_blocks,config.recent_blocks,fixed);
+    kvmem::PageQueryView query{nullptr,q_count_.data(),n_layer_,rows,n_head_,n_head_kv_,n_embd_head_,layers.data()};
+    std::vector<double> scores;
+    // Only the boundary page can have grown during the probe. Restore its
+    // prefix mean temporarily; native KV and persistent statistics stay intact.
+    const auto previous = prefix ? raw_->mean_checkpoint(frontier) : std::vector<float>{};
+    if (prefix) raw_->restore_mean_checkpoint(frontier,prefix->values);
+    try {
+        const auto aggregation = score_agg_ ? kvmem::GqaScoreAggregation::Max : kvmem::GqaScoreAggregation::Mean;
+        if (query_meanq_cosine_) {
+            scores=kvmem::mean_query_cosine_scores(*raw_,query,uint32_t(frame.starts.size()),aggregation);
+        } else {
+#ifdef KVMEM_PAGE_SOFTMAX_CUDA
+            if(!query_scorer_) {
+                int device=0;
+                if(cudaGetDevice(&device)!=cudaSuccess) throw std::runtime_error("KVMem Query CUDA device unavailable");
+                query_scorer_=std::make_unique<kvmem::PageSoftmaxCuda>(device);
+            }
+            scores=query_scorer_->score(*raw_,query,frame,aggregation);
+#else
+            scores=kvmem::page_softmax_scores(*raw_,query,frame,aggregation);
+#endif
+        }
+        if (graph_alpha_ > 0)
+            scores=kvmem::propagate_query_scores(scores,frame,prefix ? prefix->graph : graph_,graph_alpha_);
+    } catch (...) {
+        if (prefix) raw_->restore_mean_checkpoint(frontier,previous);
+        throw;
+    }
+    if (prefix) raw_->restore_mean_checkpoint(frontier,previous);
+    runtime_->store().set_retrieval_scores(scores);
+    kvmem_diag("KVMEM_QUERY scorer=%s agg=%s lrfu=%d graph_alpha=%.6g rows=%u blocks=%zu\n",
+        query_meanq_cosine_ ? "meanq-cosine" : "page-softmax",score_agg_ ? "max" : "mean",
+        int(config.lrfu),graph_alpha_,rows,scores.size());
 }
 
 void llama_memory_kvmem::accept_retrieval_round() {
@@ -4449,7 +4523,9 @@ bool llama_memory_kvmem::can_append(uint32_t end, uint32_t generation_rows, bool
     if (view.rows % block_tokens_ && !gpu_kv_complete(view.rows / block_tokens_, kv_)) return fail("partial_tail_missing");
     if (all_history) {
         if (view.blocks.size() != s.block_count()) return fail("history_not_resident");
-        if (s.budget_blocks() && end_blocks > s.budget_blocks()) return fail("selection_budget");
+        // B is the historical selection target, not a reason to replay a
+        // complete native view that still fits the B+R append workspace.
+        if (end_blocks > n_slots_) return fail("device_capacity");
         if (s.prefill_needs_offload(resident_tokens(), end - view.rows, kv_size_)) return fail("prefill_pressure");
     }
     const uint64_t final_blocks = ((uint64_t) end + generation_rows + block_tokens_ - 1) / block_tokens_;
@@ -4484,19 +4560,46 @@ std::vector<uint32_t> llama_memory_kvmem::retrieval_mandatory() const {
     return mandatory;
 }
 
-llama_kvmem_selection llama_memory_kvmem::preview_retrieval() {
+std::vector<uint32_t> llama_memory_kvmem::retrieval_prefix_mandatory(uint32_t frontier) const {
+    const auto& policy=store();
+    auto fixed=policy.query_fixed_blocks({});
+    const auto pages=(frontier+block_tokens_-1)/block_tokens_;
+    for(auto id:retrieval_mandatory()) if(id<pages) fixed.push_back(id);
+    return kvmem::query_prefix_required(frontier,block_tokens_,policy.config().sink_blocks,
+        policy.config().recent_blocks,fixed);
+}
+
+llama_kvmem_selection llama_memory_kvmem::preview_retrieval(const llama_kvmem_tail_mean_state* prefix) {
     const int64_t t0 = ggml_time_us();
     const bool enabled = retr_.enabled;
     retr_ = RetrPerf{};
     retr_.enabled = enabled;
     harvest_flush();
     const int64_t t1 = ggml_time_us();
-    if (method_ == 1) score_retrieval();
+    if (prefix && !tail_mean_valid(prefix->row,*prefix))
+        throw std::runtime_error("stale Query score prefix");
+    if (method_ == 1) score_retrieval(prefix);
     const int64_t t2 = ggml_time_us();
     llama_kvmem_selection selection;
     selection.epoch = attention_epoch_;
     selection.rows = store_n_tokens();
-    selection.blocks = runtime_->preview_reselect(retrieval_mandatory());
+    if (prefix && method_==1) {
+        const auto& policy=store();
+        const auto pages=(prefix->row+block_tokens_-1)/block_tokens_;
+        const auto required=retrieval_prefix_mandatory(prefix->row);
+        std::vector<uint32_t> candidates;
+        std::vector<double> scores;
+        for(uint32_t id=0;id<pages;++id) {candidates.push_back(id);scores.push_back(policy.selection_score(id));}
+        selection.blocks=policy.pick_scored_blocks(candidates,scores,required,policy.budget_blocks(),true);
+        // These rows are append workspace, not additional historical recall.
+        for(auto id=prefix->row/block_tokens_; id<(selection.rows+block_tokens_-1)/block_tokens_; ++id)
+            selection.blocks.push_back(id);
+        std::sort(selection.blocks.begin(),selection.blocks.end());
+        selection.blocks.erase(std::unique(selection.blocks.begin(),selection.blocks.end()),selection.blocks.end());
+    } else {
+        selection.blocks = method_==1 ? store().pick_graph_blocks(retrieval_mandatory()) :
+            runtime_->preview_reselect(retrieval_mandatory());
+    }
     if (enabled) {
         retr_.flush_us = t1 - t0;
         retr_.score_us = t2 - t1;
@@ -4506,14 +4609,16 @@ llama_kvmem_selection llama_memory_kvmem::preview_retrieval() {
     return selection;
 }
 
-bool llama_memory_kvmem::selection_fits(const llama_kvmem_selection & selection, uint32_t end, uint32_t generation_rows) const {
+bool llama_memory_kvmem::selection_fits(const llama_kvmem_selection & selection, uint32_t end, uint32_t native_workspace) const {
     if (selection.epoch != attention_epoch_ || selection.rows != store_n_tokens() || end < selection.rows) return false;
     // The selector can trim mandatory ranges to its budget. Such a plan is
     // unsuitable for continuation even if it fits the physical slot pool.
     for (uint32_t id : retrieval_mandatory()) {
         if (!std::binary_search(selection.blocks.begin(), selection.blocks.end(), id)) return false;
     }
-    const uint64_t final = ((uint64_t) end + generation_rows + block_tokens_ - 1) / block_tokens_;
+    // Check only the immediate native draft workspace. Future output can
+    // trigger DecodePressure and is not reserved in this replay transaction.
+    const uint64_t final = ((uint64_t) end + native_workspace + block_tokens_ - 1) / block_tokens_;
     const uint64_t first = selection.rows / block_tokens_;
     if (final < first || final - first > n_slots_) return false;
     uint64_t count = selection.blocks.size();
@@ -4554,7 +4659,7 @@ bool llama_memory_kvmem::get_query(llama_kvmem_query_state & state) {
         any = true;
     }
     if (!any) return false;
-    state.sum = q_sum_;
+    state.rows = q_rows_;
     state.count = q_count_;
     state.ranges = explicit_spans_ ? turn_spans_.query :
         std::vector<llama_kvmem_row_range>{{query_begin_, query_end_}};
@@ -4575,11 +4680,11 @@ bool llama_memory_kvmem::set_query(const llama_kvmem_query_state & state) {
     if (state.ranges.size() != ranges.size()) return false;
     for (size_t i = 0; i < ranges.size(); ++i)
         if (ranges[i].begin != state.ranges[i].begin || ranges[i].end != state.ranges[i].end) return false;
-    if (state.sum.size() != n_layer_ || state.count.size() != n_layer_) return false;
+    if (state.rows.size() != n_layer_ || state.count.size() != n_layer_) return false;
     uint32_t rows = 0;
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        const auto & v = state.sum[il];
-        if (v.size() != n_head_ * n_embd_head_ ||
+        const auto & v = state.rows[il];
+        if (v.size() != size_t(state.count[il]) * n_head_ * n_embd_head_ ||
                 !std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); })) return false;
         if (!kvmem_cache_has_layer(kv_, il)) continue;
         if (!state.count[il] || (rows && rows != state.count[il])) return false;
@@ -4587,7 +4692,7 @@ bool llama_memory_kvmem::set_query(const llama_kvmem_query_state & state) {
     }
     if (!rows) return false;
     harvest_flush();
-    q_sum_ = state.sum;
+    q_rows_ = state.rows;
     q_count_ = state.count;
     query_frozen_ = true;
     return true;
@@ -4602,11 +4707,16 @@ bool llama_memory_kvmem::get_tail_mean(uint32_t row, llama_kvmem_tail_mean_state
     state.prefix = content_->prefix(row);
     state.values = raw_->mean_checkpoint(row);
     state.history = runtime_->store().retrieval_checkpoint();
+    if(graph_.accepted_through!=row) return false;
+    state.graph=graph_; state.feedback=feedback_.snapshot(); state.scope=attention_scope_;
+    state.output_begin=attention_output_begin_;
+    state.think_open=attention_think_open_; state.think_close=attention_think_close_;
     return tail_mean_valid(row, state);
 }
 
 bool llama_memory_kvmem::tail_mean_valid(uint32_t row, const llama_kvmem_tail_mean_state & state) const {
-    if (state.row != row || !content_->contains(state.prefix) || state.prefix->frontier() != row) return false;
+    if (state.row != row || !content_->contains(state.prefix) || state.prefix->frontier() != row ||
+        state.graph.accepted_through!=row || state.graph.block_tokens!=block_tokens_) return false;
     const auto & values = state.values;
     if (row % block_tokens_ == 0) return values.empty();
     const size_t stride = 1 + n_embd_k_;
@@ -4622,7 +4732,13 @@ bool llama_memory_kvmem::tail_mean_valid(uint32_t row, const llama_kvmem_tail_me
 bool llama_memory_kvmem::set_tail_mean(uint32_t row, const llama_kvmem_tail_mean_state & state) {
     if (!tail_mean_valid(row, state) || speculative_evaluation_ || decode_mean_n_ != 0) return false;
     harvest_flush();
+    auto graph=state.graph;
+    auto feedback=feedback_; feedback.restore(state.feedback);
     raw_->restore_mean_checkpoint(row, state.values);
+    graph_=std::move(graph); ++graph_.epoch; feedback_=std::move(feedback);
+    attention_scope_=state.scope; attention_output_begin_=state.output_begin;
+    attention_think_open_=state.think_open; attention_think_close_=state.think_close;
+    attention_batches_.clear(); attention_pending_batch_=UINT32_MAX;
     return true;
 }
 
@@ -5143,13 +5259,7 @@ kvmem::LrfuState llama_kvmem_get_history() {
 
 void llama_kvmem_begin_cached_turn(void) {
     if (llama_memory_kvmem * mem = kvmem_capture_active()) {
-        mem->begin_cached_turn(true);
-    }
-}
-
-void llama_kvmem_begin_cached_turn_keep_query(void) {
-    if (llama_memory_kvmem * mem = kvmem_capture_active()) {
-        mem->begin_cached_turn(false);
+        mem->begin_cached_turn();
     }
 }
 
@@ -5222,13 +5332,13 @@ bool llama_kvmem_can_append(uint32_t end, uint32_t generation_rows, bool all_his
     return false;
 }
 
-llama_kvmem_selection llama_kvmem_preview_retrieval() {
-    if (auto * mem = kvmem_capture_active()) return mem->preview_retrieval();
+llama_kvmem_selection llama_kvmem_preview_retrieval(const llama_kvmem_tail_mean_state* prefix) {
+    if (auto * mem = kvmem_capture_active()) return mem->preview_retrieval(prefix);
     return {};
 }
 
-bool llama_kvmem_selection_fits(const llama_kvmem_selection & selection, uint32_t end, uint32_t generation_rows) {
-    if (auto * mem = kvmem_capture_active()) return mem->selection_fits(selection, end, generation_rows);
+bool llama_kvmem_selection_fits(const llama_kvmem_selection & selection, uint32_t end, uint32_t native_workspace) {
+    if (auto * mem = kvmem_capture_active()) return mem->selection_fits(selection, end, native_workspace);
     return false;
 }
 
@@ -5376,7 +5486,11 @@ void llama_kvmem_store_bundle_reset(llama_kvmem_store_bundle * bundle) {
     store.row_positions.clear();
     store.resident.clear();
     store.cold = false;
-    for (auto & sum : store.q_sum) std::fill(sum.begin(), sum.end(), 0.0f);
+    auto graph_budget=store.graph.budget();
+    store.graph={};store.graph.block_tokens=store.runtime->store().config().block_tokens;
+    if(graph_budget) store.graph.set_budget(std::move(graph_budget));
+    store.feedback={};store.scope={};store.output_begin=UINT64_MAX;
+    for (auto & sum : store.q_rows) sum.clear();
     std::fill(store.q_count.begin(), store.q_count.end(), 0);
 }
 
@@ -5393,7 +5507,8 @@ uint64_t llama_kvmem_store_bundle_bytes(const llama_kvmem_store_bundle * bundle)
     bytes += store.mtp_raw ? store.mtp_raw->allocated_bytes() : 0;
     bytes += store.row_positions.capacity()*sizeof(store.row_positions.front());
     bytes += store.resident.capacity()*sizeof(uint32_t) + store.q_count.capacity()*sizeof(uint32_t);
-    for (const auto & sum : store.q_sum) bytes += sizeof(sum) + sum.capacity()*sizeof(float);
+    for (const auto & sum : store.q_rows) bytes += sizeof(sum) + sum.capacity()*sizeof(float);
+    bytes+=store.graph.bytes()+store.feedback.snapshot().bytes();
     return bytes;
 }
 

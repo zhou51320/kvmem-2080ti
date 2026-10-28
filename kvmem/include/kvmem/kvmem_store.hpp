@@ -334,6 +334,10 @@ public:
     }
 
     const KvMemStoreConfig &config() const { return cfg_; }
+    std::vector<uint32_t> query_fixed_blocks(const std::vector<uint32_t>& mandatory) const;
+    std::vector<uint32_t> pick_graph_blocks(const std::vector<uint32_t>& mandatory) const;
+    std::vector<uint32_t> pick_scored_blocks(const std::vector<uint32_t>& candidates,
+        const std::vector<double>& scores,const std::vector<uint32_t>& mandatory,uint32_t budget, bool signed_scores = false) const;
     uint32_t block_count() const { return static_cast<uint32_t>(blocks_.size()); }
     uint32_t total_tokens() const { return total_tokens_; }
     const std::vector<KvMemBlock> &blocks() const { return blocks_; }

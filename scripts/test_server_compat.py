@@ -205,7 +205,7 @@ try:
                     status, body = request('/props', headers=headers)
                     props = json.loads(body)
                     check('default output has no 128-token cap', status == 200 and
-                          props['default_generation_settings']['params']['n_predict'] == (2048 if a.mtp else 8192))
+                          props['default_generation_settings']['params']['n_predict'] == (2048 if a.mtp else -1))
                     check('authorized malformed JSON', request('/v1/chat/completions', b'not-json', headers)[0] == 400)
                     questions = [('What is 2+3? Answer with the number only.', '5'),
                                  ('中国的首都是哪里？只回答城市名。', '北京')]

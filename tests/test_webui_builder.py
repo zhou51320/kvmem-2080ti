@@ -8,6 +8,16 @@ builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
 class BuilderTest(unittest.TestCase):
+    def test_built_icons_must_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output / 'index.html').write_text('<link rel="icon" href="./favicon.svg"><link rel="apple-touch-icon" href="touch.png">')
+            with self.assertRaisesRegex(ValueError, 'missing icon'): builder.validate_icons(output)
+            (output / 'favicon.svg').write_text('<svg/>')
+            with self.assertRaisesRegex(ValueError, 'touch.png'): builder.validate_icons(output)
+            (output / 'touch.png').write_bytes(b'fixture')
+            builder.validate_icons(output)
+
     def test_monitor_packaging_preserves_chat_and_includes_licenses(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)
@@ -15,7 +25,7 @@ class BuilderTest(unittest.TestCase):
             builder.copy_monitor(output)
             self.assertEqual((output / 'index.html').read_text(), 'existing chat')
             for name in ('index.html', 'monitor.js', 'monitor.css', 'launcher.js', 'launcher.css', 'i18n.js', 'Strata-LICENSE.txt',
-                         'Outfit-OFL.txt', 'outfit-latin-wght.woff2'):
+                         'Outfit-OFL.txt', 'outfit-latin-wght.woff2', 'logs.js', 'logs.css'):
                 self.assertTrue((output / 'monitor' / name).is_file())
             self.assertTrue((output / 'monitor-build.json').is_file())
 
